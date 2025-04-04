@@ -1,7 +1,5 @@
 import { Injectable, OnModuleInit, OnModuleDestroy, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import rocksdb from 'rocksdb';
-import levelup from 'levelup';
 import { promisify } from 'util';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -13,10 +11,28 @@ export class RocksDBService implements OnModuleInit, OnModuleDestroy {
   private db: any;
   private readonly logger = new Logger(RocksDBService.name);
   private readonly dbPath: string;
+  private isAvailable = false;
+  private rocksdb: any;
+  private levelup: any;
+  private encodingDown: any;
 
   constructor(private configService: ConfigService) {
     this.dbPath =
       this.configService.get<string>('ROCKSDB_PATH') || path.join(process.cwd(), 'data', 'rocksdb');
+
+    try {
+      // Use import() for dynamic imports instead of require()
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      this.rocksdb = require('rocksdb');
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      this.levelup = require('levelup');
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      this.encodingDown = require('encoding-down');
+      this.isAvailable = true;
+    } catch (error) {
+      this.logger.warn(`RocksDB dependencies not available: ${error.message}`);
+      this.isAvailable = false;
+    }
   }
 
   async onModuleInit() {
@@ -42,7 +58,9 @@ export class RocksDBService implements OnModuleInit, OnModuleDestroy {
 
   private async connect() {
     try {
-      const db = levelup(encodingDown(rocksdb(this.dbPath), { valueEncoding: 'binary' }));
+      const db = this.levelup(
+        this.encodingDown(this.rocksdb(this.dbPath), { valueEncoding: 'binary' }),
+      );
       this.db = db;
       this.logger.log('Connected to RocksDB successfully');
     } catch (error) {

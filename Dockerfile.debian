@@ -1,0 +1,64 @@
+# Stage 1: Build stage
+FROM node:20-slim AS build
+
+WORKDIR /usr/src/app
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y \
+    python3 \
+    make \
+    g++ \
+    git
+
+# Set Python path for node-gyp
+ENV PYTHON=/usr/bin/python3
+
+# Copy package files
+COPY package*.json ./
+
+# Install dependencies
+RUN npm ci
+
+# Copy source code
+COPY . .
+
+# Build the application
+RUN npm run build
+
+# Stage 2: Production stage
+FROM node:20-slim AS production
+
+WORKDIR /usr/src/app
+
+# Install Python and wget for production
+RUN apt-get update && apt-get install -y \
+    python3 \
+    make \
+    g++ \
+    wget
+
+# Set Python path for node-gyp
+ENV PYTHON=/usr/bin/python3
+
+# Copy package files
+COPY package*.json ./
+
+# Install production dependencies
+RUN npm ci --only=production
+
+# Copy built application from build stage
+COPY --from=build /usr/src/app/dist ./dist
+
+# Create data directories with proper permissions
+RUN mkdir -p /usr/src/app/data/rocksdb && \
+    chmod -R 777 /usr/src/app/data
+
+# Expose application port
+EXPOSE 3000
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
+    CMD wget -qO- http://localhost:3000/health || exit 1
+
+# Start the application
+CMD ["node", "dist/main"] 
