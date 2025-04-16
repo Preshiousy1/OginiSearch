@@ -4,6 +4,9 @@ import { MongoMemoryServer } from 'mongodb-memory-server';
 import { DocumentStorageService } from './document-storage.service';
 import { DocumentRepository } from '../mongodb/repositories/document.repository';
 import { SourceDocument, SourceDocumentSchema } from '../mongodb/schemas/document.schema';
+import { ConfigModule, ConfigService } from '@nestjs/config';
+import { RocksDBService } from '../rocksdb/rocksdb.service';
+import { SchemaVersionManagerService } from '../../schema/schema-version-manager.service';
 
 describe('DocumentStorageService', () => {
   let service: DocumentStorageService;
@@ -14,12 +17,41 @@ describe('DocumentStorageService', () => {
     mongod = await MongoMemoryServer.create();
     const uri = mongod.getUri();
 
+    // Create mock for RocksDBService
+    const mockRocksDBService = {
+      get: jest.fn(),
+      put: jest.fn(),
+      delete: jest.fn(),
+      getByPrefix: jest.fn().mockResolvedValue([]),
+    };
+
+    // Create mock for SchemaVersionManagerService
+    const mockSchemaVersionManager = {
+      validateDocument: jest.fn().mockResolvedValue({ valid: true }),
+      getSchema: jest.fn().mockResolvedValue({ name: 'test', version: 1 }),
+    };
+
     const module: TestingModule = await Test.createTestingModule({
       imports: [
+        // Add ConfigModule with a factory to provide the values needed by RocksDBService
+        ConfigModule.forRoot({
+          isGlobal: true,
+        }),
         MongooseModule.forRoot(uri),
         MongooseModule.forFeature([{ name: SourceDocument.name, schema: SourceDocumentSchema }]),
       ],
-      providers: [DocumentStorageService, DocumentRepository],
+      providers: [
+        DocumentStorageService,
+        DocumentRepository,
+        {
+          provide: RocksDBService,
+          useValue: mockRocksDBService,
+        },
+        {
+          provide: SchemaVersionManagerService,
+          useValue: mockSchemaVersionManager,
+        },
+      ],
     }).compile();
 
     service = module.get<DocumentStorageService>(DocumentStorageService);

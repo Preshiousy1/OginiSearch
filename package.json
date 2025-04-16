@@ -30,9 +30,11 @@
     "@nestjs/core": "^11.0.13",
     "@nestjs/mongoose": "^11.0.3",
     "@nestjs/platform-express": "^11.0.13",
+    "@nestjs/swagger": "^11.1.1",
     "encoding-down": "^7.1.0",
     "levelup": "^5.1.1",
     "mongoose": "^8.13.2",
+    "porter-stemmer": "^0.9.1",
     "reflect-metadata": "^0.1.13",
     "rocksdb": "^5.2.1",
     "rxjs": "^7.2.0"

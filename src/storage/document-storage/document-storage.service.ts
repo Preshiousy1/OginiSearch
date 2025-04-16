@@ -1,6 +1,8 @@
-import { Injectable, Logger, Optional } from '@nestjs/common';
+import { Injectable, Logger, Optional, BadRequestException } from '@nestjs/common';
 import { DocumentRepository } from '../mongodb/repositories/document.repository';
 import { SourceDocument } from '../mongodb/schemas/document.schema';
+import { MongoDBService } from '../mongodb/mongodb.service';
+import { SchemaVersionManagerService } from '../../schema/schema-version-manager.service';
 
 interface DocumentStorageOptions {
   batchSize?: number;
@@ -15,7 +17,11 @@ export class DocumentStorageService {
   private useInMemoryFallback = false;
   private inMemoryStore: Map<string, any> = new Map();
 
-  constructor(@Optional() private readonly documentRepository: DocumentRepository) {
+  constructor(
+    @Optional() private readonly documentRepository: DocumentRepository,
+    // private readonly mongoDBService: MongoDBService,
+    private readonly schemaVersionManager: SchemaVersionManagerService,
+  ) {
     if (!documentRepository) {
       this.logger.warn('MongoDB repository not available, using in-memory fallback');
       this.useInMemoryFallback = true;
@@ -27,8 +33,30 @@ export class DocumentStorageService {
     documentId: string,
     content: Record<string, any>,
     metadata: Record<string, any> = {},
+    schemaName?: string,
   ): Promise<SourceDocument> {
     try {
+      // If schema is provided, validate the document before storage
+      if (schemaName) {
+        const validationResult = await this.schemaVersionManager.validateDocument(
+          schemaName,
+          content,
+        );
+        if (!validationResult.valid) {
+          throw new BadRequestException({
+            message: 'Document validation failed',
+            errors: validationResult.errors,
+          });
+        }
+
+        // Add schema metadata to the document
+        const schema = await this.schemaVersionManager.getSchema(schemaName);
+        content._schema = {
+          name: schemaName,
+          version: schema.version,
+        };
+      }
+
       const document = {
         indexName,
         documentId,
@@ -57,8 +85,40 @@ export class DocumentStorageService {
     documentId: string,
     content: Record<string, any>,
     metadata?: Record<string, any>,
+    schemaName?: string,
   ): Promise<SourceDocument> {
     try {
+      // If schema is provided, validate the updated document
+      if (schemaName) {
+        // Get the existing document
+        const existingDoc = await this.documentRepository.findOne(indexName, documentId);
+        if (!existingDoc) {
+          throw new BadRequestException(`Document with id ${documentId} not found`);
+        }
+
+        // Create the updated document for validation
+        const updatedDoc = { ...existingDoc, ...content };
+
+        // Validate against the schema
+        const validationResult = await this.schemaVersionManager.validateDocument(
+          schemaName,
+          updatedDoc,
+        );
+        if (!validationResult.valid) {
+          throw new BadRequestException({
+            message: 'Document validation failed',
+            errors: validationResult.errors,
+          });
+        }
+
+        // Update schema version if needed
+        const schema = await this.schemaVersionManager.getSchema(schemaName);
+        content._schema = {
+          name: schemaName,
+          version: schema.version,
+        };
+      }
+
       const updateData: any = { content };
       if (metadata) {
         updateData.metadata = metadata;

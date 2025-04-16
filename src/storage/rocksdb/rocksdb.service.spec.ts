@@ -14,7 +14,7 @@ describe('RocksDBService', () => {
   let mockDb: any;
 
   const mockConfigService = {
-    get: jest.fn().mockImplementation((key) => {
+    get: jest.fn().mockImplementation(key => {
       if (key === 'ROCKSDB_PATH') {
         return path.join(process.cwd(), 'test-data', 'rocksdb');
       }
@@ -54,11 +54,9 @@ describe('RocksDBService', () => {
     };
 
     // Mock the connect method to use our mockDb
-    jest
-      .spyOn(RocksDBService.prototype as any, 'connect')
-      .mockImplementation(function () {
-        this.db = mockDb;
-      });
+    jest.spyOn(RocksDBService.prototype as any, 'connect').mockImplementation(function () {
+      this.db = mockDb;
+    });
 
     // Mock directory creation
     jest
@@ -66,10 +64,7 @@ describe('RocksDBService', () => {
       .mockImplementation(() => Promise.resolve());
 
     const module: TestingModule = await Test.createTestingModule({
-      providers: [
-        RocksDBService,
-        { provide: ConfigService, useValue: mockConfigService },
-      ],
+      providers: [RocksDBService, { provide: ConfigService, useValue: mockConfigService }],
     }).compile();
 
     service = module.get<RocksDBService>(RocksDBService);
@@ -124,9 +119,7 @@ describe('RocksDBService', () => {
 
       // Verify serialization
       const serializedData = Buffer.from(JSON.stringify(testData));
-      expect(mockDb.put.mock.calls[0][1].toString()).toEqual(
-        serializedData.toString(),
-      );
+      expect(mockDb.put.mock.calls[0][1].toString()).toEqual(serializedData.toString());
     });
   });
 

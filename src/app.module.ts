@@ -8,6 +8,8 @@ import { DocumentManagerModule } from './document-manager/document-manager.modul
 import { TextAnalysisModule } from './text-analysis/text-analysis.module';
 import { StorageModule } from './storage/storage.module';
 import { HealthModule } from './health/health.module';
+import { SchemaModule } from './schema/schema.module';
+import { AnalysisModule } from './analysis/analysis.module';
 
 @Module({
   imports: [
@@ -20,6 +22,8 @@ import { HealthModule } from './health/health.module';
     DocumentManagerModule,
     TextAnalysisModule,
     HealthModule,
+    SchemaModule,
+    AnalysisModule,
   ],
   controllers: [AppController],
   providers: [AppService],
