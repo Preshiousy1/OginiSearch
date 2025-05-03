@@ -74,7 +74,11 @@ describe('DocumentStorageService', () => {
     const metadata = { author: 'Test User', createdAt: new Date().toISOString() };
 
     it('should store a document', async () => {
-      const result = await service.storeDocument(indexName, documentId, documentContent, metadata);
+      const result = await service.storeDocument(indexName, {
+        documentId,
+        content: documentContent,
+        metadata,
+      });
 
       expect(result).toBeDefined();
       expect(result.indexName).toBe(indexName);

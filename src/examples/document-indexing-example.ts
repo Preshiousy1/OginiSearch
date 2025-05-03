@@ -1,10 +1,10 @@
 // Example usage of DocumentProcessor in indexing workflow
 
-import { DocumentProcessorService } from 'src/document/document-processor.service';
-import { IndexStatsService } from 'src/index/index-stats.service';
-import { RawDocument } from 'src/document/interfaces/document-processor.interface';
-import { TermDictionary } from 'src/index/interfaces/posting.interface';
-import { SimplePostingList } from 'src/index/posting-list';
+import { DocumentProcessorService } from '../document/document-processor.service';
+import { IndexStatsService } from '../index/index-stats.service';
+import { RawDocument } from '../document/interfaces/document-processor.interface';
+import { TermDictionary } from '../index/interfaces/posting.interface';
+import { SimplePostingList } from '../index/posting-list';
 
 async function indexDocument(
   documentProcessor: DocumentProcessorService,

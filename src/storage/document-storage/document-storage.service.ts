@@ -30,9 +30,15 @@ export class DocumentStorageService {
 
   async storeDocument(
     indexName: string,
-    documentId: string,
-    content: Record<string, any>,
-    metadata: Record<string, any> = {},
+    {
+      documentId,
+      content,
+      metadata = {},
+    }: {
+      documentId: string;
+      content: Record<string, any>;
+      metadata?: Record<string, any>;
+    },
     schemaName?: string,
   ): Promise<SourceDocument> {
     try {

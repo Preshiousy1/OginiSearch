@@ -76,6 +76,11 @@ export interface ProcessedField {
    * Field length (number of tokens)
    */
   length: number;
+
+  /**
+   * Term positions (term -> position array)
+   */
+  positions?: Record<string, number[]>;
 }
 
 /**

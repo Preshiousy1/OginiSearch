@@ -1,4 +1,4 @@
-import { ProcessedDocument } from 'src/common/interfaces/document.interface';
+import { ProcessedDocument } from '../../document/interfaces/document-processor.interface';
 
 /**
  * Utility class for serializing and deserializing data for RocksDB storage
@@ -8,12 +8,10 @@ export class SerializationUtils {
    * Serializes a posting list (document IDs and their positions)
    */
   static serializePostingList(postings: Map<string, number[]>): Buffer {
-    const serializable = Array.from(postings.entries()).map(
-      ([docId, positions]) => ({
-        docId,
-        positions,
-      }),
-    );
+    const serializable = Array.from(postings.entries()).map(([docId, positions]) => ({
+      docId,
+      positions,
+    }));
     return Buffer.from(JSON.stringify(serializable));
   }
 
@@ -22,7 +20,7 @@ export class SerializationUtils {
    */
   static deserializePostingList(buffer: Buffer): Map<string, number[]> {
     const parsed = JSON.parse(buffer.toString());
-    return new Map(parsed.map((entry) => [entry.docId, entry.positions]));
+    return new Map(parsed.map(entry => [entry.docId, entry.positions]));
   }
 
   /**

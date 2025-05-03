@@ -7,9 +7,9 @@ import { SearchEngineModule } from './search-engine/search-engine.module';
 import { DocumentManagerModule } from './document-manager/document-manager.module';
 import { TextAnalysisModule } from './text-analysis/text-analysis.module';
 import { StorageModule } from './storage/storage.module';
-import { HealthModule } from './health/health.module';
 import { SchemaModule } from './schema/schema.module';
 import { AnalysisModule } from './analysis/analysis.module';
+import { HealthModule } from './index/interfaces/health/health.module';
 
 @Module({
   imports: [

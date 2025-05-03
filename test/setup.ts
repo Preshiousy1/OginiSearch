@@ -9,15 +9,13 @@ config({
   path: path.resolve(__dirname, '../.env.test'),
 });
 
-export const setupTestEnvironment = async (): Promise<void> => {
-  // Start MongoDB memory server
+beforeAll(async () => {
   mongod = await MongoMemoryServer.create();
   process.env.MONGODB_URI = mongod.getUri();
-};
+});
 
-export const teardownTestEnvironment = async (): Promise<void> => {
-  // Stop MongoDB memory server
+afterAll(async () => {
   if (mongod) {
     await mongod.stop();
   }
-};
+});

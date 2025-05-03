@@ -1,17 +1,74 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { ConflictException, Injectable, Logger } from '@nestjs/common';
 import { RocksDBService } from '../rocksdb/rocksdb.service';
 import { SerializationUtils } from '../rocksdb/serialization.utils';
-import { ProcessedDocument } from 'src/common/interfaces/document.interface';
 import {
-  IndexMetadata,
-  IndexConfig,
-} from 'src/common/interfaces/index.interface';
+  Index,
+  IndexMappings,
+  IndexSettings,
+  IndexStatus,
+} from '../../index/interfaces/index.interface';
+import { ProcessedDocument } from '../../document/interfaces/document-processor.interface';
 
 @Injectable()
 export class IndexStorageService {
   private readonly logger = new Logger(IndexStorageService.name);
 
   constructor(private readonly rocksDBService: RocksDBService) {}
+
+  async getIndex(name: string): Promise<Index | null> {
+    const key = SerializationUtils.createIndexMetadataKey(name);
+    const data = await this.rocksDBService.get(key);
+    if (!data) return null;
+    return JSON.parse(data.toString()) as Index;
+  }
+
+  async createIndex(
+    index: Partial<Index> & { name: string; settings: IndexSettings; mappings: IndexMappings },
+  ): Promise<Index> {
+    const existingIndex = await this.getIndex(index.name);
+    if (existingIndex) {
+      throw new ConflictException(`Index with name ${index.name} already exists`);
+    }
+    const indexedIndex = {
+      ...index,
+      createdAt: new Date(),
+      status: 'open' as IndexStatus,
+      documentCount: 0,
+    };
+    const key = SerializationUtils.createIndexMetadataKey(index.name);
+    const serialized = Buffer.from(JSON.stringify(indexedIndex));
+    await this.rocksDBService.put(key, serialized);
+    return indexedIndex;
+  }
+
+  async updateIndex(name: string, updates: Partial<Index>): Promise<Index> {
+    const index = await this.getIndex(name);
+    if (!index) {
+      throw new Error(`Index ${name} not found`);
+    }
+
+    const updatedIndex = { ...index, ...updates };
+    const key = SerializationUtils.createIndexMetadataKey(name);
+    const serialized = Buffer.from(JSON.stringify(updatedIndex));
+    await this.rocksDBService.put(key, serialized);
+    return updatedIndex;
+  }
+
+  async listIndices(): Promise<Index[]> {
+    // This is a simplified implementation
+    // In a real implementation, you would need to use RocksDB's iterator to find all index metadata keys
+    const keys = await this.rocksDBService.getKeysWithPrefix('meta:');
+    const indices: Index[] = [];
+
+    for (const key of keys) {
+      const data = await this.rocksDBService.get(key);
+      if (data) {
+        indices.push(JSON.parse(data.toString()) as Index);
+      }
+    }
+
+    return indices;
+  }
 
   async storeTermPostings(
     indexName: string,
@@ -23,20 +80,19 @@ export class IndexStorageService {
     await this.rocksDBService.put(key, serialized);
   }
 
-  async getTermPostings(
-    indexName: string,
-    term: string,
-  ): Promise<Map<string, number[]> | null> {
+  async deleteTermPostings(indexName: string, term: string): Promise<void> {
     const key = SerializationUtils.createTermKey(indexName, term);
-    const data = await this.rocksDBService.get<Buffer>(key);
-    if (!data) return null;
-    return SerializationUtils.deserializePostingList(data);
+    await this.rocksDBService.delete(key);
   }
 
-  async storeProcessedDocument(
-    indexName: string,
-    document: ProcessedDocument,
-  ): Promise<void> {
+  async getTermPostings(indexName: string, term: string): Promise<Map<string, number[]> | null> {
+    const key = SerializationUtils.createTermKey(indexName, term);
+    const data = await this.rocksDBService.get(key);
+    if (!data) return null;
+    return SerializationUtils.deserializePostingList(data as Buffer);
+  }
+
+  async storeProcessedDocument(indexName: string, document: ProcessedDocument): Promise<void> {
     const key = SerializationUtils.createDocumentKey(indexName, document.id);
     const serialized = SerializationUtils.serializeDocument(document);
     await this.rocksDBService.put(key, serialized);
@@ -47,79 +103,92 @@ export class IndexStorageService {
     documentId: string,
   ): Promise<ProcessedDocument | null> {
     const key = SerializationUtils.createDocumentKey(indexName, documentId);
-    const data = await this.rocksDBService.get<Buffer>(key);
+    const data = await this.rocksDBService.get(key);
     if (!data) return null;
-    return SerializationUtils.deserializeDocument(data);
+    return SerializationUtils.deserializeDocument(data as Buffer);
   }
 
-  async storeIndexMetadata(
-    indexName: string,
-    metadata: IndexMetadata,
-  ): Promise<void> {
-    const key = SerializationUtils.createIndexMetadataKey(indexName);
-    await this.rocksDBService.put(key, metadata);
-  }
-
-  async getIndexMetadata(indexName: string): Promise<IndexMetadata | null> {
-    const key = SerializationUtils.createIndexMetadataKey(indexName);
-    return this.rocksDBService.get<IndexMetadata>(key);
-  }
-
-  async storeIndexStats(
-    indexName: string,
-    statName: string,
-    stats: Record<string, any>,
-  ): Promise<void> {
-    const key = SerializationUtils.createStatsKey(indexName, statName);
-    const serialized = SerializationUtils.serializeIndexStats(stats);
-    await this.rocksDBService.put(key, serialized);
-  }
-
-  async getIndexStats(
-    indexName: string,
-    statName: string,
-  ): Promise<Record<string, any> | null> {
-    const key = SerializationUtils.createStatsKey(indexName, statName);
-    const data = await this.rocksDBService.get<Buffer>(key);
-    if (!data) return null;
-    return SerializationUtils.deserializeIndexStats(data);
-  }
-
-  async deleteProcessedDocument(
-    indexName: string,
-    documentId: string,
-  ): Promise<void> {
+  async deleteProcessedDocument(indexName: string, documentId: string): Promise<void> {
     const key = SerializationUtils.createDocumentKey(indexName, documentId);
     await this.rocksDBService.delete(key);
   }
 
+  async storeIndexStats(indexName: string, stats: Record<string, any>): Promise<void> {
+    const key = SerializationUtils.createStatsKey(indexName, 'general');
+    const serialized = SerializationUtils.serializeIndexStats(stats);
+    await this.rocksDBService.put(key, serialized);
+  }
+
+  async getIndexStats(indexName: string): Promise<Record<string, any> | null> {
+    const key = SerializationUtils.createStatsKey(indexName, 'general');
+    const data = await this.rocksDBService.get(key);
+    if (!data) return null;
+    return SerializationUtils.deserializeIndexStats(data as Buffer);
+  }
+
+  /**
+   * Delete an index and all its data
+   */
   async deleteIndex(indexName: string): Promise<void> {
-    // Get all keys with this index name prefix
-    const indexPrefix = `idx:${indexName}:`;
-    const termPrefix = `term:${indexName}:`;
-    const docPrefix = `doc:${indexName}:`;
-    const statsPrefix = `stats:${indexName}:`;
-    const metaKey = SerializationUtils.createIndexMetadataKey(indexName);
+    // 1. Delete the index metadata
+    const metadataKey = SerializationUtils.createIndexMetadataKey(indexName);
+    await this.rocksDBService.delete(metadataKey);
 
-    // Delete all matching keys
-    // Note: For a production system, we might want to do this in batches
-    const indexEntries = await this.rocksDBService.getByPrefix(indexPrefix);
-    const termEntries = await this.rocksDBService.getByPrefix(termPrefix);
-    const docEntries = await this.rocksDBService.getByPrefix(docPrefix);
-    const statsEntries = await this.rocksDBService.getByPrefix(statsPrefix);
-
-    const allKeys = [
-      ...indexEntries.map((e) => e.key),
-      ...termEntries.map((e) => e.key),
-      ...docEntries.map((e) => e.key),
-      ...statsEntries.map((e) => e.key),
-      metaKey,
+    // 2. Delete all data with this index's prefix
+    const prefixes = [
+      `idx:${indexName}:`,
+      `term:${indexName}:`,
+      `doc:${indexName}:`,
+      `stats:${indexName}:`,
+      `mapping:${indexName}:`,
+      `settings:${indexName}:`,
     ];
 
-    for (const key of allKeys) {
+    // Delete all keys with these prefixes
+    for (const prefix of prefixes) {
+      const entries = await this.rocksDBService.getByPrefix(prefix);
+      for (const { key } of entries) {
+        await this.rocksDBService.delete(key);
+      }
+    }
+  }
+
+  /**
+   * Get all documents from an index
+   */
+  async getAllDocuments(indexName: string): Promise<Array<{ id: string; source: any }>> {
+    const prefix = `${indexName}:document:`;
+    const documents = [];
+
+    const entries = await this.rocksDBService.getByPrefix(prefix);
+    for (const { key, value } of entries) {
+      const docId = key.substring(prefix.length);
+      const doc = JSON.parse(value.toString());
+      documents.push({
+        id: docId,
+        source: doc.source,
+      });
+    }
+
+    return documents;
+  }
+
+  /**
+   * Clear all data for an index
+   */
+  async clearIndex(indexName: string): Promise<void> {
+    // Delete documents
+    const docPrefix = `${indexName}:document:`;
+    const docEntries = await this.rocksDBService.getByPrefix(docPrefix);
+    for (const { key } of docEntries) {
       await this.rocksDBService.delete(key);
     }
 
-    this.logger.log(`Deleted index ${indexName} with ${allKeys.length} keys`);
+    // Delete term postings
+    const termPrefix = `${indexName}:term:`;
+    const termEntries = await this.rocksDBService.getByPrefix(termPrefix);
+    for (const { key } of termEntries) {
+      await this.rocksDBService.delete(key);
+    }
   }
 }

@@ -2,8 +2,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { IndexStorageService } from './index-storage.service';
 import { RocksDBService } from '../rocksdb/rocksdb.service';
 import { SerializationUtils } from '../rocksdb/serialization.utils';
-import { ProcessedDocument } from 'src/common/interfaces/document.interface';
-import { IndexMetadata } from 'src/common/interfaces/index.interface';
+import { ProcessedDocument } from '../../document/interfaces/document-processor.interface';
 
 describe('IndexStorageService', () => {
   let service: IndexStorageService;
@@ -82,10 +81,19 @@ describe('IndexStorageService', () => {
       const indexName = 'test-index';
       const document: ProcessedDocument = {
         id: 'doc123',
-        fields: { title: ['test'], content: ['content words'] },
+        fields: {
+          title: {
+            original: 'test',
+            terms: ['test'],
+            termFrequencies: { test: 1 },
+            length: 1,
+          },
+        },
+        source: {
+          title: 'test',
+        },
         fieldLengths: { title: 1, content: 2 },
       };
-
       const serializeSpy = jest.spyOn(SerializationUtils, 'serializeDocument');
       serializeSpy.mockReturnValue(Buffer.from('mocked-document-data'));
 

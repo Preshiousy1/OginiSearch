@@ -1,6 +1,6 @@
 import { Controller, Get } from '@nestjs/common';
-import { MongoDBService } from '../storage/mongodb/mongodb.service';
-import { RocksDBService } from '../storage/rocksdb/rocksdb.service';
+import { RocksDBService } from '../../../storage/rocksdb/rocksdb.service';
+import { MongoDBService } from '../../../storage/mongodb/mongodb.service';
 
 @Controller('health')
 export class HealthController {

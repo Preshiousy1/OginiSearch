@@ -2,7 +2,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { DocumentProcessorService } from './document-processor.service';
 import { Analyzer } from '../analysis/interfaces/analyzer.interface';
 import { DocumentMapping, RawDocument } from './interfaces/document-processor.interface';
-import { AnalyzerRegistryService } from 'src/analysis/analyzer-registry.service';
+import { AnalyzerRegistryService } from '../analysis/analyzer-registry.service';
 
 // Mock analyzer that simply splits on spaces
 class MockAnalyzer implements Analyzer {

@@ -154,6 +154,11 @@ export class RocksDBService implements OnModuleInit, OnModuleDestroy {
     });
   }
 
+  async getKeysWithPrefix(prefix: string): Promise<string[]> {
+    const keyValues = await this.getByPrefix(prefix);
+    return keyValues.map(kv => kv.key);
+  }
+
   // Helper methods for key formatting
   formatIndexKey(indexName: string, type: string, id: string): string {
     return `idx:${indexName}:${type}:${id}`;

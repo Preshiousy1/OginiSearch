@@ -3,31 +3,16 @@ import { INestApplication } from '@nestjs/common';
 import request from 'supertest';
 import { AppModule } from './../src/app.module';
 import { RocksDBService } from '../src/storage/rocksdb/rocksdb.service';
+import { setupTestApp } from './utils/test-helpers';
 
 describe('AppController (e2e)', () => {
   let app: INestApplication;
 
-  beforeEach(async () => {
-    // Create mock for RocksDBService
-    const mockRocksDBService = {
-      get: jest.fn(),
-      put: jest.fn(),
-      delete: jest.fn(),
-      getByPrefix: jest.fn().mockResolvedValue([]),
-    };
-
-    const moduleFixture: TestingModule = await Test.createTestingModule({
-      imports: [AppModule],
-    })
-      .overrideProvider(RocksDBService)
-      .useValue(mockRocksDBService)
-      .compile();
-
-    app = moduleFixture.createNestApplication();
-    await app.init();
+  beforeAll(async () => {
+    app = await setupTestApp([AppModule]);
   });
 
-  afterEach(async () => {
+  afterAll(async () => {
     await app.close();
   });
 

@@ -4,8 +4,11 @@ import { SimplePostingList } from './posting-list';
 import { CompressedPostingList } from './compressed-posting-list';
 import { IndexStatsService } from './index-stats.service';
 import { BM25Scorer } from './bm25-scorer';
-
+import { IndexService } from './index.service';
+import { AnalysisModule } from '../analysis/analysis.module';
+import { StorageModule } from '../storage/storage.module';
 @Module({
+  imports: [StorageModule, AnalysisModule],
   providers: [
     {
       provide: 'TERM_DICTIONARY',
@@ -24,6 +27,7 @@ import { BM25Scorer } from './bm25-scorer';
     },
     SimplePostingList,
     CompressedPostingList,
+    IndexService,
   ],
   exports: [
     'TERM_DICTIONARY',
@@ -31,6 +35,7 @@ import { BM25Scorer } from './bm25-scorer';
     'BM25_SCORER',
     SimplePostingList,
     CompressedPostingList,
+    IndexService,
   ],
 })
 export class IndexModule {}

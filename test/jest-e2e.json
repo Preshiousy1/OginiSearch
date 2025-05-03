@@ -9,5 +9,6 @@
   "moduleNameMapper": {
     "^src/(.*)$": "<rootDir>/../src/$1"
   },
-  "setupFiles": ["<rootDir>/setup-tests.ts"]
+  "setupFiles": ["<rootDir>/setup-tests.ts"],
+  "setupFilesAfterEnv": ["<rootDir>/setup.ts"]
 }
