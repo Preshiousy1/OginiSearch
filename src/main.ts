@@ -1,29 +1,45 @@
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
+import { ValidationPipe } from '@nestjs/common';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
+import { ApiModule } from './api/api.module';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
 
-  // Swagger global configuration
+  // Apply global validation pipe
+  app.useGlobalPipes(
+    new ValidationPipe({
+      transform: true,
+      whitelist: true,
+      forbidNonWhitelisted: true,
+    }),
+  );
+
+  // Set up Swagger documentation
   const config = new DocumentBuilder()
     .setTitle('ConnectSearch API')
-    .setDescription('API documentation for ConnectSearch')
+    .setDescription('RESTful API for ConnectSearch engine')
     .setVersion('1.0')
+    .addTag('search', 'Search operations')
+    .addTag('indices', 'Index management')
+    .addTag('documents', 'Document management')
     .addBearerAuth(
       {
         type: 'http',
         scheme: 'bearer',
         bearerFormat: 'JWT',
-        name: 'Authorization',
+        name: 'JWT',
         description: 'Enter JWT token',
         in: 'header',
       },
-      'JWT-auth', // This is the name of the security scheme
+      'JWT-auth',
     )
     .build();
 
-  const document = SwaggerModule.createDocument(app, config);
+  const document = SwaggerModule.createDocument(app, config, {
+    include: [ApiModule],
+  });
 
   // Serve Swagger UI at /api/docs in all environments except production
   if (process.env.NODE_ENV !== 'production') {
@@ -35,6 +51,6 @@ async function bootstrap() {
     });
   }
 
-  await app.listen(process.env.PORT || 3000);
+  await app.listen(3000);
 }
 bootstrap();

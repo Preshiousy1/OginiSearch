@@ -17,9 +17,18 @@ export class IndexStorageService {
 
   async getIndex(name: string): Promise<Index | null> {
     const key = SerializationUtils.createIndexMetadataKey(name);
-    const data = await this.rocksDBService.get(key);
+    const data: { type: 'Buffer'; data: Buffer } | any = await this.rocksDBService.get(key);
     if (!data) return null;
-    return JSON.parse(data.toString()) as Index;
+
+    // Handle Buffer-like object
+    if (data.type === 'Buffer' && Array.isArray(data.data)) {
+      // Convert Buffer-like object to actual Buffer
+      const buffer = Buffer.from(data.data);
+      return JSON.parse(buffer.toString());
+    }
+
+    // If it's already a string or Buffer
+    return typeof data === 'string' ? JSON.parse(data) : JSON.parse(data.toString());
   }
 
   async createIndex(
@@ -54,20 +63,38 @@ export class IndexStorageService {
     return updatedIndex;
   }
 
-  async listIndices(): Promise<Index[]> {
-    // This is a simplified implementation
-    // In a real implementation, you would need to use RocksDB's iterator to find all index metadata keys
-    const keys = await this.rocksDBService.getKeysWithPrefix('meta:');
-    const indices: Index[] = [];
+  async listIndices(status?: string): Promise<Index[]> {
+    try {
+      const keys = await this.rocksDBService.getKeysWithPrefix('index:');
+      const indices: Index[] = [];
 
-    for (const key of keys) {
-      const data = await this.rocksDBService.get(key);
-      if (data) {
-        indices.push(JSON.parse(data.toString()) as Index);
+      for (const key of keys) {
+        const data: { type: 'Buffer'; data: Buffer } | any = await this.rocksDBService.get(key);
+
+        let indexData: Index;
+        if (data.type === 'Buffer' && Array.isArray(data.data)) {
+          // Convert Buffer-like object to actual Buffer
+          const buffer = Buffer.from(data.data);
+          indexData = JSON.parse(buffer.toString());
+        } else if (typeof data === 'string') {
+          indexData = JSON.parse(data);
+        } else {
+          indexData = JSON.parse(data.toString());
+        }
+
+        // If status is provided, filter by status
+        if (status && indexData.status !== status) {
+          continue;
+        }
+
+        indices.push(indexData);
       }
-    }
 
-    return indices;
+      return indices;
+    } catch (error) {
+      this.logger.error(`Error listing indices: ${error.message}`);
+      throw error;
+    }
   }
 
   async storeTermPostings(

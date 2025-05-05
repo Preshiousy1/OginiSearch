@@ -71,7 +71,7 @@ export class SerializationUtils {
    * Creates a formatted key for index metadata
    */
   static createIndexMetadataKey(indexName: string): string {
-    return `meta:${indexName}`;
+    return `index:${indexName}`;
   }
 
   /**

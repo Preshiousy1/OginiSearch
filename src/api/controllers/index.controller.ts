@@ -18,7 +18,14 @@ import {
   IndexListResponseDto,
 } from '../dtos/index.dto';
 import { IndexService } from '../../index/index.service';
-import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth } from '@nestjs/swagger';
+import {
+  ApiTags,
+  ApiOperation,
+  ApiResponse,
+  ApiParam,
+  ApiQuery,
+  ApiBearerAuth,
+} from '@nestjs/swagger';
 
 @ApiTags('indices')
 @ApiBearerAuth('JWT-auth')
@@ -45,17 +52,26 @@ export class IndexController {
   @ApiOperation({ summary: 'List all indices' })
   @ApiResponse({
     status: HttpStatus.OK,
-    description: 'List of indices',
+    description: 'Returns all indices',
     type: IndexListResponseDto,
   })
-  async listIndices(): Promise<IndexListResponseDto> {
-    const indices = await this.indexService.listIndices();
-    return { indices, total: indices.length };
+  @ApiQuery({ name: 'status', required: false, description: 'Filter by index status' })
+  async listIndices(@Query('status') status?: string): Promise<IndexListResponseDto> {
+    const indices = await this.indexService.listIndices(status);
+    return {
+      indices,
+      total: indices.length,
+    };
   }
 
   @Get(':name')
   @ApiOperation({ summary: 'Get index details' })
-  @ApiResponse({ status: HttpStatus.OK, description: 'Index details', type: IndexResponseDto })
+  @ApiParam({ name: 'name', description: 'Index name' })
+  @ApiResponse({
+    status: HttpStatus.OK,
+    description: 'Returns index details',
+    type: IndexResponseDto,
+  })
   @ApiResponse({ status: HttpStatus.NOT_FOUND, description: 'Index not found' })
   async getIndex(@Param('name') name: string): Promise<IndexResponseDto> {
     return this.indexService.getIndex(name);
@@ -63,23 +79,25 @@ export class IndexController {
 
   @Put(':name/settings')
   @ApiOperation({ summary: 'Update index settings' })
+  @ApiParam({ name: 'name', description: 'Index name' })
   @ApiResponse({
     status: HttpStatus.OK,
-    description: 'Index settings updated',
+    description: 'Index updated successfully',
     type: IndexResponseDto,
   })
+  @ApiResponse({ status: HttpStatus.BAD_REQUEST, description: 'Invalid input' })
   @ApiResponse({ status: HttpStatus.NOT_FOUND, description: 'Index not found' })
-  @ApiResponse({ status: HttpStatus.BAD_REQUEST, description: 'Invalid settings' })
-  async updateIndexSettings(
+  async updateIndex(
     @Param('name') name: string,
-    @Body(ValidationPipe) updateSettingsDto: UpdateIndexSettingsDto,
+    @Body(ValidationPipe) updateIndexSettingsDto: UpdateIndexSettingsDto,
   ): Promise<IndexResponseDto> {
-    return this.indexService.updateIndexSettings(name, updateSettingsDto.settings);
+    return this.indexService.updateIndexSettings(name, updateIndexSettingsDto.settings);
   }
 
   @Delete(':name')
-  @HttpCode(HttpStatus.NO_CONTENT)
   @ApiOperation({ summary: 'Delete an index' })
+  @ApiParam({ name: 'name', description: 'Index name' })
+  @HttpCode(HttpStatus.NO_CONTENT)
   @ApiResponse({ status: HttpStatus.NO_CONTENT, description: 'Index deleted successfully' })
   @ApiResponse({ status: HttpStatus.NOT_FOUND, description: 'Index not found' })
   async deleteIndex(@Param('name') name: string): Promise<void> {

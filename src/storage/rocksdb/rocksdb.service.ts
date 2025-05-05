@@ -82,9 +82,12 @@ export class RocksDBService implements OnModuleInit, OnModuleDestroy {
 
   async get<T>(key: string): Promise<T | null> {
     try {
-      const data = await this.db.get(key);
-      return this.deserialize<T>(data);
+      const value = await this.db.get(key);
+      if (!value) return null;
+
+      return this.deserializeBuffer(value);
     } catch (error) {
+      // Handle "not found" errors
       if (error.notFound) {
         return null;
       }
@@ -140,7 +143,7 @@ export class RocksDBService implements OnModuleInit, OnModuleDestroy {
       stream.on('data', data => {
         result.push({
           key: data.key.toString(),
-          value: this.deserialize<T>(data.value),
+          value: this.deserializeBuffer(data.value),
         });
       });
 
@@ -176,7 +179,29 @@ export class RocksDBService implements OnModuleInit, OnModuleDestroy {
     return Buffer.from(JSON.stringify(data));
   }
 
-  private deserialize<T>(buffer: Buffer): T {
-    return JSON.parse(buffer.toString());
+  private deserializeBuffer(data: any): any {
+    // If it's a Buffer-like object
+    if (data && data.type === 'Buffer' && Array.isArray(data.data)) {
+      const buffer = Buffer.from(data.data);
+      return JSON.parse(buffer.toString());
+    }
+
+    // If it's a Buffer
+    if (Buffer.isBuffer(data)) {
+      return JSON.parse(data.toString());
+    }
+
+    // If it's already a string
+    if (typeof data === 'string') {
+      return JSON.parse(data);
+    }
+
+    // If it's already parsed
+    if (typeof data === 'object') {
+      return data;
+    }
+
+    // Fallback
+    return data;
   }
 }

@@ -6,6 +6,7 @@ import {
   Delete,
   Body,
   Param,
+  Query,
   HttpStatus,
   HttpCode,
   ValidationPipe,
@@ -16,10 +17,17 @@ import {
   DocumentResponseDto,
   BulkResponseDto,
   DeleteByQueryResponseDto,
+  DeleteByQueryDto,
 } from '../dtos/document.dto';
-import { ApiTags, ApiOperation, ApiResponse, ApiParam, ApiBearerAuth } from '@nestjs/swagger';
+import {
+  ApiTags,
+  ApiOperation,
+  ApiResponse,
+  ApiParam,
+  ApiQuery,
+  ApiBearerAuth,
+} from '@nestjs/swagger';
 import { DocumentService } from '../../document/document.service';
-import { SearchQueryDto } from '../dtos/search.dto';
 
 @ApiTags('documents')
 @ApiBearerAuth('JWT-auth')
@@ -44,28 +52,15 @@ export class DocumentController {
     return this.documentService.indexDocument(index, indexDocumentDto);
   }
 
-  @Post('_bulk')
-  @ApiOperation({ summary: 'Bulk index documents' })
-  @ApiParam({ name: 'index', description: 'Index name' })
-  @ApiResponse({
-    status: HttpStatus.OK,
-    description: 'Documents indexed successfully',
-    type: BulkResponseDto,
-  })
-  @ApiResponse({ status: HttpStatus.BAD_REQUEST, description: 'Invalid documents' })
-  @ApiResponse({ status: HttpStatus.NOT_FOUND, description: 'Index not found' })
-  async bulkIndexDocuments(
-    @Param('index') index: string,
-    @Body(ValidationPipe) bulkIndexDocumentsDto: BulkIndexDocumentsDto,
-  ): Promise<BulkResponseDto> {
-    return this.documentService.bulkIndexDocuments(index, bulkIndexDocumentsDto.documents);
-  }
-
   @Get(':id')
   @ApiOperation({ summary: 'Get a document by ID' })
   @ApiParam({ name: 'index', description: 'Index name' })
   @ApiParam({ name: 'id', description: 'Document ID' })
-  @ApiResponse({ status: HttpStatus.OK, description: 'Document found', type: DocumentResponseDto })
+  @ApiResponse({
+    status: HttpStatus.OK,
+    description: 'Returns the document',
+    type: DocumentResponseDto,
+  })
   @ApiResponse({ status: HttpStatus.NOT_FOUND, description: 'Document or index not found' })
   async getDocument(
     @Param('index') index: string,
@@ -88,20 +83,37 @@ export class DocumentController {
   async updateDocument(
     @Param('index') index: string,
     @Param('id') id: string,
-    @Body(ValidationPipe) updateDocumentDto: IndexDocumentDto,
+    @Body(ValidationPipe) indexDocumentDto: IndexDocumentDto,
   ): Promise<DocumentResponseDto> {
-    return this.documentService.updateDocument(index, id, updateDocumentDto.document);
+    return this.documentService.updateDocument(index, id, indexDocumentDto.document);
   }
 
   @Delete(':id')
-  @HttpCode(HttpStatus.NO_CONTENT)
-  @ApiOperation({ summary: 'Delete a document' })
+  @ApiOperation({ summary: 'Delete a document by ID' })
   @ApiParam({ name: 'index', description: 'Index name' })
   @ApiParam({ name: 'id', description: 'Document ID' })
+  @HttpCode(HttpStatus.NO_CONTENT)
   @ApiResponse({ status: HttpStatus.NO_CONTENT, description: 'Document deleted successfully' })
   @ApiResponse({ status: HttpStatus.NOT_FOUND, description: 'Document or index not found' })
   async deleteDocument(@Param('index') index: string, @Param('id') id: string): Promise<void> {
     await this.documentService.deleteDocument(index, id);
+  }
+
+  @Post('_bulk')
+  @ApiOperation({ summary: 'Bulk index documents' })
+  @ApiParam({ name: 'index', description: 'Index name' })
+  @ApiResponse({
+    status: HttpStatus.OK,
+    description: 'Documents indexed successfully',
+    type: BulkResponseDto,
+  })
+  @ApiResponse({ status: HttpStatus.BAD_REQUEST, description: 'Invalid documents' })
+  @ApiResponse({ status: HttpStatus.NOT_FOUND, description: 'Index not found' })
+  async bulkIndexDocuments(
+    @Param('index') index: string,
+    @Body(ValidationPipe) bulkIndexDocumentsDto: BulkIndexDocumentsDto,
+  ): Promise<BulkResponseDto> {
+    return this.documentService.bulkIndexDocuments(index, bulkIndexDocumentsDto.documents);
   }
 
   @Post('_delete_by_query')
@@ -116,7 +128,7 @@ export class DocumentController {
   @ApiResponse({ status: HttpStatus.NOT_FOUND, description: 'Index not found' })
   async deleteByQuery(
     @Param('index') index: string,
-    @Body(ValidationPipe) deleteByQueryDto: SearchQueryDto,
+    @Body(ValidationPipe) deleteByQueryDto: DeleteByQueryDto,
   ): Promise<DeleteByQueryResponseDto> {
     return this.documentService.deleteByQuery(index, deleteByQueryDto);
   }

@@ -10,6 +10,7 @@ import { StorageModule } from './storage/storage.module';
 import { SchemaModule } from './schema/schema.module';
 import { AnalysisModule } from './analysis/analysis.module';
 import { HealthModule } from './index/interfaces/health/health.module';
+import { ApiModule } from './api/api.module';
 
 @Module({
   imports: [
@@ -24,6 +25,7 @@ import { HealthModule } from './index/interfaces/health/health.module';
     HealthModule,
     SchemaModule,
     AnalysisModule,
+    ApiModule,
   ],
   controllers: [AppController],
   providers: [AppService],

@@ -40,9 +40,9 @@ export class IndexService {
     return this.mapToIndexResponse(index);
   }
 
-  async listIndices(): Promise<IndexResponseDto[]> {
+  async listIndices(status?: string): Promise<IndexResponseDto[]> {
     this.logger.log('Listing all indices');
-    const indices = await this.indexStorage.listIndices();
+    const indices = await this.indexStorage.listIndices(status);
     return indices.map(index => this.mapToIndexResponse(index));
   }
 
