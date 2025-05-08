@@ -11,18 +11,22 @@ import { ApiProperty } from '@nestjs/swagger';
 
 export class IndexDocumentDto {
   @ApiProperty({
-    name: 'id',
-    example: '123',
-    description: 'Unique identifier for the document',
+    description: 'Document ID (will be auto-generated if not provided)',
+    required: false,
+    example: 'product-123',
   })
-  @IsString()
   @IsOptional()
+  @IsString()
   id?: string;
 
   @ApiProperty({
-    name: 'document',
-    example: { name: 'John Doe', age: 30 },
-    description: 'Document content',
+    description: 'Document content to be indexed',
+    example: {
+      title: 'Smartphone X',
+      description: 'Latest smartphone with advanced features',
+      price: 999.99,
+      categories: ['electronics', 'mobile'],
+    },
   })
   @IsObject()
   @IsNotEmpty()
@@ -31,9 +35,24 @@ export class IndexDocumentDto {
 
 export class BulkIndexDocumentsDto {
   @ApiProperty({
-    name: 'documents',
-    example: [{ id: '123', document: { name: 'John Doe', age: 30 } }],
-    description: 'Array of documents to index',
+    description: 'Array of documents to index in bulk',
+    type: [IndexDocumentDto],
+    example: [
+      {
+        id: 'product-123',
+        document: {
+          title: 'Smartphone X',
+          price: 999.99,
+        },
+      },
+      {
+        id: 'product-124',
+        document: {
+          title: 'Laptop Pro',
+          price: 1499.99,
+        },
+      },
+    ],
   })
   @IsArray()
   @ValidateNested({ each: true })
@@ -114,15 +133,81 @@ export class BulkResponseDto {
   errors: boolean;
 }
 
-export class DeleteByQueryDto {
+export class TermQueryDto {
   @ApiProperty({
-    name: 'query',
-    example: '{ "match": { "name": "John" } }',
-    description: 'Query to delete documents',
+    description: 'Field to filter on',
+    example: 'categories',
   })
   @IsString()
   @IsNotEmpty()
-  query: string;
+  field: string;
+
+  @ApiProperty({
+    description: 'Value to match',
+    example: 'electronics',
+  })
+  @IsNotEmpty()
+  value: string | number | boolean;
+}
+
+export class RangeQueryDto {
+  @ApiProperty({
+    description: 'Field to apply range filter',
+    example: 'price',
+  })
+  @IsString()
+  @IsNotEmpty()
+  field: string;
+
+  @ApiProperty({
+    description: 'Greater than value',
+    required: false,
+    example: 100,
+  })
+  @IsOptional()
+  gt?: number;
+
+  @ApiProperty({
+    description: 'Greater than or equal value',
+    required: false,
+    example: 100,
+  })
+  @IsOptional()
+  gte?: number;
+
+  @ApiProperty({
+    description: 'Less than value',
+    required: false,
+    example: 500,
+  })
+  @IsOptional()
+  lt?: number;
+
+  @ApiProperty({
+    description: 'Less than or equal value',
+    required: false,
+    example: 500,
+  })
+  @IsOptional()
+  lte?: number;
+}
+
+export class DeleteByQueryDto {
+  @ApiProperty({
+    description: 'Query to match documents for deletion',
+    example: {
+      term: {
+        field: 'categories',
+        value: 'discontinued',
+      },
+    },
+  })
+  @IsObject()
+  @IsNotEmpty()
+  query: {
+    term?: TermQueryDto;
+    range?: RangeQueryDto;
+  };
 }
 
 export class DeleteByQueryResponseDto {

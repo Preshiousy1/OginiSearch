@@ -5,6 +5,8 @@ export interface Query {
   type: string;
   operator?: 'and' | 'or' | 'not';
   clauses?: Query[] | PhraseQuery[];
+  text?: string;
+  fields?: string[];
 }
 
 /**
@@ -38,7 +40,15 @@ export interface BooleanQuery extends Query {
  * Raw input query from user
  */
 export interface RawQuery {
-  query: string;
+  query:
+    | string
+    | {
+        match?: {
+          field?: string;
+          value: string;
+        };
+        term?: Record<string, any>;
+      };
   fields?: string[];
   // Additional query parameters
   offset?: number;

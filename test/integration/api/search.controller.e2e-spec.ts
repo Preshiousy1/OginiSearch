@@ -46,7 +46,15 @@ describe('SearchController (e2e)', () => {
     it('should return search results', async () => {
       const res = await request(app.getHttpServer())
         .post('/api/indices/search-index/_search')
-        .send({ query: 'Alpha', fields: ['title'], filter: { tag: 'a' } })
+        .send({
+          query: {
+            match: {
+              value: 'Alpha',
+            },
+          },
+          fields: ['title'],
+          filter: { tag: 'a' },
+        })
         .expect(201);
 
       expect(Array.isArray(res.body.data)).toBeDefined();
@@ -64,7 +72,15 @@ describe('SearchController (e2e)', () => {
     it('should return 404 for non-existent index', async () => {
       const res = await request(app.getHttpServer())
         .post('/api/indices/does-not-exist/_search')
-        .send({ query: 'alpha', fields: ['title'], filter: { tag: 'a' } })
+        .send({
+          query: {
+            match: {
+              value: 'alpha',
+            },
+          },
+          fields: ['title'],
+          filter: { tag: 'a' },
+        })
         .expect(404);
     });
   });

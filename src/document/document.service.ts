@@ -6,12 +6,13 @@ import {
   DocumentResponseDto,
   BulkResponseDto,
   DeleteByQueryResponseDto,
+  DeleteByQueryDto,
 } from '../api/dtos/document.dto';
 import { v4 as uuidv4 } from 'uuid';
 import { SearchService } from '../search/search.service';
 import { IndexingService } from '../indexing/indexing.service';
 import { InMemoryTermDictionary } from '../index/term-dictionary';
-import { SearchQueryDto } from 'src/api/dtos/search.dto';
+import { SearchQueryDto } from '../api/dtos/search.dto';
 
 @Injectable()
 export class DocumentService {
@@ -277,8 +278,11 @@ export class DocumentService {
     await this.indexingService.removeDocument(indexName, id);
   }
 
-  async deleteByQuery(indexName: string, query: SearchQueryDto): Promise<DeleteByQueryResponseDto> {
-    this.logger.log(`Deleting documents by query in ${indexName}: ${query.query}`);
+  async deleteByQuery(
+    indexName: string,
+    query: DeleteByQueryDto,
+  ): Promise<DeleteByQueryResponseDto> {
+    this.logger.log(`Deleting documents by query in ${indexName}: ${JSON.stringify(query.query)}`);
 
     // Check if index exists
     await this.checkIndexExists(indexName);
@@ -286,8 +290,30 @@ export class DocumentService {
     const startTime = Date.now();
 
     try {
+      // Convert DeleteByQueryDto to SearchQueryDto format
+      const searchQuery: SearchQueryDto = {
+        query: query.query,
+        fields: [query.query.term.field],
+        filter: {
+          term: {
+            field: query.query.term.field,
+            value: query.query.term.value,
+          },
+        },
+      };
+
+      if (query.query.term) {
+        // Convert term query to match query format expected by search service
+        searchQuery.query = {
+          match: {
+            field: query.query.term.field,
+            value: query.query.term.value.toString(),
+          },
+        };
+      }
+
       // Search for documents matching the query
-      const searchResults = await this.searchService.search(indexName, query);
+      const searchResults = await this.searchService.search(indexName, searchQuery);
       const documentIds = searchResults.data.hits.map(hit => hit.id);
 
       if (documentIds.length === 0) {

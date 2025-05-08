@@ -26,25 +26,79 @@ import {
   ApiParam,
   ApiQuery,
   ApiBearerAuth,
+  ApiBody,
+  ApiExtraModels,
 } from '@nestjs/swagger';
 import { DocumentService } from '../../document/document.service';
 
-@ApiTags('documents')
+@ApiTags('Documents')
+@ApiExtraModels(IndexDocumentDto, BulkIndexDocumentsDto, DeleteByQueryDto)
 @ApiBearerAuth('JWT-auth')
 @Controller('api/indices/:index/documents')
 export class DocumentController {
   constructor(private readonly documentService: DocumentService) {}
 
   @Post()
-  @ApiOperation({ summary: 'Index a document' })
-  @ApiParam({ name: 'index', description: 'Index name' })
+  @ApiOperation({
+    summary: 'Index a document',
+    description:
+      'Adds a document to the specified index. If a document with the same ID already exists, it will be replaced.',
+  })
+  @ApiParam({
+    name: 'index',
+    description: 'Index name where the document will be stored',
+    example: 'products',
+  })
+  @ApiBody({
+    type: IndexDocumentDto,
+    description: 'Document to be indexed',
+    examples: {
+      withId: {
+        summary: 'Document with specified ID',
+        value: {
+          id: 'product-123',
+          document: {
+            title: 'Smartphone X',
+            description: 'Latest smartphone with advanced features',
+            price: 999.99,
+            categories: ['electronics', 'mobile'],
+          },
+        },
+      },
+      withoutId: {
+        summary: 'Document with auto-generated ID',
+        value: {
+          document: {
+            title: 'Laptop Pro',
+            description: 'Professional grade laptop for developers',
+            price: 1499.99,
+            categories: ['electronics', 'computers'],
+          },
+        },
+      },
+    },
+  })
   @ApiResponse({
     status: HttpStatus.CREATED,
     description: 'Document indexed successfully',
-    type: DocumentResponseDto,
+    schema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', example: 'product-123' },
+        index: { type: 'string', example: 'products' },
+        version: { type: 'number', example: 1 },
+        result: { type: 'string', example: 'created' },
+      },
+    },
   })
-  @ApiResponse({ status: HttpStatus.BAD_REQUEST, description: 'Invalid document' })
-  @ApiResponse({ status: HttpStatus.NOT_FOUND, description: 'Index not found' })
+  @ApiResponse({
+    status: HttpStatus.BAD_REQUEST,
+    description: 'Invalid document structure or fields',
+  })
+  @ApiResponse({
+    status: HttpStatus.NOT_FOUND,
+    description: 'Specified index does not exist',
+  })
   async indexDocument(
     @Param('index') index: string,
     @Body(ValidationPipe) indexDocumentDto: IndexDocumentDto,
@@ -53,15 +107,45 @@ export class DocumentController {
   }
 
   @Get(':id')
-  @ApiOperation({ summary: 'Get a document by ID' })
-  @ApiParam({ name: 'index', description: 'Index name' })
-  @ApiParam({ name: 'id', description: 'Document ID' })
+  @ApiOperation({
+    summary: 'Get a document by ID',
+    description: 'Retrieves a specific document from the index by its ID',
+  })
+  @ApiParam({
+    name: 'index',
+    description: 'Index name',
+    example: 'products',
+  })
+  @ApiParam({
+    name: 'id',
+    description: 'Document ID',
+    example: 'product-123',
+  })
   @ApiResponse({
     status: HttpStatus.OK,
-    description: 'Returns the document',
-    type: DocumentResponseDto,
+    description: 'Returns the requested document',
+    schema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', example: 'product-123' },
+        index: { type: 'string', example: 'products' },
+        version: { type: 'number', example: 1 },
+        source: {
+          type: 'object',
+          example: {
+            title: 'Smartphone X',
+            description: 'Latest smartphone with advanced features',
+            price: 999.99,
+            categories: ['electronics', 'mobile'],
+          },
+        },
+      },
+    },
   })
-  @ApiResponse({ status: HttpStatus.NOT_FOUND, description: 'Document or index not found' })
+  @ApiResponse({
+    status: HttpStatus.NOT_FOUND,
+    description: 'Document or index not found',
+  })
   async getDocument(
     @Param('index') index: string,
     @Param('id') id: string,
@@ -70,16 +154,56 @@ export class DocumentController {
   }
 
   @Put(':id')
-  @ApiOperation({ summary: 'Update a document' })
-  @ApiParam({ name: 'index', description: 'Index name' })
-  @ApiParam({ name: 'id', description: 'Document ID' })
+  @ApiOperation({
+    summary: 'Update a document',
+    description: 'Updates an existing document in the index. The document must already exist.',
+  })
+  @ApiParam({
+    name: 'index',
+    description: 'Index name',
+    example: 'products',
+  })
+  @ApiParam({
+    name: 'id',
+    description: 'Document ID to update',
+    example: 'product-123',
+  })
+  @ApiBody({
+    type: IndexDocumentDto,
+    examples: {
+      update: {
+        summary: 'Update document fields',
+        value: {
+          document: {
+            title: 'Smartphone X Pro',
+            price: 1099.99,
+            inStock: false,
+          },
+        },
+      },
+    },
+  })
   @ApiResponse({
     status: HttpStatus.OK,
     description: 'Document updated successfully',
-    type: DocumentResponseDto,
+    schema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', example: 'product-123' },
+        index: { type: 'string', example: 'products' },
+        version: { type: 'number', example: 2 },
+        result: { type: 'string', example: 'updated' },
+      },
+    },
   })
-  @ApiResponse({ status: HttpStatus.BAD_REQUEST, description: 'Invalid document' })
-  @ApiResponse({ status: HttpStatus.NOT_FOUND, description: 'Document or index not found' })
+  @ApiResponse({
+    status: HttpStatus.BAD_REQUEST,
+    description: 'Invalid document structure',
+  })
+  @ApiResponse({
+    status: HttpStatus.NOT_FOUND,
+    description: 'Document or index not found',
+  })
   async updateDocument(
     @Param('index') index: string,
     @Param('id') id: string,
@@ -89,26 +213,103 @@ export class DocumentController {
   }
 
   @Delete(':id')
-  @ApiOperation({ summary: 'Delete a document by ID' })
-  @ApiParam({ name: 'index', description: 'Index name' })
-  @ApiParam({ name: 'id', description: 'Document ID' })
+  @ApiOperation({
+    summary: 'Delete a document',
+    description: 'Permanently removes a document from the index by ID',
+  })
+  @ApiParam({
+    name: 'index',
+    description: 'Index name',
+    example: 'products',
+  })
+  @ApiParam({
+    name: 'id',
+    description: 'Document ID to delete',
+    example: 'product-123',
+  })
   @HttpCode(HttpStatus.NO_CONTENT)
-  @ApiResponse({ status: HttpStatus.NO_CONTENT, description: 'Document deleted successfully' })
-  @ApiResponse({ status: HttpStatus.NOT_FOUND, description: 'Document or index not found' })
+  @ApiResponse({
+    status: HttpStatus.NO_CONTENT,
+    description: 'Document deleted successfully',
+  })
+  @ApiResponse({
+    status: HttpStatus.NOT_FOUND,
+    description: 'Document or index not found',
+  })
   async deleteDocument(@Param('index') index: string, @Param('id') id: string): Promise<void> {
     await this.documentService.deleteDocument(index, id);
   }
 
   @Post('_bulk')
-  @ApiOperation({ summary: 'Bulk index documents' })
-  @ApiParam({ name: 'index', description: 'Index name' })
+  @ApiOperation({
+    summary: 'Bulk index documents',
+    description: 'Indexes multiple documents in a single operation for better performance',
+  })
+  @ApiParam({
+    name: 'index',
+    description: 'Index name',
+    example: 'products',
+  })
+  @ApiBody({
+    type: BulkIndexDocumentsDto,
+    description: 'Array of documents to index',
+    examples: {
+      bulk: {
+        summary: 'Index multiple documents',
+        value: {
+          documents: [
+            {
+              id: 'product-123',
+              document: {
+                title: 'Smartphone X',
+                price: 999.99,
+                categories: ['electronics'],
+              },
+            },
+            {
+              id: 'product-124',
+              document: {
+                title: 'Laptop Pro',
+                price: 1499.99,
+                categories: ['electronics', 'computers'],
+              },
+            },
+          ],
+        },
+      },
+    },
+  })
   @ApiResponse({
     status: HttpStatus.OK,
     description: 'Documents indexed successfully',
-    type: BulkResponseDto,
+    schema: {
+      type: 'object',
+      properties: {
+        took: { type: 'number', example: 35 },
+        errors: { type: 'boolean', example: false },
+        items: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              id: { type: 'string', example: 'product-123' },
+              index: { type: 'string', example: 'products' },
+              version: { type: 'number', example: 1 },
+              result: { type: 'string', example: 'created' },
+            },
+          },
+        },
+      },
+    },
   })
-  @ApiResponse({ status: HttpStatus.BAD_REQUEST, description: 'Invalid documents' })
-  @ApiResponse({ status: HttpStatus.NOT_FOUND, description: 'Index not found' })
+  @ApiResponse({
+    status: HttpStatus.BAD_REQUEST,
+    description: 'Invalid document structure or fields',
+  })
+  @ApiResponse({
+    status: HttpStatus.NOT_FOUND,
+    description: 'Specified index does not exist',
+  })
   async bulkIndexDocuments(
     @Param('index') index: string,
     @Body(ValidationPipe) bulkIndexDocumentsDto: BulkIndexDocumentsDto,
@@ -117,15 +318,67 @@ export class DocumentController {
   }
 
   @Post('_delete_by_query')
-  @ApiOperation({ summary: 'Delete documents by query' })
-  @ApiParam({ name: 'index', description: 'Index name' })
+  @ApiOperation({
+    summary: 'Delete documents by query',
+    description: 'Deletes all documents that match the specified query',
+  })
+  @ApiParam({
+    name: 'index',
+    description: 'Index name',
+    example: 'products',
+  })
+  @ApiBody({
+    type: DeleteByQueryDto,
+    description: 'Query to match documents for deletion',
+    examples: {
+      term: {
+        summary: 'Delete by term match',
+        value: {
+          query: {
+            term: {
+              field: 'categories',
+              value: 'discontinued',
+            },
+          },
+        },
+      },
+      range: {
+        summary: 'Delete by range condition',
+        value: {
+          query: {
+            range: {
+              field: 'price',
+              lt: 10.0,
+            },
+          },
+        },
+      },
+    },
+  })
   @ApiResponse({
     status: HttpStatus.OK,
     description: 'Documents deleted successfully',
-    type: DeleteByQueryResponseDto,
+    schema: {
+      type: 'object',
+      properties: {
+        took: { type: 'number', example: 75 },
+        deleted: { type: 'number', example: 5 },
+        failures: {
+          type: 'array',
+          items: { type: 'object' },
+          example: [],
+        },
+      },
+    },
   })
-  @ApiResponse({ status: HttpStatus.BAD_REQUEST, description: 'Invalid query' })
-  @ApiResponse({ status: HttpStatus.NOT_FOUND, description: 'Index not found' })
+  @ApiResponse({
+    status: HttpStatus.BAD_REQUEST,
+    description: 'Invalid query structure',
+  })
+  @ApiResponse({
+    status: HttpStatus.NOT_FOUND,
+    description: 'Specified index does not exist',
+  })
   async deleteByQuery(
     @Param('index') index: string,
     @Body(ValidationPipe) deleteByQueryDto: DeleteByQueryDto,

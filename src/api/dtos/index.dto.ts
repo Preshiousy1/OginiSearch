@@ -1,36 +1,140 @@
-import { IsString, IsNotEmpty, IsOptional, IsObject } from 'class-validator';
-import { IndexMappings, IndexSettings } from '../../index/interfaces/index.interface';
+import {
+  IsString,
+  IsNotEmpty,
+  IsOptional,
+  IsObject,
+  ValidateNested,
+  IsIn,
+  IsBooleanString,
+} from 'class-validator';
+import { FieldMapping, IndexMappings, IndexSettings } from '../../index/interfaces/index.interface';
 import { ApiProperty } from '@nestjs/swagger';
+import { Type } from 'class-transformer';
+
+export class IndexSettingsDto {
+  @ApiProperty({
+    description: 'Number of primary shards',
+    required: false,
+    example: 1,
+  })
+  @IsOptional()
+  numberOfShards?: number;
+
+  @ApiProperty({
+    description: 'Index refresh interval',
+    required: false,
+    example: '1s',
+  })
+  @IsOptional()
+  refreshInterval?: string;
+}
+
+export class FieldMappingDto implements FieldMapping {
+  @ApiProperty({
+    description: 'Field type (text, keyword, number, etc.)',
+    example: 'text',
+  })
+  @IsString()
+  @IsNotEmpty()
+  @IsIn(['text', 'keyword', 'integer', 'float', 'date', 'boolean', 'object', 'nested'])
+  type: FieldMapping['type'];
+
+  @ApiProperty({
+    description: 'Text analyzer to use for this field',
+    required: false,
+    example: 'standard',
+  })
+  @IsOptional()
+  @IsString()
+  analyzer?: string;
+
+  @ApiProperty({
+    description: 'Relevance boost factor for this field',
+    required: false,
+    example: 2.0,
+  })
+  @IsOptional()
+  boost?: number;
+
+  searchAnalyzer?: string;
+  store?: boolean;
+  index?: boolean;
+  fields?: Record<string, FieldMapping>; // For multi-fields
+}
+
+export class MappingsDto implements IndexMappings {
+  @ApiProperty()
+  @IsOptional()
+  @IsString()
+  dynamic?: boolean | 'strict' | 'runtime';
+
+  @ApiProperty({
+    description: 'Document field definitions',
+    example: {
+      title: { type: 'text', analyzer: 'standard' },
+      description: { type: 'text' },
+      price: { type: 'number' },
+      categories: { type: 'keyword' },
+    },
+  })
+  @IsObject()
+  properties: Record<string, FieldMappingDto>;
+}
 
 export class CreateIndexDto {
-  @ApiProperty({ name: 'name', example: 'my-index', description: 'Name of the index' })
+  @ApiProperty({
+    description: 'Unique name for the index',
+    example: 'products',
+  })
   @IsString()
   @IsNotEmpty()
   name: string;
 
   @ApiProperty({
-    name: 'settings',
-    example: { numberOfShards: 1, refreshInterval: '1s' },
-    description: 'Index settings',
+    description: 'Index configuration settings',
+    required: false,
+    type: IndexSettingsDto,
   })
   @IsOptional()
   @IsObject()
-  settings?: IndexSettings;
+  @ValidateNested()
+  @Type(() => IndexSettingsDto)
+  settings?: IndexSettingsDto;
 
   @ApiProperty({
-    name: 'mappings',
-    example: {
-      properties: {
-        title: { type: 'text', analyzer: 'standard' },
-        content: { type: 'text', analyzer: 'standard' },
-        tags: { type: 'keyword' },
-      },
-    },
-    description: 'Index mappings',
+    description: 'Field mappings configuration',
+    required: false,
+    type: MappingsDto,
   })
   @IsOptional()
   @IsObject()
-  mappings?: IndexMappings;
+  @ValidateNested()
+  @Type(() => MappingsDto)
+  mappings?: MappingsDto;
+}
+
+export class UpdateIndexDto {
+  @ApiProperty({
+    description: 'Updated index settings',
+    required: false,
+    type: IndexSettingsDto,
+  })
+  @IsOptional()
+  @IsObject()
+  @ValidateNested()
+  @Type(() => IndexSettingsDto)
+  settings?: Partial<IndexSettingsDto>;
+
+  @ApiProperty({
+    description: 'Updated field mappings',
+    required: false,
+    type: MappingsDto,
+  })
+  @IsOptional()
+  @IsObject()
+  @ValidateNested()
+  @Type(() => MappingsDto)
+  mappings?: Partial<MappingsDto>;
 }
 
 export class UpdateIndexSettingsDto {

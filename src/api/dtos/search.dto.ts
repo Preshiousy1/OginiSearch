@@ -8,47 +8,88 @@ import {
   Max,
   IsObject,
   IsBoolean,
+  IsNumber,
 } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
-export class SearchQueryDto {
+
+export class MatchQueryDto {
   @ApiProperty({
-    name: 'query',
-    example: 'John Doe',
-    description: 'Search query',
+    description: 'Field to search in (optional if fields array is provided)',
+    required: false,
+    example: 'title',
+  })
+  @IsOptional()
+  @IsString()
+  field?: string;
+
+  @ApiProperty({
+    description: 'Text to search for',
+    example: 'smartphone',
   })
   @IsString()
   @IsNotEmpty()
-  query: string;
+  value: string;
+}
+
+export class SearchQueryDto {
+  @ApiProperty({
+    description: 'Search query definition',
+    example: {
+      match: {
+        field: 'title',
+        value: 'smartphone',
+      },
+    },
+  })
+  @IsObject()
+  @IsNotEmpty()
+  query:
+    | {
+        match?: MatchQueryDto;
+        term?: Record<string, any>;
+      }
+    | string;
 
   @ApiProperty({
-    name: 'fields',
-    example: ['title', 'content'],
-    description: 'Fields to search in',
+    description: 'Number of results to return',
+    required: false,
+    example: 10,
   })
-  @IsArray()
   @IsOptional()
+  @IsNumber()
+  size?: number;
+
+  @ApiProperty({
+    description: 'Starting offset for pagination',
+    required: false,
+    example: 0,
+  })
+  @IsOptional()
+  @IsNumber()
+  from?: number;
+
+  @ApiProperty({
+    description: 'Fields to search in (for multi-field search)',
+    required: false,
+    example: ['title', 'description'],
+  })
+  @IsOptional()
+  @IsArray()
   fields?: string[];
 
   @ApiProperty({
-    name: 'from',
-    example: 0,
-    description: 'Starting index',
+    description: 'Additional filter criteria',
+    required: false,
+    example: {
+      term: {
+        field: 'categories',
+        value: 'electronics',
+      },
+    },
   })
-  @IsInt()
-  @Min(0)
   @IsOptional()
-  from?: number = 0;
-
-  @ApiProperty({
-    name: 'size',
-    example: 10,
-    description: 'Number of results to return',
-  })
-  @IsInt()
-  @Min(1)
-  @Max(100)
-  @IsOptional()
-  size?: number = 10;
+  @IsObject()
+  filter?: Record<string, any>;
 
   @ApiProperty({
     name: 'sort',
@@ -58,15 +99,6 @@ export class SearchQueryDto {
   @IsString()
   @IsOptional()
   sort?: string;
-
-  @ApiProperty({
-    name: 'filter',
-    example: { title: 'John' },
-    description: 'Filter criteria',
-  })
-  @IsObject()
-  @IsOptional()
-  filter?: Record<string, any>;
 
   @ApiProperty({
     name: 'highlight',
@@ -134,33 +166,30 @@ export class SearchResponseDto {
 
 export class SuggestQueryDto {
   @ApiProperty({
-    name: 'text',
-    example: 'John Doe',
-    description: 'Text to suggest',
+    description: 'Text to get suggestions for',
+    example: 'phon',
   })
   @IsString()
   @IsNotEmpty()
   text: string;
 
   @ApiProperty({
-    name: 'field',
+    description: 'Field to get suggestions from',
+    required: false,
     example: 'title',
-    description: 'Field to suggest',
   })
-  @IsString()
   @IsOptional()
-  field?: string = 'title';
+  @IsString()
+  field?: string;
 
   @ApiProperty({
-    name: 'size',
+    description: 'Maximum number of suggestions to return',
+    required: false,
     example: 5,
-    description: 'Number of suggestions to return',
   })
-  @IsInt()
-  @Min(1)
-  @Max(10)
   @IsOptional()
-  size?: number = 5;
+  @IsNumber()
+  size?: number;
 }
 
 export class SuggestResponseDto {

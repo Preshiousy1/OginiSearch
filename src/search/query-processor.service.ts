@@ -25,9 +25,11 @@ export class QueryProcessorService implements QueryProcessor {
   processQuery(rawQuery: RawQuery): ProcessedQuery {
     // Parse and normalize query
     const parsedQuery = this.parseQuery(rawQuery);
+    console.log(`Parsed query: `, parsedQuery);
 
     // Create execution plan
     const executionPlan = this.queryPlanner.createPlan(parsedQuery);
+    console.log(`Execution plan: `, executionPlan);
 
     return {
       original: rawQuery,
@@ -41,13 +43,13 @@ export class QueryProcessorService implements QueryProcessor {
    */
   private parseQuery(rawQuery: RawQuery): Query {
     // If no fields are specified, default to searching all fields
-    const fields = rawQuery.fields || ['_all'];
+    const { text, fields } = this.extractQueryTextAndFields(rawQuery);
 
     // Normalize query string
-    const normalizedQuery = this.normalizeQuery(rawQuery.query);
+    const normalizedQuery = this.normalizeQuery(text);
 
     // Extract phrases (terms in quotes)
-    const phrases = this.extractPhrases(rawQuery.query);
+    const phrases = this.extractPhrases(text);
 
     // Remove phrases from the query for term processing
     let termText = normalizedQuery;
@@ -81,6 +83,8 @@ export class QueryProcessorService implements QueryProcessor {
         type: 'boolean',
         operator: 'or',
         clauses,
+        text,
+        fields,
       };
     }
     // If we only have one term and one field, return a simple term query
@@ -95,6 +99,37 @@ export class QueryProcessorService implements QueryProcessor {
       operator: 'or',
       clauses: [],
     };
+  }
+
+  /**
+   * Extract query text and fields from raw query
+   */
+  extractQueryTextAndFields(rawQuery: RawQuery): { text: string; fields: string[] } {
+    // Handle string queries
+    if (typeof rawQuery.query === 'string') {
+      return { text: rawQuery.query, fields: rawQuery.fields || ['_all'] };
+    }
+
+    // Handle object queries
+    if (rawQuery.query.match) {
+      const field = rawQuery.query.match.field;
+      return {
+        text: rawQuery.query.match.value,
+        fields: field ? [field] : rawQuery.fields || ['_all'],
+      };
+    }
+
+    // Handle term queries
+    if (rawQuery.query.term) {
+      const entries = Object.entries(rawQuery.query.term);
+      if (entries.length > 0) {
+        const [field, value] = entries[0];
+        return { text: String(value), fields: [field] };
+      }
+    }
+
+    // Default to empty query if none of the above formats match
+    return { text: '', fields: rawQuery.fields || ['_all'] };
   }
 
   /**

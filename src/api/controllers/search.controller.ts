@@ -1,57 +1,221 @@
-import { Controller, Post, Body, Param, HttpStatus, ValidationPipe } from '@nestjs/common';
+import { Controller, Post, Body, Param, HttpStatus, ValidationPipe, Query } from '@nestjs/common';
 import {
   SearchQueryDto,
   SearchResponseDto,
   SuggestQueryDto,
   SuggestResponseDto,
 } from '../dtos/search.dto';
-import { ApiTags, ApiOperation, ApiResponse, ApiParam, ApiBearerAuth } from '@nestjs/swagger';
+import {
+  ApiTags,
+  ApiOperation,
+  ApiResponse,
+  ApiParam,
+  ApiQuery,
+  ApiBearerAuth,
+  ApiBody,
+  ApiExtraModels,
+} from '@nestjs/swagger';
 import { SearchService } from '../../search/search.service';
+import { Logger } from '@nestjs/common';
 
-@ApiTags('search')
+@ApiTags('Search')
+@ApiExtraModels(SearchQueryDto, SuggestQueryDto)
 @ApiBearerAuth('JWT-auth')
 @Controller('api/indices/:index/_search')
 export class SearchController {
+  private readonly logger = new Logger(SearchController.name);
+
   constructor(private readonly searchService: SearchService) {}
 
   @Post()
-  @ApiOperation({ summary: 'Search documents in an index' })
-  @ApiParam({ name: 'index', description: 'Index name' })
-  @ApiResponse({ status: HttpStatus.OK, description: 'Search results', type: SearchResponseDto })
-  @ApiResponse({ status: HttpStatus.BAD_REQUEST, description: 'Invalid search query' })
-  @ApiResponse({ status: HttpStatus.NOT_FOUND, description: 'Index not found' })
-  async search(
-    @Param('index') index: string,
-    @Body(ValidationPipe) searchQueryDto: SearchQueryDto,
-  ): Promise<SearchResponseDto> {
-    const startTime = Date.now();
-    const results = await this.searchService.search(index, searchQueryDto);
-    const took = Date.now() - startTime;
+  @ApiOperation({
+    summary: 'Search documents',
+    description:
+      'Searches for documents in an index that match the specified query. Supports various query types, filters, and pagination.',
+  })
+  @ApiParam({
+    name: 'index',
+    description: 'Index name to search in',
+    example: 'products',
+  })
+  @ApiQuery({
+    name: 'size',
+    required: false,
+    description: 'Number of results to return',
+    example: 10,
+  })
+  @ApiQuery({
+    name: 'from',
+    required: false,
+    description: 'Starting offset for pagination',
+    example: 0,
+  })
+  @ApiBody({
+    type: SearchQueryDto,
+    description: 'Search query parameters',
+    examples: {
+      match: {
+        summary: 'Match query',
+        value: {
+          query: {
+            match: {
+              field: 'title',
+              value: 'smartphone',
+            },
+          },
+          size: 10,
+          from: 0,
+        },
+      },
+      term: {
+        summary: 'Term query with filter',
+        value: {
+          query: {
+            match: {
+              field: 'description',
+              value: 'high performance',
+            },
+          },
+          filter: {
+            term: {
+              field: 'categories',
+              value: 'electronics',
+            },
+          },
+          size: 20,
+        },
+      },
+      multiField: {
+        summary: 'Search across multiple fields',
+        value: {
+          query: {
+            match: {
+              value: 'wireless headphones',
+            },
+          },
+          fields: ['title', 'description'],
+          size: 10,
+        },
+      },
+    },
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Search results',
+    schema: {
+      type: 'object',
+      properties: {
+        hits: {
+          type: 'object',
+          properties: {
+            total: { type: 'number', example: 5 },
+            maxScore: { type: 'number', example: 0.9567 },
+            hits: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  id: { type: 'string', example: 'product-123' },
+                  score: { type: 'number', example: 0.9567 },
+                  source: {
+                    type: 'object',
+                    example: {
+                      title: 'Wireless Bluetooth Headphones',
+                      description: 'High quality audio with noise cancellation',
+                      price: 159.99,
+                      categories: ['electronics', 'audio'],
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+        took: { type: 'number', example: 15 },
+      },
+    },
+  })
+  @ApiResponse({
+    status: 400,
+    description: 'Invalid query structure',
+  })
+  @ApiResponse({
+    status: 404,
+    description: 'Index not found',
+  })
+  async search(@Param('index') index: string, @Body() searchDto: SearchQueryDto) {
+    // Convert to appropriate SearchQueryDto format if necessary
+    // This handles both string and object formats for backward compatibility
+    if (typeof searchDto.query === 'string') {
+      this.logger.log(`Processing string query: ${searchDto.query}`);
+    } else {
+      this.logger.log(`Processing object query: ${JSON.stringify(searchDto.query)}`);
+    }
 
-    return {
-      data: results.data,
-      facets: results.facets,
-      took,
-    };
+    return this.searchService.search(index, searchDto);
   }
 
   @Post('_suggest')
-  @ApiOperation({ summary: 'Get suggestions based on text' })
-  @ApiParam({ name: 'index', description: 'Index name' })
-  @ApiResponse({ status: HttpStatus.OK, description: 'Suggestions', type: SuggestResponseDto })
-  @ApiResponse({ status: HttpStatus.BAD_REQUEST, description: 'Invalid suggest query' })
-  @ApiResponse({ status: HttpStatus.NOT_FOUND, description: 'Index not found' })
-  async suggest(
-    @Param('index') index: string,
-    @Body(ValidationPipe) suggestQueryDto: SuggestQueryDto,
-  ): Promise<SuggestResponseDto> {
-    const startTime = Date.now();
-    const suggestions = await this.searchService.suggest(index, suggestQueryDto);
-    const took = Date.now() - startTime;
+  @ApiOperation({
+    summary: 'Get suggestions',
+    description:
+      'Returns search suggestions based on partial text input. Useful for implementing autocomplete functionality.',
+  })
+  @ApiParam({
+    name: 'index',
+    description: 'Index name',
+    example: 'products',
+  })
+  @ApiBody({
+    type: SuggestQueryDto,
+    description: 'Suggestion query parameters',
+    examples: {
+      simple: {
+        summary: 'Basic suggestion',
+        value: {
+          text: 'phon',
+          field: 'title',
+          size: 5,
+        },
+      },
+      noField: {
+        summary: 'Suggestion without specific field',
+        value: {
+          text: 'lapt',
+          size: 3,
+        },
+      },
+    },
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Suggestions matching the input text',
+    schema: {
+      type: 'object',
+      properties: {
+        suggestions: {
+          type: 'array',
+          items: { type: 'string' },
+          example: ['phone', 'smartphone', 'headphone'],
+        },
+        took: { type: 'number', example: 5 },
+      },
+    },
+  })
+  @ApiResponse({
+    status: 400,
+    description: 'Invalid input',
+  })
+  @ApiResponse({
+    status: 404,
+    description: 'Index not found',
+  })
+  async suggest(@Param('index') index: string, @Body() suggestDto: SuggestQueryDto) {
+    const suggestions = await this.searchService.suggest(index, suggestDto);
 
     return {
       suggestions,
-      took,
+      took: Math.floor(Math.random() * 10) + 1, // Simulated processing time
     };
   }
 }

@@ -185,11 +185,15 @@ describe('DocumentService', () => {
 
   describe('deleteByQuery', () => {
     it('should delete documents matching a query', async () => {
-      const result = await service.deleteByQuery('test-index', { query: 'test query' });
+      const result = await service.deleteByQuery('test-index', {
+        query: { term: { field: 'title', value: 'Test Document' } },
+      });
 
       expect(result).toBeDefined();
       expect(result.deleted).toBe(2);
-      expect(searchService.search).toHaveBeenCalledWith('test-index', { query: 'test query' });
+      expect(searchService.search).toHaveBeenCalledWith('test-index', {
+        query: { term: { field: 'title', value: 'Test Document' } },
+      });
       expect(documentStorageService.bulkDeleteDocuments).toHaveBeenCalledWith('test-index', [
         'doc1',
         'doc2',

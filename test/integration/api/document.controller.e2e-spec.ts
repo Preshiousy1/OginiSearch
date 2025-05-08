@@ -188,7 +188,11 @@ describe('DocumentController (e2e)', () => {
     it('should delete documents by query', async () => {
       const res = await request(app.getHttpServer())
         .post('/api/indices/doc-index/documents/_delete_by_query')
-        .send({ query: 'del', fields: ['title'], filter: { tag: 'gamma' } })
+        .send({
+          query: { term: { field: 'title', value: 'DeleteByQuery1' } },
+          fields: ['title'],
+          filter: { tag: 'gamma' },
+        })
         .expect(201);
 
       expect(res.body.deleted).toBeGreaterThanOrEqual(1);
@@ -204,7 +208,11 @@ describe('DocumentController (e2e)', () => {
     it('should return 404 for non-existent index', async () => {
       await request(app.getHttpServer())
         .post('/api/indices/does-not-exist/documents/_delete_by_query')
-        .send({ query: 'del', fields: ['title'], filter: { tag: 'del' } })
+        .send({
+          query: { term: { field: 'title', value: 'DeleteByQuery1' } },
+          fields: ['title'],
+          filter: { tag: 'gamma' },
+        })
         .expect(404);
     });
   });

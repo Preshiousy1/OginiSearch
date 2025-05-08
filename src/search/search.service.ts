@@ -4,6 +4,7 @@ import { QueryProcessorService } from './query-processor.service';
 import { SearchQueryDto, SuggestQueryDto, SearchResponseDto } from '../api/dtos/search.dto';
 import { SearchExecutorService } from './search-executor.service';
 import { InMemoryTermDictionary } from '../index/term-dictionary';
+import { RawQuery } from './interfaces/query-processor.interface';
 
 @Injectable()
 export class SearchService {
@@ -20,7 +21,7 @@ export class SearchService {
     indexName: string,
     searchQuery: SearchQueryDto,
   ): Promise<Partial<SearchResponseDto>> {
-    this.logger.log(`Searching in index ${indexName}: ${searchQuery.query}`);
+    this.logger.log(`Searching in index ${indexName}: ${JSON.stringify(searchQuery.query)}`);
 
     // Check if index exists
     try {
@@ -30,11 +31,22 @@ export class SearchService {
     }
 
     try {
-      // Process the query
-      const processedQuery = await this.queryProcessor.processQuery({
+      const startTime = Date.now();
+
+      // Prepare raw query format for the query processor
+      const rawQuery: RawQuery = {
         query: searchQuery.query,
         fields: searchQuery.fields,
-      });
+        offset: searchQuery.from,
+        limit: searchQuery.size,
+        filters: searchQuery.filter,
+      };
+
+      // Process the query
+      const processedQuery = await this.queryProcessor.processQuery(rawQuery);
+
+      this.logger.debug(`Processed query: ${JSON.stringify(processedQuery)}`);
+      console.log(`Processed query: `, processedQuery);
 
       // Execute the search
       const results = await this.searchExecutor.executeQuery(
@@ -58,11 +70,13 @@ export class SearchService {
             index: indexName,
             score: hit.score,
             source: hit.document,
-            highlight: searchQuery.highlight
-              ? this.getHighlights(hit, searchQuery.query)
-              : undefined,
+            highlight:
+              searchQuery.highlight && processedQuery.parsedQuery.text
+                ? this.getHighlights(hit, processedQuery.parsedQuery.text)
+                : undefined,
           })),
         },
+        took: Date.now() - startTime, // Add processing time in milliseconds
       };
 
       // Add facets if requested
@@ -115,10 +129,10 @@ export class SearchService {
     }
   }
 
-  private getHighlights(hit: any, query: string): Record<string, string[]> {
+  private getHighlights(hit: any, queryText: string): Record<string, string[]> {
     // Simple highlight implementation
     const highlights: Record<string, string[]> = {};
-    const queryTerms = query.toLowerCase().split(/\s+/);
+    const queryTerms = queryText.toLowerCase().split(/\s+/);
 
     for (const [field, value] of Object.entries(hit.document)) {
       if (typeof value === 'string') {

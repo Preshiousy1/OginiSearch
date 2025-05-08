@@ -25,23 +25,95 @@ import {
   ApiParam,
   ApiQuery,
   ApiBearerAuth,
+  ApiBody,
+  ApiExtraModels,
 } from '@nestjs/swagger';
 
-@ApiTags('indices')
+@ApiTags('Indices')
+@ApiExtraModels(CreateIndexDto, UpdateIndexSettingsDto)
 @ApiBearerAuth('JWT-auth')
 @Controller('api/indices')
 export class IndexController {
   constructor(private readonly indexService: IndexService) {}
 
   @Post()
-  @ApiOperation({ summary: 'Create a new index' })
+  @ApiOperation({
+    summary: 'Create a new index',
+    description:
+      'Creates a new search index with the specified name, settings, and mappings. The index name must be unique.',
+  })
+  @ApiBody({
+    type: CreateIndexDto,
+    description: 'Index creation parameters including name, settings, and field mappings',
+    examples: {
+      simple: {
+        summary: 'Simple index with default settings',
+        value: {
+          name: 'products',
+          mappings: {
+            properties: {
+              title: { type: 'text', analyzer: 'standard' },
+              description: { type: 'text', analyzer: 'standard' },
+              price: { type: 'number' },
+              categories: { type: 'keyword' },
+            },
+          },
+        },
+      },
+      advanced: {
+        summary: 'Advanced index with custom settings',
+        value: {
+          name: 'articles',
+          settings: {
+            numberOfShards: 2,
+            refreshInterval: '5s',
+          },
+          mappings: {
+            properties: {
+              title: { type: 'text', analyzer: 'standard', boost: 2.0 },
+              content: { type: 'text', analyzer: 'standard' },
+              author: { type: 'keyword' },
+              tags: { type: 'keyword' },
+              publishDate: { type: 'date' },
+            },
+          },
+        },
+      },
+    },
+  })
   @ApiResponse({
     status: HttpStatus.CREATED,
-    description: 'Index created successfully',
-    type: IndexResponseDto,
+    description: 'Index created successfully. Returns the created index configuration.',
+    schema: {
+      type: 'object',
+      properties: {
+        name: { type: 'string', example: 'products' },
+        status: { type: 'string', example: 'open' },
+        createdAt: { type: 'string', format: 'date-time', example: '2023-06-15T10:00:00Z' },
+        documentCount: { type: 'number', example: 0 },
+        settings: {
+          type: 'object',
+          example: { numberOfShards: 1, refreshInterval: '1s' },
+        },
+        mappings: {
+          type: 'object',
+          example: {
+            properties: {
+              title: { type: 'text', analyzer: 'standard' },
+            },
+          },
+        },
+      },
+    },
   })
-  @ApiResponse({ status: HttpStatus.BAD_REQUEST, description: 'Invalid index configuration' })
-  @ApiResponse({ status: HttpStatus.CONFLICT, description: 'Index with this name already exists' })
+  @ApiResponse({
+    status: HttpStatus.BAD_REQUEST,
+    description: 'Invalid input. The request body may be malformed or contain invalid fields.',
+  })
+  @ApiResponse({
+    status: HttpStatus.CONFLICT,
+    description: 'An index with the provided name already exists.',
+  })
   async createIndex(
     @Body(ValidationPipe) createIndexDto: CreateIndexDto,
   ): Promise<IndexResponseDto> {
@@ -49,13 +121,38 @@ export class IndexController {
   }
 
   @Get()
-  @ApiOperation({ summary: 'List all indices' })
+  @ApiOperation({
+    summary: 'List all indices',
+    description: 'Returns a list of all indices in the system. Can be filtered by status.',
+  })
+  @ApiQuery({
+    name: 'status',
+    required: false,
+    description: 'Filter indices by status (open, closed, etc.)',
+    example: 'open',
+  })
   @ApiResponse({
     status: HttpStatus.OK,
-    description: 'Returns all indices',
-    type: IndexListResponseDto,
+    description: 'Returns a list of all indices',
+    schema: {
+      type: 'object',
+      properties: {
+        indices: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              name: { type: 'string', example: 'products' },
+              status: { type: 'string', example: 'open' },
+              documentCount: { type: 'number', example: 150 },
+              createdAt: { type: 'string', format: 'date-time', example: '2023-06-15T10:00:00Z' },
+            },
+          },
+        },
+        total: { type: 'number', example: 2 },
+      },
+    },
   })
-  @ApiQuery({ name: 'status', required: false, description: 'Filter by index status' })
   async listIndices(@Query('status') status?: string): Promise<IndexListResponseDto> {
     const indices = await this.indexService.listIndices(status);
     return {
@@ -65,28 +162,121 @@ export class IndexController {
   }
 
   @Get(':name')
-  @ApiOperation({ summary: 'Get index details' })
-  @ApiParam({ name: 'name', description: 'Index name' })
+  @ApiOperation({
+    summary: 'Get index details',
+    description:
+      'Retrieves detailed information about a specific index including settings, mappings, and status.',
+  })
+  @ApiParam({
+    name: 'name',
+    description: 'Index name to retrieve',
+    example: 'products',
+  })
   @ApiResponse({
     status: HttpStatus.OK,
-    description: 'Returns index details',
-    type: IndexResponseDto,
+    description: 'Returns detailed information about the index',
+    schema: {
+      type: 'object',
+      properties: {
+        name: { type: 'string', example: 'products' },
+        status: { type: 'string', example: 'open' },
+        documentCount: { type: 'number', example: 150 },
+        createdAt: { type: 'string', format: 'date-time', example: '2023-06-15T10:00:00Z' },
+        settings: {
+          type: 'object',
+          example: { numberOfShards: 1, refreshInterval: '1s' },
+        },
+        mappings: {
+          type: 'object',
+          example: {
+            properties: {
+              title: { type: 'text', analyzer: 'standard' },
+              description: { type: 'text', analyzer: 'standard' },
+              price: { type: 'number' },
+              categories: { type: 'keyword' },
+            },
+          },
+        },
+      },
+    },
   })
-  @ApiResponse({ status: HttpStatus.NOT_FOUND, description: 'Index not found' })
+  @ApiResponse({
+    status: HttpStatus.NOT_FOUND,
+    description: 'Index with the specified name does not exist',
+  })
   async getIndex(@Param('name') name: string): Promise<IndexResponseDto> {
     return this.indexService.getIndex(name);
   }
 
   @Put(':name/settings')
-  @ApiOperation({ summary: 'Update index settings' })
-  @ApiParam({ name: 'name', description: 'Index name' })
+  @ApiOperation({
+    summary: 'Update index settings',
+    description:
+      'Updates settings and mappings for an existing index. Only certain settings can be updated after creation.',
+  })
+  @ApiParam({
+    name: 'name',
+    description: 'Index name to update',
+    example: 'products',
+  })
+  @ApiBody({
+    type: UpdateIndexSettingsDto,
+    description: 'Index update parameters',
+    examples: {
+      settings: {
+        summary: 'Update index settings',
+        value: {
+          settings: {
+            refreshInterval: '2s',
+          },
+        },
+      },
+      mappings: {
+        summary: 'Add new fields to mappings',
+        value: {
+          mappings: {
+            properties: {
+              inStock: { type: 'boolean' },
+              rating: { type: 'number' },
+            },
+          },
+        },
+      },
+    },
+  })
   @ApiResponse({
     status: HttpStatus.OK,
-    description: 'Index updated successfully',
-    type: IndexResponseDto,
+    description: 'Index updated successfully. Returns the updated index configuration.',
+    schema: {
+      type: 'object',
+      properties: {
+        name: { type: 'string', example: 'products' },
+        status: { type: 'string', example: 'open' },
+        documentCount: { type: 'number', example: 150 },
+        settings: {
+          type: 'object',
+          example: { refreshInterval: '2s' },
+        },
+        mappings: {
+          type: 'object',
+          example: {
+            properties: {
+              title: { type: 'text' },
+              inStock: { type: 'boolean' },
+            },
+          },
+        },
+      },
+    },
   })
-  @ApiResponse({ status: HttpStatus.BAD_REQUEST, description: 'Invalid input' })
-  @ApiResponse({ status: HttpStatus.NOT_FOUND, description: 'Index not found' })
+  @ApiResponse({
+    status: HttpStatus.BAD_REQUEST,
+    description: 'Invalid input or attempt to modify immutable settings',
+  })
+  @ApiResponse({
+    status: HttpStatus.NOT_FOUND,
+    description: 'Index with the specified name does not exist',
+  })
   async updateIndex(
     @Param('name') name: string,
     @Body(ValidationPipe) updateIndexSettingsDto: UpdateIndexSettingsDto,
@@ -95,11 +285,25 @@ export class IndexController {
   }
 
   @Delete(':name')
-  @ApiOperation({ summary: 'Delete an index' })
-  @ApiParam({ name: 'name', description: 'Index name' })
+  @ApiOperation({
+    summary: 'Delete an index',
+    description:
+      'Permanently deletes an index and all its documents. This action cannot be undone.',
+  })
+  @ApiParam({
+    name: 'name',
+    description: 'Index name to delete',
+    example: 'products',
+  })
   @HttpCode(HttpStatus.NO_CONTENT)
-  @ApiResponse({ status: HttpStatus.NO_CONTENT, description: 'Index deleted successfully' })
-  @ApiResponse({ status: HttpStatus.NOT_FOUND, description: 'Index not found' })
+  @ApiResponse({
+    status: HttpStatus.NO_CONTENT,
+    description: 'Index deleted successfully',
+  })
+  @ApiResponse({
+    status: HttpStatus.NOT_FOUND,
+    description: 'Index with the specified name does not exist',
+  })
   async deleteIndex(@Param('name') name: string): Promise<void> {
     await this.indexService.deleteIndex(name);
   }
