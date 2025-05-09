@@ -51,9 +51,6 @@ export class SearchExecutorService {
     // Execute the query plan to get matching document IDs with scores
     const matches = await this.executeQueryPlan(indexName, executionPlan);
 
-    console.log('execution Plan', executionPlan);
-    console.log('matches', matches);
-
     // Apply any filter conditions if provided
     const filteredMatches = filter ? this.applyFilters(matches, filter) : matches;
 
@@ -123,7 +120,6 @@ export class SearchExecutorService {
     // if (isPrefix) {
     // Get all terms in the field that start with the prefix
     const matchingTerms = this.getMatchingTerms(term);
-    console.log('matching terms', matchingTerms);
     for (const t of matchingTerms) {
       const postingList = this.termDictionary.getPostingList(t);
       if (postingList && postingList.size() > 0) {

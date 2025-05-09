@@ -46,7 +46,6 @@ export class SearchService {
       const processedQuery = await this.queryProcessor.processQuery(rawQuery);
 
       this.logger.debug(`Processed query: ${JSON.stringify(processedQuery)}`);
-      console.log(`Processed query: `, processedQuery);
 
       // Execute the search
       const results = await this.searchExecutor.executeQuery(

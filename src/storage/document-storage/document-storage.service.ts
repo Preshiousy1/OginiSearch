@@ -70,7 +70,8 @@ export class DocumentStorageService {
         metadata,
       };
 
-      return await this.documentRepository.create(document);
+      const result = await this.documentRepository.create(document);
+      return result;
     } catch (error) {
       this.logger.error(`Failed to store document: ${error.message}`);
       throw error;

@@ -7,12 +7,15 @@ import { BM25Scorer } from './bm25-scorer';
 import { IndexService } from './index.service';
 import { AnalysisModule } from '../analysis/analysis.module';
 import { StorageModule } from '../storage/storage.module';
+import { RocksDBService } from 'src/storage/rocksdb/rocksdb.service';
 @Module({
   imports: [StorageModule, AnalysisModule],
   providers: [
     {
       provide: 'TERM_DICTIONARY',
-      useFactory: () => new InMemoryTermDictionary({ useCompression: true }),
+      useFactory: (rocksDBService: RocksDBService) =>
+        new InMemoryTermDictionary({ useCompression: true }, rocksDBService),
+      inject: [RocksDBService],
     },
     IndexStatsService,
     {

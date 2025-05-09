@@ -1,6 +1,6 @@
 import { Injectable, Logger, NotFoundException, ConflictException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
-import { Model, FilterQuery, UpdateQuery } from 'mongoose';
+import { Model, FilterQuery, UpdateQuery, QueryOptions } from 'mongoose';
 import { SourceDocument, DocumentEntity } from '../schemas/document.schema';
 
 @Injectable()
@@ -49,7 +49,17 @@ export class DocumentRepository {
   ): Promise<{ documents: DocumentEntity[]; total: number }> {
     try {
       const { limit = 100, offset = 0, filter = {} } = options;
-      const query = { indexName, ...filter };
+      // Base query with index name
+      const query: FilterQuery<DocumentEntity> = { indexName };
+
+      // Handle content field filtering properly
+      if (filter && Object.keys(filter).length > 0) {
+        // For each field in the filter, create the proper MongoDB query
+        Object.entries(filter).forEach(([field, value]) => {
+          // Create a query that matches documents where the field in content matches the value
+          query[`content.${field}`] = value;
+        });
+      }
 
       const [documents, total] = await Promise.all([
         this.documentModel.find(query).sort({ createdAt: -1 }).skip(offset).limit(limit).exec(),

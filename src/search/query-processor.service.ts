@@ -25,11 +25,9 @@ export class QueryProcessorService implements QueryProcessor {
   processQuery(rawQuery: RawQuery): ProcessedQuery {
     // Parse and normalize query
     const parsedQuery = this.parseQuery(rawQuery);
-    console.log(`Parsed query: `, parsedQuery);
 
     // Create execution plan
     const executionPlan = this.queryPlanner.createPlan(parsedQuery);
-    console.log(`Execution plan: `, executionPlan);
 
     return {
       original: rawQuery,

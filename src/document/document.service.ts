@@ -1,4 +1,11 @@
-import { Injectable, Logger, NotFoundException, BadRequestException, Inject } from '@nestjs/common';
+import {
+  Injectable,
+  Logger,
+  NotFoundException,
+  BadRequestException,
+  Inject,
+  OnModuleInit,
+} from '@nestjs/common';
 import { IndexService } from '../index/index.service';
 import { DocumentStorageService } from '../storage/document-storage/document-storage.service';
 import {
@@ -15,7 +22,7 @@ import { InMemoryTermDictionary } from '../index/term-dictionary';
 import { SearchQueryDto } from '../api/dtos/search.dto';
 
 @Injectable()
-export class DocumentService {
+export class DocumentService implements OnModuleInit {
   private readonly logger = new Logger(DocumentService.name);
 
   constructor(
@@ -25,6 +32,77 @@ export class DocumentService {
     private readonly searchService: SearchService,
     @Inject('TERM_DICTIONARY') private readonly termDictionary: InMemoryTermDictionary,
   ) {}
+
+  /**
+   * On module initialization, check if the term dictionary is empty and rebuild if necessary
+   */
+  async onModuleInit() {
+    if (this.termDictionary.size() === 0) {
+      this.logger.log(
+        'Term dictionary is empty. This may be because the application restarted. Will attempt to rebuild...',
+      );
+      await this.rebuildIndex();
+    }
+  }
+
+  /**
+   * Rebuild index from existing documents in storage
+   */
+  async rebuildIndex(): Promise<void> {
+    try {
+      // Get all indices
+      const indices = await this.indexService.listIndices();
+
+      for (const indexInfo of indices) {
+        const indexName = indexInfo.name;
+        this.logger.log(`Rebuilding index for ${indexName}...`);
+
+        // Get all documents for this index
+        const result = await this.documentStorage.getDocuments(indexName, { limit: 1000 });
+
+        // Index each document
+        for (const doc of result.documents) {
+          await this.indexingService.indexDocument(indexName, doc.documentId, doc.content);
+
+          // Also add to term dictionary directly
+          for (const [field, value] of Object.entries(doc.content)) {
+            if (typeof value === 'string') {
+              const tokens = value.toLowerCase().split(/\W+/).filter(Boolean);
+              const tokenPositions: Record<string, number[]> = {};
+              tokens.forEach((token, idx) => {
+                if (!tokenPositions[token]) tokenPositions[token] = [];
+                tokenPositions[token].push(idx);
+              });
+
+              for (const [token, positions] of Object.entries(tokenPositions)) {
+                const frequency = positions.length;
+
+                // Add to field-specific posting list
+                this.termDictionary.addPosting(`${field}:${token}`, {
+                  docId: doc.documentId,
+                  frequency,
+                  positions,
+                  metadata: { field },
+                });
+
+                // Add to _all field posting list
+                this.termDictionary.addPosting(`_all:${token}`, {
+                  docId: doc.documentId,
+                  frequency,
+                  positions,
+                  metadata: { field },
+                });
+              }
+            }
+          }
+        }
+
+        this.logger.log(`Index for ${indexName} rebuilt with ${result.documents.length} documents`);
+      }
+    } catch (error) {
+      this.logger.error(`Error rebuilding index: ${error.message}`);
+    }
+  }
 
   async indexDocument(
     indexName: string,
@@ -290,50 +368,47 @@ export class DocumentService {
     const startTime = Date.now();
 
     try {
-      // Convert DeleteByQueryDto to SearchQueryDto format
-      const searchQuery: SearchQueryDto = {
-        query: query.query,
-        fields: [query.query.term.field],
-        filter: {
-          term: {
-            field: query.query.term.field,
-            value: query.query.term.value,
-          },
-        },
-      };
-
       if (query.query.term) {
-        // Convert term query to match query format expected by search service
-        searchQuery.query = {
-          match: {
-            field: query.query.term.field,
-            value: query.query.term.value.toString(),
-          },
-        };
-      }
+        // Extract the field and value to search for
+        const field = query.query.term.field;
+        const value = query.query.term.value;
 
-      // Search for documents matching the query
-      const searchResults = await this.searchService.search(indexName, searchQuery);
-      const documentIds = searchResults.data.hits.map(hit => hit.id);
+        this.logger.log(`Looking for documents with ${field} containing "${value}"`);
 
-      if (documentIds.length === 0) {
+        // Get documentIds that match the filter from document storage
+        const result = await this.documentStorage.getDocuments(indexName, {
+          filter: { [field]: value },
+        });
+
+        this.logger.log(`Found ${result.documents.length} documents matching the query`);
+        if (result.documents.length === 0) {
+          return {
+            deleted: 0,
+            took: Date.now() - startTime,
+            failures: [],
+          };
+        }
+
+        const documentIds = result.documents.map(doc => doc.documentId);
+
+        // Delete documents from storage
+        const deleted = await this.documentStorage.bulkDeleteDocuments(indexName, documentIds);
+
+        // Remove documents from index
+        for (const id of documentIds) {
+          await this.indexingService.removeDocument(indexName, id);
+        }
+
         return {
-          deleted: 0,
+          deleted,
           took: Date.now() - startTime,
           failures: [],
         };
       }
 
-      // Delete documents from storage
-      const deleted = await this.documentStorage.bulkDeleteDocuments(indexName, documentIds);
-
-      // Remove documents from index
-      for (const id of documentIds) {
-        await this.indexingService.removeDocument(indexName, id);
-      }
-
+      // Return empty result for other query types
       return {
-        deleted,
+        deleted: 0,
         took: Date.now() - startTime,
         failures: [],
       };
