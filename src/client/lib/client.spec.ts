@@ -1,4 +1,4 @@
-import { ConnectSearchClient, ClientError } from '../../../src/client/lib/client';
+import { ConnectSearchClient, ClientError } from './client';
 import axios from 'axios';
 
 // Mock entire axios module

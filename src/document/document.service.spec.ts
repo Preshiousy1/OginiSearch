@@ -53,6 +53,17 @@ describe('DocumentService', () => {
       }),
       bulkStoreDocuments: jest.fn().mockResolvedValue(3),
       bulkDeleteDocuments: jest.fn().mockResolvedValue(2),
+      getDocuments: jest.fn().mockImplementation((indexName, options) => {
+        if (options.filter && options.filter.title === 'Test Document') {
+          return {
+            documents: [
+              { documentId: 'doc1', content: { title: 'Test Document' } },
+              { documentId: 'doc2', content: { title: 'Test Document' } },
+            ],
+          };
+        }
+        return { documents: [] };
+      }),
     };
 
     // Mock for IndexingService
@@ -191,8 +202,8 @@ describe('DocumentService', () => {
 
       expect(result).toBeDefined();
       expect(result.deleted).toBe(2);
-      expect(searchService.search).toHaveBeenCalledWith('test-index', {
-        query: { term: { field: 'title', value: 'Test Document' } },
+      expect(documentStorageService.getDocuments).toHaveBeenCalledWith('test-index', {
+        filter: { title: 'Test Document' },
       });
       expect(documentStorageService.bulkDeleteDocuments).toHaveBeenCalledWith('test-index', [
         'doc1',
