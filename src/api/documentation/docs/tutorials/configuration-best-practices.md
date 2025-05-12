@@ -1,6 +1,6 @@
 # Configuration Best Practices
 
-This guide covers best practices for configuring ConnectSearch in different environments.
+This guide covers best practices for configuring Ogini in different environments.
 
 ## Environment Configuration
 
@@ -281,14 +281,14 @@ CMD ["npm", "start"]
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: connectsearch
+  name: ogini
 spec:
   replicas: 3
   template:
     spec:
       containers:
-      - name: connectsearch
-        image: connectsearch:latest
+      - name: ogini
+        image: ogini:latest
         env:
         - name: NODE_ENV
           value: "production"

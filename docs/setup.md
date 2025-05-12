@@ -10,8 +10,8 @@
 
 1. Clone the repository:
 ```bash
-git clone https://github.com/yourusername/connectsearch.git
-cd connectsearch
+git clone https://github.com/yourusername/ogini.git
+cd ogini
 ```
 
 2. Install dependencies:
@@ -62,7 +62,7 @@ The performance reports include:
 
 ## Monitoring
 
-ConnectSearch uses Prometheus and Grafana for monitoring.
+Ogini uses Prometheus and Grafana for monitoring.
 
 ### Starting the Monitoring Stack
 

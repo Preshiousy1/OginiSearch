@@ -1,10 +1,10 @@
 # Error Codes and Troubleshooting
 
-This page details the error codes returned by the ConnectSearch API and provides troubleshooting information.
+This page details the error codes returned by the Ogini API and provides troubleshooting information.
 
 ## HTTP Status Codes
 
-The ConnectSearch API uses standard HTTP status codes to indicate the success or failure of requests:
+The Ogini API uses standard HTTP status codes to indicate the success or failure of requests:
 
 - **200 OK**: Request succeeded
 - **201 Created**: Resource was successfully created

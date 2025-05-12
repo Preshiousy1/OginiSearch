@@ -5,11 +5,11 @@ import { setupTestApp } from '../../utils/test-helpers';
 import { DocumentGenerator } from '../../utils/document-generator';
 import { QueryGenerator } from '../../utils/query-generator';
 import { TestCorpusLoader } from '../../utils/test-corpus-loader';
-import { ConnectSearch } from '../../../src/client';
+import { Ogini } from '../../../src/client';
 
 describe('Search Integration Tests', () => {
   let app: INestApplication;
-  let client: ConnectSearch;
+  let client: Ogini;
   let testIndexName: string;
   let testCorpus: string;
 
@@ -19,7 +19,7 @@ describe('Search Integration Tests', () => {
     await app.listen(3456);
 
     // Initialize client
-    client = new ConnectSearch({
+    client = new Ogini({
       baseURL: 'http://localhost:3456',
     });
 

@@ -1,4 +1,4 @@
-# ConnectSearch Performance Test Results
+# Ogini Performance Test Results
 
 ## Error
 No test results available. The performance tests did not complete successfully.

@@ -1,4 +1,4 @@
-# Getting Started with ConnectSearch
+# Getting Started with Ogini
 
 ## Installation
 
@@ -11,18 +11,18 @@
 
 1. **Install via npm**
 ```bash
-npm install connectsearch
+npm install ogini
 ```
 
 2. **Install via Docker**
 ```bash
-docker pull connectsearch/connectsearch:latest
+docker pull ogini/ogini:latest
 ```
 
 3. **Clone the repository**
 ```bash
-git clone https://github.com/connectsearch/connectsearch.git
-cd connectsearch
+git clone https://github.com/ogini/ogini.git
+cd ogini
 npm install
 ```
 
@@ -31,9 +31,9 @@ npm install
 ### Initialize the Client
 
 ```typescript
-import { ConnectSearch } from 'connectsearch';
+import { Ogini } from 'ogini';
 
-const client = new ConnectSearch({
+const client = new Ogini({
   baseURL: 'http://localhost:3000',
   apiKey: 'your-api-key'
 });
@@ -86,7 +86,7 @@ const results = await client.search.search('products', {
 ### Client Configuration
 
 ```typescript
-interface ConnectSearchConfig {
+interface OginiConfig {
   baseURL: string;           // API base URL
   apiKey?: string;          // API key for authentication
   timeout?: number;         // Request timeout in milliseconds
@@ -149,12 +149,12 @@ interface SearchConfig {
 
 ## Environment Variables
 
-The following environment variables can be used to configure ConnectSearch:
+The following environment variables can be used to configure Ogini:
 
 ```bash
-CONNECTSEARCH_API_KEY=your-api-key
-CONNECTSEARCH_BASE_URL=http://localhost:3000
-CONNECTSEARCH_TIMEOUT=30000
-CONNECTSEARCH_MAX_RETRIES=3
-CONNECTSEARCH_RETRY_DELAY=1000
+OGINISEARCH_API_KEY=your-api-key
+OGINISEARCH_BASE_URL=http://localhost:3000
+OGINISEARCH_TIMEOUT=30000
+OGINISEARCH_MAX_RETRIES=3
+OGINISEARCH_RETRY_DELAY=1000
 ``` 

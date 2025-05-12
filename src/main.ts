@@ -14,8 +14,8 @@ async function bootstrap() {
 
   // Swagger setup
   const config = new DocumentBuilder()
-    .setTitle('ConnectSearch API')
-    .setDescription('The ConnectSearch API documentation')
+    .setTitle('Ogini API')
+    .setDescription('The Ogini Search Engine API documentation')
     .setVersion('1.0')
     .build();
   const document = SwaggerModule.createDocument(app, config);

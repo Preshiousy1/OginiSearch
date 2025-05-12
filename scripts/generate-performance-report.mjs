@@ -18,14 +18,14 @@ const generateHtmlReport = results => {
 <!DOCTYPE html>
 <html>
 <head>
-  <title>ConnectSearch Performance Test Results</title>
+  <title>Ogini Performance Test Results</title>
   <style>
     body { font-family: Arial, sans-serif; margin: 20px; }
     .error { color: red; }
   </style>
 </head>
 <body>
-  <h1>ConnectSearch Performance Test Results</h1>
+  <h1>Ogini Performance Test Results</h1>
   <div class="error">
     <h2>No test results available</h2>
     <p>The performance tests did not complete successfully.</p>
@@ -38,7 +38,7 @@ const generateHtmlReport = results => {
 <!DOCTYPE html>
 <html>
 <head>
-  <title>ConnectSearch Performance Test Results</title>
+  <title>Ogini Performance Test Results</title>
   <style>
     body { font-family: Arial, sans-serif; margin: 20px; }
     .test { margin-bottom: 20px; padding: 10px; border: 1px solid #ddd; }
@@ -49,7 +49,7 @@ const generateHtmlReport = results => {
   </style>
 </head>
 <body>
-  <h1>ConnectSearch Performance Test Results</h1>
+  <h1>Ogini Performance Test Results</h1>
   <div class="summary">
     <h2>Summary</h2>
     <p>Total Tests: ${results.numTotalTests}</p>
@@ -93,13 +93,13 @@ const generateHtmlReport = results => {
 // Generate markdown report
 const generateMarkdownReport = results => {
   if (!results || !results.testResults || results.testResults.length === 0) {
-    return `# ConnectSearch Performance Test Results
+    return `# Ogini Performance Test Results
 
 ## Error
 No test results available. The performance tests did not complete successfully.`;
   }
 
-  const markdown = `# ConnectSearch Performance Test Results
+  const markdown = `# Ogini Performance Test Results
 
 ## Summary
 - Total Tests: ${results.numTotalTests}

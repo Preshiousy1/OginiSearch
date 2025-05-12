@@ -1,7 +1,7 @@
 {
-  "name": "connectsearch",
+  "name": "ogini",
   "version": "0.0.1",
-  "description": "",
+  "description": "Ogini - A powerful search engine with Nigerian roots",
   "author": "Precious Atam",
   "private": true,
   "license": "UNLICENSED",
@@ -18,7 +18,7 @@
     "test:cov": "jest --coverage",
     "test:debug": "node --inspect-brk -r tsconfig-paths/register -r ts-node/register node_modules/.bin/jest --runInBand",
     "test:e2e": "jest --config ./test/jest-e2e.json",
-    "docker:build": "docker build --no-cache -t connectsearch .",
+    "docker:build": "docker build --no-cache -t ogini .",
     "docker:dev": "sudo docker-compose up",
     "docker:prod": "docker-compose -f docker-compose.prod.yml up -d",
     "docker:down": "docker-compose down",
@@ -42,7 +42,8 @@
     "reflect-metadata": "^0.1.13",
     "rocksdb": "^5.2.1",
     "rxjs": "^7.2.0",
-    "swagger-ui-express": "^5.0.1"
+    "swagger-ui-express": "^5.0.1",
+    "uuid": "^11.1.0"
   },
   "devDependencies": {
     "@faker-js/faker": "^9.7.0",

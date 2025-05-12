@@ -15,9 +15,9 @@ export class SwaggerDocModule {
    */
   static setup(app: INestApplication): void {
     const options = new DocumentBuilder()
-      .setTitle('ConnectSearch API')
+      .setTitle('Ogini API')
       .setDescription(
-        'RESTful API for the ConnectSearch engine - a high-performance full-text search service optimized for speed and relevance.',
+        'RESTful API for the Ogini engine - a high-performance full-text search service optimized for speed and relevance.',
       )
       .setVersion('1.0')
       .addTag('indices', 'Index management operations')
@@ -34,9 +34,9 @@ export class SwaggerDocModule {
         },
         'JWT-auth',
       )
-      .setContact('ConnectSearch Team', 'https://connectsearch.io', 'support@connectsearch.io')
+      .setContact('Ogini Team', 'https://ogini.io', 'support@ogini.io')
       .setLicense('MIT', 'https://opensource.org/licenses/MIT')
-      .setExternalDoc('Additional Documentation', 'https://docs.connectsearch.io')
+      .setExternalDoc('Additional Documentation', 'https://docs.ogini.io')
       .build();
 
     const document = SwaggerModule.createDocument(app, options, {
@@ -53,9 +53,9 @@ export class SwaggerDocModule {
         showCommonExtensions: true,
         deepLinking: true,
       },
-      customSiteTitle: 'ConnectSearch API Documentation',
+      customSiteTitle: 'Ogini API Documentation',
       customCss: '.swagger-ui .topbar { display: none }',
-      customfavIcon: 'https://connectsearch.io/favicon.ico',
+      customfavIcon: 'https://ogini.io/favicon.ico',
     });
   }
 }

@@ -1,6 +1,6 @@
 # Basic Search Implementation
 
-This tutorial demonstrates how to implement basic search functionality using ConnectSearch.
+This tutorial demonstrates how to implement basic search functionality using Ogini.
 
 ## Simple Text Search
 

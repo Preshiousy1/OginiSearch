@@ -1,6 +1,6 @@
-# ConnectSearch Production Deployment Guide
+# Ogini Production Deployment Guide
 
-This guide provides instructions for deploying ConnectSearch in a production environment.
+This guide provides instructions for deploying Ogini in a production environment.
 
 ## Prerequisites
 
@@ -22,7 +22,7 @@ NODE_ENV=production
 PORT=3000
 
 # MongoDB
-MONGODB_URI=mongodb://your-mongodb-host:27017/connectsearch
+MONGODB_URI=mongodb://your-mongodb-host:27017/ogini
 MONGODB_USER=your-username
 MONGODB_PASSWORD=your-password
 
@@ -52,7 +52,7 @@ docker-compose -f docker-compose.monitoring.yml up -d
 
 2. Access Grafana at `http://localhost:3000` (default credentials: admin/admin)
 
-3. Import the provided dashboard from `monitoring/grafana/dashboards/connectsearch.json`
+3. Import the provided dashboard from `monitoring/grafana/dashboards/ogini.json`
 
 ## Performance Tuning
 
@@ -105,7 +105,7 @@ docker-compose -f docker-compose.monitoring.yml up -d
 #!/bin/bash
 BACKUP_DIR="/backups"
 DATE=$(date +%Y%m%d_%H%M%S)
-mongodump --uri="mongodb://your-mongodb-host:27017/connectsearch" --out="$BACKUP_DIR/$DATE"
+mongodump --uri="mongodb://your-mongodb-host:27017/ogini" --out="$BACKUP_DIR/$DATE"
 ```
 
 2. Schedule regular backups:
@@ -118,7 +118,7 @@ mongodump --uri="mongodb://your-mongodb-host:27017/connectsearch" --out="$BACKUP
 1. Stop the application
 2. Restore MongoDB:
 ```bash
-mongorestore --uri="mongodb://your-mongodb-host:27017/connectsearch" /path/to/backup
+mongorestore --uri="mongodb://your-mongodb-host:27017/ogini" /path/to/backup
 ```
 3. Restart the application
 
@@ -157,9 +157,9 @@ mongorestore --uri="mongodb://your-mongodb-host:27017/connectsearch" /path/to/ba
 
 ### Logs
 
-- Application logs: `docker logs connectsearch-app`
-- MongoDB logs: `docker logs connectsearch-mongodb`
-- Prometheus logs: `docker logs connectsearch-prometheus`
+- Application logs: `docker logs ogini-app`
+- MongoDB logs: `docker logs ogini-mongodb`
+- Prometheus logs: `docker logs ogini-prometheus`
 
 ## Maintenance
 
@@ -183,6 +183,6 @@ mongorestore --uri="mongodb://your-mongodb-host:27017/connectsearch" /path/to/ba
 ## Support
 
 For production support:
-- Email: support@connectsearch.com
-- Documentation: https://docs.connectsearch.com
-- GitHub Issues: https://github.com/connectsearch/connectsearch/issues 
+- Email: support@ogini.com
+- Documentation: https://docs.ogini.com
+- GitHub Issues: https://github.com/ogini/ogini/issues 

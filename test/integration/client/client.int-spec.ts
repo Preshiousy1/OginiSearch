@@ -1,4 +1,4 @@
-import { ConnectSearch } from '../../../src/client';
+import { Ogini } from '../../../src/client';
 import { Test, TestingModule } from '@nestjs/testing';
 import { INestApplication } from '@nestjs/common';
 import { AppModule } from '../../../src/app.module';
@@ -6,14 +6,14 @@ import { setupTestApp } from '../../utils/test-helpers';
 import { v4 as uuidv4 } from 'uuid';
 
 /**
- * Integration tests for the ConnectSearch client
+ * Integration tests for the Ogini client
  *
  * These tests will use a real running instance of the API to verify
  * that the client library works correctly.
  */
-describe('ConnectSearch Client Integration Tests', () => {
+describe('Ogini Client Integration Tests', () => {
   let app: INestApplication;
-  let client: ConnectSearch;
+  let client: Ogini;
   let testIndexName: string;
 
   beforeAll(async () => {
@@ -25,7 +25,7 @@ describe('ConnectSearch Client Integration Tests', () => {
     await app.listen(port);
 
     // Initialize client with the fixed port
-    client = new ConnectSearch({
+    client = new Ogini({
       baseURL: `http://localhost:${port}`,
     });
 

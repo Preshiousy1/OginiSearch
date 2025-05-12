@@ -4,7 +4,7 @@
 export NODE_ENV=test
 export PERFORMANCE_TEST=true
 #connect to existing mongodb instance
-export MONGODB_URI=mongodb://mongodb:27017/connectsearch
+export MONGODB_URI=mongodb://mongodb:27017/ogini
 
 
 # Wait for MongoDB to be ready

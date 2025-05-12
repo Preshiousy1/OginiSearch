@@ -1,6 +1,6 @@
 # Document Indexing Guide
 
-This guide covers best practices and techniques for indexing documents in ConnectSearch.
+This guide covers best practices and techniques for indexing documents in Ogini.
 
 ## Basic Document Indexing
 

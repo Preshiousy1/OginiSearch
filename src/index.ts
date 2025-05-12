@@ -1,2 +1,2 @@
 // Re-export everything from src/client/index.ts
-export * from './client';
+export * from '../packages/client/src';

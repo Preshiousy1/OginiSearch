@@ -1,17 +1,21 @@
 version: '3.8'
 
+name: ogini-prod
+
 services:
   app:
     build:
       context: .
       target: production
+    networks:
+      - ogini-network
     ports:
       - "3000:3000"
     volumes:
       - rocksdb-data:/usr/src/app/data/rocksdb
     environment:
       - NODE_ENV=production
-      - MONGODB_URI=mongodb://mongodb:27017/connectsearch
+      - MONGODB_URI=mongodb://mongodb:27017/ogini
       - ROCKSDB_PATH=/usr/src/app/data/rocksdb
     depends_on:
       mongodb:
@@ -29,12 +33,14 @@ services:
 
   mongodb:
     image: mongo:7
+    networks:
+      - ogini-network
     volumes:
       - mongodb-data:/data/db
     environment:
-      - MONGO_INITDB_DATABASE=connectsearch
+      - MONGO_INITDB_DATABASE=ogini
     healthcheck:
-      test: echo 'db.runCommand("ping").ok' | mongosh localhost:27017/connectsearch --quiet
+      test: echo 'db.runCommand("ping").ok' | mongosh localhost:27017/ogini --quiet
       interval: 10s
       timeout: 5s
       retries: 5
@@ -42,3 +48,7 @@ services:
 volumes:
   mongodb-data:
   rocksdb-data: 
+
+networks:
+  ogini-network:
+    driver: bridge

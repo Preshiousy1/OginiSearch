@@ -2,6 +2,7 @@
 /dist
 /node_modules
 /data
+/packages
 
 # Logs
 logs
@@ -36,8 +37,8 @@ lerna-debug.log*
 !.vscode/extensions.json
 
 #prd files
-complete-connectsearch-prd.md
-connectsearch-implementation-to-do-list.md
+complete-ogini-prd.md
+ogini-implementation-to-do-list.md
 
 #env
 .env

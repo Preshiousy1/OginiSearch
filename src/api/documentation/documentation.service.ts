@@ -16,6 +16,7 @@ export class DocumentationService {
 
       // Verify the file is within the docs directory
       if (!filePath.startsWith(this.docsPath)) {
+        this.logger.error(`Invalid file path: ${filePath} is not within ${this.docsPath}`);
         throw new Error('Invalid file path');
       }
 
@@ -29,17 +30,14 @@ export class DocumentationService {
 
   async listDocumentationFiles(): Promise<string[]> {
     try {
-      this.logger.debug(`Listing files in: ${this.docsPath}`);
       const files = await readdir(this.docsPath);
       const tutorialsPath = join(this.docsPath, 'tutorials');
-      this.logger.debug(`Listing files in: ${tutorialsPath}`);
       const tutorials = await readdir(tutorialsPath);
 
       const result = [
         ...files.filter(file => file.endsWith('.md')),
         ...tutorials.map(file => `tutorials/${file}`).filter(file => file.endsWith('.md')),
       ];
-      this.logger.debug(`Found files: ${result.join(', ')}`);
       return result;
     } catch (error) {
       this.logger.error(`Error listing files: ${error.message}`);
@@ -50,10 +48,8 @@ export class DocumentationService {
   async getTutorials(): Promise<string[]> {
     try {
       const tutorialsPath = join(this.docsPath, 'tutorials');
-      this.logger.debug(`Getting tutorials from: ${tutorialsPath}`);
       const files = await readdir(tutorialsPath);
       const result = files.filter(file => file.endsWith('.md'));
-      this.logger.debug(`Found tutorials: ${result.join(', ')}`);
       return result;
     } catch (error) {
       this.logger.error(`Error getting tutorials: ${error.message}`);

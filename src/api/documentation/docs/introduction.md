@@ -1,9 +1,9 @@
-# ConnectSearch API Documentation
+# Ogini API Documentation
 
 ## Overview
 
-ConnectSearch is a high-performance full-text search engine designed for speed, relevance, and scalability. 
-This API provides RESTful access to all ConnectSearch functionality, allowing you to create and manage indices, 
+Ogini is a high-performance full-text search engine designed for speed, relevance, and scalability. 
+This API provides RESTful access to all Ogini functionality, allowing you to create and manage indices, 
 index documents, and perform sophisticated search operations.
 
 ## Key Features
@@ -17,7 +17,7 @@ index documents, and perform sophisticated search operations.
 
 ## Getting Started
 
-To begin using the ConnectSearch API:
+To begin using the Ogini API:
 
 1. Create an index with appropriate mappings for your data
 2. Index your documents

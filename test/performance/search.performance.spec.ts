@@ -1,7 +1,7 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { INestApplication } from '@nestjs/common';
 import { AppModule } from '../../src/app.module';
-import { ConnectSearch } from '../../src/client';
+import { Ogini } from '../../src/client';
 import { performance } from 'perf_hooks';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -13,7 +13,7 @@ jest.setTimeout(30000); // 30 second timeout for the entire suite
 
 describe('Search Performance Tests', () => {
   let app: INestApplication;
-  let client: ConnectSearch;
+  let client: Ogini;
   let testIndexName: string;
   let mongod: MongoMemoryServer;
   let port: number;
@@ -44,7 +44,7 @@ describe('Search Performance Tests', () => {
 
     // Initialize client
     console.log('Initializing client...');
-    client = new ConnectSearch({
+    client = new Ogini({
       baseURL: `http://localhost:${port}`,
     });
 
@@ -237,7 +237,7 @@ function generateTestData(count: number) {
   return data;
 }
 
-async function indexTestData(data: any[], client: ConnectSearch, indexName: string) {
+async function indexTestData(data: any[], client: Ogini, indexName: string) {
   const batchSize = 20;
   for (let i = 0; i < data.length; i += batchSize) {
     const batch = data.slice(i, i + batchSize).map(doc => ({ document: doc }));
