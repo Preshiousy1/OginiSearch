@@ -5,7 +5,7 @@ import { setupTestApp } from '../../utils/test-helpers';
 import { DocumentGenerator } from '../../utils/document-generator';
 import { QueryGenerator } from '../../utils/query-generator';
 import { TestCorpusLoader } from '../../utils/test-corpus-loader';
-import { Ogini } from '../../../src/client';
+import { Ogini } from '../../../packages/client/src';
 
 describe('Search Integration Tests', () => {
   let app: INestApplication;

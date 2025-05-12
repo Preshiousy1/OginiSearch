@@ -1,9 +1,10 @@
-import { Ogini } from '../../../src/client';
+// import { Ogini } from '@oginisearch/client';
 import { Test, TestingModule } from '@nestjs/testing';
 import { INestApplication } from '@nestjs/common';
 import { AppModule } from '../../../src/app.module';
 import { setupTestApp } from '../../utils/test-helpers';
 import { v4 as uuidv4 } from 'uuid';
+import { Ogini } from 'packages/client/src';
 
 /**
  * Integration tests for the Ogini client

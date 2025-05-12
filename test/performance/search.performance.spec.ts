@@ -1,7 +1,7 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { INestApplication } from '@nestjs/common';
 import { AppModule } from '../../src/app.module';
-import { Ogini } from '../../src/client';
+import { Ogini } from '../../packages/client/src';
 import { performance } from 'perf_hooks';
 import * as fs from 'fs';
 import * as path from 'path';
