@@ -71,3 +71,31 @@ Nest is an MIT-licensed open source project. It can grow thanks to the sponsors 
 ## License
 
 Nest is [MIT licensed](LICENSE).
+
+# ConnectSearch
+
+A high-performance search engine built with NestJS.
+
+## Performance Testing
+
+To run the performance tests:
+
+```bash
+./scripts/run-performance-tests.sh
+```
+
+This will:
+1. Start a MongoDB instance for testing
+2. Run performance tests
+3. Generate performance reports in `performance-results/`
+4. Clean up test resources
+
+## Monitoring
+
+To start the monitoring stack:
+
+```bash
+docker-compose -f docker-compose.monitoring.yml up -d
+```
+
+The monitoring dashboard will be available at http://localhost:3000 (Grafana) with default credentials (admin/admin).
