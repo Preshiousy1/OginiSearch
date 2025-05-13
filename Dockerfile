@@ -3,31 +3,21 @@ FROM node:20-alpine AS build
 
 WORKDIR /usr/src/app
 
-# Install build dependencies for native modules with specific versions
-RUN apk add --no-cache \
+# Install build dependencies
+RUN apt-get update && apt-get install -y \
     python3 \
     make \
     g++ \
-    git \
-    linux-headers \
-    bash \
-    snappy-dev \
-    zlib-dev \
-    bzip2-dev \
-    lz4-dev \
-    zstd-dev
+    git
 
 # Set Python path for node-gyp
 ENV PYTHON=/usr/bin/python3
-ENV NODE_OPTIONS="--max-old-space-size=4096"
 
-# Copy package files first for better caching
+# Copy package files
 COPY package*.json ./
 
-# Try to install dependencies with fallback for rocksdb
-RUN npm ci || \
-    (echo "Native module build failed, installing without optional dependencies" && \
-    npm ci --no-optional)
+# Install dependencies
+RUN npm ci
 
 # Copy source code
 COPY . .
@@ -38,26 +28,28 @@ RUN npm run build
 # Stage 2: Production stage
 FROM node:20-alpine AS production
 
-ARG NODE_ENV=production
-ENV NODE_ENV=${NODE_ENV}
-
 WORKDIR /usr/src/app
 
-# Install runtime dependencies
-RUN apk add --no-cache ca-certificates snappy zlib bzip2 lz4 zstd
+# Install Python and wget for production
+RUN apt-get update && apt-get install -y \
+    python3 \
+    make \
+    g++ \
+    wget
+
+# Set Python path for node-gyp
+ENV PYTHON=/usr/bin/python3
 
 # Copy package files
 COPY package*.json ./
 
-# Install only production dependencies with fallback
-RUN npm ci --only=production --no-optional || \
-    (echo "Installing production dependencies without native modules" && \
-    npm ci --only=production --no-optional)
+# Install production dependencies
+RUN npm ci --only=production
 
 # Copy built application from build stage
 COPY --from=build /usr/src/app/dist ./dist
 
-# Create data directories
+# Create data directories with proper permissions
 RUN mkdir -p /usr/src/app/data/rocksdb && \
     chmod -R 777 /usr/src/app/data
 
