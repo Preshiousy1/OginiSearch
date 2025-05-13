@@ -4,7 +4,7 @@ import { INestApplication } from '@nestjs/common';
 import { AppModule } from '../../../src/app.module';
 import { setupTestApp } from '../../utils/test-helpers';
 import { v4 as uuidv4 } from 'uuid';
-import { Ogini } from 'packages/client/src';
+import { Ogini } from '../../../packages/client/src';
 
 /**
  * Integration tests for the Ogini client
@@ -64,11 +64,12 @@ describe('Ogini Client Integration Tests', () => {
     it('should list indices including the test index', async () => {
       const response = await client.indices.listIndices();
 
-      expect(response.indices).toBeDefined();
-      expect(response.total).toBeGreaterThan(0);
+      expect(Array.isArray(response.indices)).toBe(true);
+      expect(response.indices.length).toBeGreaterThan(0);
 
       const foundIndex = response.indices.find(index => index.name === testIndexName);
       expect(foundIndex).toBeDefined();
+      expect(foundIndex.status).toBe('open');
     });
 
     it('should get index details', async () => {
@@ -85,15 +86,16 @@ describe('Ogini Client Integration Tests', () => {
     let documentId: string;
 
     it('should index a document', async () => {
-      const response = await client.documents.indexDocument(testIndexName, {
+      const doc = {
         title: 'Test Document',
         content: 'This is a test document for integration testing.',
         tags: ['test', 'integration'],
-      });
+      };
+
+      const response = await client.documents.indexDocument(testIndexName, { document: doc });
 
       expect(response.id).toBeDefined();
-      expect(response.index).toBe(testIndexName);
-      expect(response.found).toBe(true);
+      expect(response.version).toBeGreaterThan(0);
 
       // Save document ID for later tests
       documentId = response.id;
@@ -103,20 +105,33 @@ describe('Ogini Client Integration Tests', () => {
       const response = await client.documents.getDocument(testIndexName, documentId);
 
       expect(response.id).toBe(documentId);
-      expect(response.source.title).toBe('Test Document');
-      expect(response.source.tags).toContain('test');
+      expect(response.source).toMatchObject({
+        title: 'Test Document',
+        tags: expect.arrayContaining(['test']),
+      });
     });
 
     it('should update a document', async () => {
-      const response = await client.documents.updateDocument(testIndexName, documentId, {
+      const doc = {
         title: 'Updated Document',
         content: 'This document has been updated.',
         tags: ['test', 'updated'],
+      };
+
+      const response = await client.documents.indexDocument(testIndexName, {
+        id: documentId,
+        document: doc,
       });
 
       expect(response.id).toBe(documentId);
-      expect(response.source.title).toBe('Updated Document');
-      expect(response.source.tags).toContain('updated');
+      expect(response.version).toBeGreaterThan(0);
+
+      // Verify update
+      const updated = await client.documents.getDocument(testIndexName, documentId);
+      expect(updated.source).toMatchObject({
+        title: 'Updated Document',
+        tags: expect.arrayContaining(['updated']),
+      });
     });
 
     it('should delete a document', async () => {
@@ -130,29 +145,27 @@ describe('Ogini Client Integration Tests', () => {
   describe('Search', () => {
     beforeAll(async () => {
       // Add some documents for search testing
-      await client.documents.bulkIndexDocuments(testIndexName, [
+      const docs = [
         {
-          document: {
-            title: 'JavaScript Basics',
-            content: 'Learn the basics of JavaScript programming.',
-            tags: ['javascript', 'programming'],
-          },
+          title: 'JavaScript Basics',
+          content: 'Learn the basics of JavaScript programming.',
+          tags: ['javascript', 'programming'],
         },
         {
-          document: {
-            title: 'Advanced TypeScript',
-            content: 'Explore advanced TypeScript concepts and patterns.',
-            tags: ['typescript', 'programming'],
-          },
+          title: 'Advanced TypeScript',
+          content: 'Explore advanced TypeScript concepts and patterns.',
+          tags: ['typescript', 'programming'],
         },
         {
-          document: {
-            title: 'Node.js Development',
-            content: 'Building server-side applications with Node.js and TypeScript.',
-            tags: ['nodejs', 'javascript', 'programming'],
-          },
+          title: 'Node.js Development',
+          content: 'Building server-side applications with Node.js and TypeScript.',
+          tags: ['nodejs', 'javascript', 'programming'],
         },
-      ]);
+      ];
+
+      await Promise.all(
+        docs.map(doc => client.documents.indexDocument(testIndexName, { document: doc })),
+      );
     });
 
     it('should search documents with a match query', async () => {

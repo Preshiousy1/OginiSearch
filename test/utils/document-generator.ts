@@ -12,6 +12,9 @@ export class DocumentGenerator {
    * Generate a single test document with random data
    */
   static generateDocument(overrides: Partial<TestDocument> = {}): TestDocument {
+    //generate a random category from the list of categories
+    const categories = ['tech', 'business', 'science', 'health'];
+    const category = categories[faker.number.int({ min: 0, max: categories.length - 1 })];
     return {
       title: faker.lorem.sentence(),
       content: faker.lorem.paragraphs(3),
@@ -19,7 +22,7 @@ export class DocumentGenerator {
       metadata: {
         createdAt: faker.date.past(),
         author: faker.person.fullName(),
-        category: faker.helpers.arrayElement(['tech', 'business', 'science', 'health']),
+        category,
       },
       ...overrides,
     };
@@ -37,8 +40,11 @@ export class DocumentGenerator {
    */
   static generateSearchableDocument(keywords: string[]): TestDocument {
     const content = keywords.join(' ') + ' ' + faker.lorem.paragraphs(2);
+    const titleHead = keywords[faker.number.int({ min: 0, max: keywords.length - 1 })];
+    const titleTail = faker.lorem.sentence();
+    const title = titleHead + ' ' + titleTail;
     return this.generateDocument({
-      title: faker.helpers.arrayElement(keywords) + ' ' + faker.lorem.sentence(),
+      title,
       content,
       tags: keywords,
     });

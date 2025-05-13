@@ -13,18 +13,17 @@ describe('QueryPlannerService', () => {
     // Create mock term dictionary with the correct interface
     mockTermDictionary = {
       getTerms: jest.fn(() => ['title:search', 'title:engine', 'content:search']),
-      getPostingList: jest.fn(term => ({
-        size: () => (term === 'title:search' ? 5 : term === 'title:engine' ? 10 : 20),
-        getAll: () => [],
-        addEntry: jest.fn(),
-        removeEntry: jest.fn(),
-        getEntry: jest.fn(),
-        getEntries: jest.fn(),
-        clear: jest.fn(),
-        has: jest.fn(),
-        serialize: jest.fn(),
-        deserialize: jest.fn(),
-      })),
+      getPostingList: jest.fn(term =>
+        Promise.resolve({
+          size: () => (term === 'title:search' ? 5 : term === 'title:engine' ? 10 : 20),
+          getEntries: () => [],
+          addEntry: jest.fn(),
+          removeEntry: jest.fn(),
+          getEntry: jest.fn(),
+          serialize: () => Buffer.from([]),
+          deserialize: jest.fn(),
+        }),
+      ),
     };
 
     // Create mock index stats service

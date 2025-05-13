@@ -1,0 +1,150 @@
+{
+  "name": "search-test-corpus",
+  "documents": [
+    {
+      "title": "Officiis atque conservo adeptio conspergo campana celer campana.",
+      "content": "This is a test document containing test-related content for testing search functionality. Cubicularis synagoga hic sol praesentium aro. Vetus clibanus terminatio. Cohors tamisium cur magni comitatus porro utique verbera eum.",
+      "tags": [
+        "test",
+        "besides",
+        "joint"
+      ],
+      "metadata": {
+        "createdAt": "2025-04-13T14:41:44.241Z",
+        "author": "Craig Boyer",
+        "category": "science"
+      }
+    },
+    {
+      "title": "Tego bibo concido cena comburo triumphus numquam vilicus carmen.",
+      "content": "This is a test document containing test-related content for testing search functionality. Vesper summopere cribro vilicus. Caecus adicio vergo suscipit venustas viriliter spero tego vestigium ipsum. Cornu aer allatus texo abbas unde.",
+      "tags": [
+        "test",
+        "flawless",
+        "attest"
+      ],
+      "metadata": {
+        "createdAt": "2024-07-20T06:28:36.202Z",
+        "author": "Leonard Mayer",
+        "category": "science"
+      }
+    },
+    {
+      "title": "Carcer valde spero umbra admitto deduco.",
+      "content": "This is a test document containing test-related content for testing search functionality. Demo stabilis dedico aperiam basium claudeo. Enim tabella vinculum voluptatibus. Verto vespillo circumvenio crudelis aestas textus sponte charisma.",
+      "tags": [
+        "test",
+        "archive",
+        "lieu"
+      ],
+      "metadata": {
+        "createdAt": "2024-06-26T13:56:10.715Z",
+        "author": "Jerald Block",
+        "category": "tech"
+      }
+    },
+    {
+      "title": "Taceo defendo coaegresco audio substantia cursus abstergo nobis cerno.",
+      "content": "This is a test document containing test-related content for testing search functionality. Ambulo templum deputo carmen damno certus quisquam tot vicissitudo. Similique tergeo casso talus attonbitus. Arbustum tendo odit nihil.",
+      "tags": [
+        "test",
+        "oh",
+        "qua"
+      ],
+      "metadata": {
+        "createdAt": "2024-12-20T06:33:06.282Z",
+        "author": "Ms. Edna Crona",
+        "category": "health"
+      }
+    },
+    {
+      "title": "Decor vester dedecor victoria atrocitas error.",
+      "content": "This is a test document containing test-related content for testing search functionality. Carcer pecto sequi est ambitus viscus tactus. Surgo basium triumphus exercitationem vallum summa vitiosus synagoga carmen. Depulso adicio curo communis universe approbo alter.",
+      "tags": [
+        "test",
+        "fathom",
+        "yahoo"
+      ],
+      "metadata": {
+        "createdAt": "2024-06-10T11:39:08.402Z",
+        "author": "Karen Steuber",
+        "category": "tech"
+      }
+    },
+    {
+      "title": "Quo absorbeo bardus careo supellex tero claustrum statua.",
+      "content": "This is a test document containing test-related content for testing search functionality. Virgo stillicidium a ubi audentia demens ulciscor curriculum. Vulgus sum agnosco thesis capitulus aeneus tondeo stella ut. Defluo avaritia aeger stabilis cenaculum virga theca crastinus stultus aurum.",
+      "tags": [
+        "test",
+        "gorgeous",
+        "following"
+      ],
+      "metadata": {
+        "createdAt": "2025-02-23T14:22:10.922Z",
+        "author": "Blanca Aufderhar",
+        "category": "tech"
+      }
+    },
+    {
+      "title": "Eum voluptas turbo voveo.",
+      "content": "This is a test document containing test-related content for testing search functionality. Certus admoveo ventosus conitor vestrum suppono venustas aeneus cattus. Terminatio ubi ciminatio tricesimus occaecati cur adopto teneo. Calcar audio sperno.",
+      "tags": [
+        "test",
+        "duh",
+        "favorite"
+      ],
+      "metadata": {
+        "createdAt": "2024-12-07T23:52:20.727Z",
+        "author": "Sophia Bartoletti",
+        "category": "science"
+      }
+    },
+    {
+      "title": "Consequatur thesaurus spero.",
+      "content": "This is a test document containing test-related content for testing search functionality. Corrupti absconditus centum crustulum sursum adduco cui. Capitulus vehemens adhaero autus una dicta armarium repellendus cresco. Strenuus absens claudeo.",
+      "tags": [
+        "test",
+        "furthermore",
+        "shrilly"
+      ],
+      "metadata": {
+        "createdAt": "2025-01-26T04:48:32.598Z",
+        "author": "Claude Cronin",
+        "category": "business"
+      }
+    },
+    {
+      "title": "Appositus bis quod administratio cum xiphias xiphias solitudo ascit.",
+      "content": "This is a test document containing test-related content for testing search functionality. Adduco curvo laboriosam voro nihil accedo sulum templum triumphus pauci. Vacuus despecto occaecati. Uxor quae culpo degusto aeternus conservo repudiandae defessus voluptatibus abscido.",
+      "tags": [
+        "test",
+        "imagineer",
+        "supposing"
+      ],
+      "metadata": {
+        "createdAt": "2024-11-05T13:13:18.171Z",
+        "author": "Mr. Lyle Beahan-Rolfson",
+        "category": "health"
+      }
+    },
+    {
+      "title": "Vomer soluta turpis advoco curvo.",
+      "content": "This is a test document containing test-related content for testing search functionality. Tumultus averto vinitor viscus suscipio agnitio. Quos ultio socius sto. Concido credo alienus apparatus abbas terra theca aegrotatio.",
+      "tags": [
+        "test",
+        "like",
+        "supposing"
+      ],
+      "metadata": {
+        "createdAt": "2024-06-26T05:04:50.303Z",
+        "author": "Gilberto Luettgen",
+        "category": "tech"
+      }
+    }
+  ],
+  "description": "Test corpus for search integration tests",
+  "metadata": {
+    "category": "test",
+    "createdAt": "2025-05-13T17:23:59.607Z"
+  }
+}

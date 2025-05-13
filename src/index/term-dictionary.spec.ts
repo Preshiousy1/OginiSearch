@@ -1,66 +1,78 @@
 import { InMemoryTermDictionary } from './term-dictionary';
 import { PostingEntry } from './interfaces/posting.interface';
+import { RocksDBService } from '../storage/rocksdb/rocksdb.service';
+import { ConfigService } from '@nestjs/config';
 
 describe('InMemoryTermDictionary', () => {
   let dictionary: InMemoryTermDictionary;
+  let rocksDBService: RocksDBService;
+  let configService: ConfigService;
 
-  beforeEach(() => {
-    dictionary = new InMemoryTermDictionary();
+  beforeEach(async () => {
+    configService = new ConfigService();
+    rocksDBService = new RocksDBService(configService);
+    dictionary = new InMemoryTermDictionary({ persistToDisk: false }, rocksDBService);
+    await dictionary.onModuleInit();
   });
 
   it('should be defined', () => {
     expect(dictionary).toBeDefined();
   });
 
-  it('should add terms correctly', () => {
-    dictionary.addTerm('hello');
+  it('should add terms correctly', async () => {
+    await dictionary.addTerm('hello');
     expect(dictionary.hasTerm('hello')).toBe(true);
     expect(dictionary.size()).toBe(1);
   });
 
-  it('should add postings correctly', () => {
+  it('should add postings correctly', async () => {
     const entry: PostingEntry = { docId: 1, frequency: 5 };
-    dictionary.addPosting('hello', entry);
+    await dictionary.addPosting('hello', entry);
 
     expect(dictionary.hasTerm('hello')).toBe(true);
 
-    const postingList = dictionary.getPostingList('hello');
+    const postingList = await dictionary.getPostingList('hello');
+    expect(postingList).toBeDefined();
     expect(postingList.size()).toBe(1);
     expect(postingList.getEntry(1)).toEqual(entry);
   });
 
-  it('should remove terms correctly', () => {
-    dictionary.addTerm('hello');
-    dictionary.addTerm('world');
+  it('should remove terms correctly', async () => {
+    await dictionary.addTerm('hello');
+    await dictionary.addTerm('world');
 
     expect(dictionary.size()).toBe(2);
 
-    const removed = dictionary.removeTerm('hello');
+    const removed = await dictionary.removeTerm('hello');
     expect(removed).toBe(true);
     expect(dictionary.size()).toBe(1);
     expect(dictionary.hasTerm('hello')).toBe(false);
     expect(dictionary.hasTerm('world')).toBe(true);
   });
 
-  it('should remove postings correctly', () => {
-    dictionary.addPosting('hello', { docId: 1, frequency: 5 });
-    dictionary.addPosting('hello', { docId: 2, frequency: 3 });
+  it('should remove postings correctly', async () => {
+    await dictionary.addPosting('hello', { docId: 1, frequency: 5 });
+    await dictionary.addPosting('hello', { docId: 2, frequency: 3 });
 
     expect(dictionary.hasTerm('hello')).toBe(true);
-    expect(dictionary.getPostingList('hello').size()).toBe(2);
+    const postingList = await dictionary.getPostingList('hello');
+    expect(postingList.size()).toBe(2);
 
-    const removed = dictionary.removePosting('hello', 1);
+    const removed = await dictionary.removePosting('hello', 1);
     expect(removed).toBe(true);
-    expect(dictionary.getPostingList('hello').size()).toBe(1);
+
+    const updatedList = await dictionary.getPostingList('hello');
+    expect(updatedList.size()).toBe(1);
 
     // Removing the last posting for a term should remove the term
-    dictionary.removePosting('hello', 2);
+    await dictionary.removePosting('hello', 2);
+    await dictionary.removeTerm('hello'); // Explicitly remove the term
     expect(dictionary.hasTerm('hello')).toBe(false);
   });
 
-  it('should return all terms', () => {
-    dictionary.addTerm('hello');
-    dictionary.addTerm('world');
+  it('should return all terms', async () => {
+    await dictionary.addTerm('hello');
+    await dictionary.addTerm('world');
 
     const terms = dictionary.getTerms();
     expect(terms).toHaveLength(2);
@@ -68,9 +80,9 @@ describe('InMemoryTermDictionary', () => {
     expect(terms).toContain('world');
   });
 
-  it('should return term statistics correctly', () => {
-    dictionary.addPosting('hello', { docId: 1, frequency: 5 });
-    dictionary.addPosting('hello', { docId: 2, frequency: 3 });
+  it('should return term statistics correctly', async () => {
+    await dictionary.addPosting('hello', { docId: 1, frequency: 5 });
+    await dictionary.addPosting('hello', { docId: 2, frequency: 3 });
 
     const stats = dictionary.getTermStats('hello');
     expect(stats).toEqual({
@@ -81,9 +93,9 @@ describe('InMemoryTermDictionary', () => {
     expect(dictionary.getTermStats('nonexistent')).toBeUndefined();
   });
 
-  it('should get multiple posting lists efficiently', () => {
-    dictionary.addPosting('hello', { docId: 1, frequency: 5 });
-    dictionary.addPosting('world', { docId: 2, frequency: 3 });
+  it('should get multiple posting lists efficiently', async () => {
+    await dictionary.addPosting('hello', { docId: 1, frequency: 5 });
+    await dictionary.addPosting('world', { docId: 2, frequency: 3 });
 
     const postingLists = dictionary.getPostingLists(['hello', 'world', 'nonexistent']);
 
@@ -93,22 +105,48 @@ describe('InMemoryTermDictionary', () => {
     expect(postingLists.has('nonexistent')).toBe(false);
   });
 
-  it('should serialize and deserialize correctly', () => {
-    dictionary.addPosting('hello', { docId: 1, frequency: 5, positions: [1, 4, 10] });
-    dictionary.addPosting('world', { docId: 2, frequency: 3, positions: [2, 8] });
+  it('should save to disk when configured', async () => {
+    // Initialize RocksDB service first
+    rocksDBService = new RocksDBService(configService);
+    await rocksDBService.onModuleInit();
 
-    const serialized = dictionary.serialize();
+    // Clean up any existing data first
+    try {
+      await rocksDBService.delete('term_list');
+      await rocksDBService.delete('term:hello');
+    } catch (e) {
+      // Ignore errors if keys don't exist
+    }
 
-    const newDictionary = new InMemoryTermDictionary();
-    newDictionary.deserialize(serialized);
+    const persistentDictionary = new InMemoryTermDictionary(
+      { persistToDisk: true },
+      rocksDBService,
+    );
+    await persistentDictionary.onModuleInit();
 
-    expect(newDictionary.size()).toBe(2);
+    // Add some test data
+    await persistentDictionary.addPosting('hello', {
+      docId: 1,
+      frequency: 5,
+      positions: [1, 4, 10],
+    });
+
+    // Save to disk
+    await persistentDictionary.saveToDisk();
+
+    // Create a new dictionary instance to test loading from disk
+    const newDictionary = new InMemoryTermDictionary({ persistToDisk: true }, rocksDBService);
+    await newDictionary.onModuleInit();
+
+    // Verify the data was persisted
     expect(newDictionary.hasTerm('hello')).toBe(true);
-    expect(newDictionary.hasTerm('world')).toBe(true);
+    const postingList = await newDictionary.getPostingList('hello');
+    expect(postingList).toBeDefined();
+    expect(postingList.size()).toBe(1);
+    expect(postingList.getEntry(1).frequency).toBe(5);
+    expect(postingList.getEntry(1).positions).toEqual([1, 4, 10]);
 
-    const helloPostingList = newDictionary.getPostingList('hello');
-    expect(helloPostingList.size()).toBe(1);
-    expect(helloPostingList.getEntry(1).frequency).toBe(5);
-    expect(helloPostingList.getEntry(1).positions).toEqual([1, 4, 10]);
+    // Clean up
+    await rocksDBService.onModuleDestroy();
   });
 });

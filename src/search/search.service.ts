@@ -101,31 +101,139 @@ export class SearchService {
     }
 
     try {
-      // Get field-specific terms that start with the prefix
       const field = suggestQuery.field || '_all';
+      const size = suggestQuery.size || 5;
+      const inputText = suggestQuery.text.toLowerCase();
       const allTerms = this.termDictionary.getTerms();
-      const fieldPrefix = `${field}:${suggestQuery.text.toLowerCase()}`;
 
-      const matchingTerms = allTerms
-        .filter(term => term.startsWith(fieldPrefix))
-        .map(term => {
-          const actualTerm = term.split(':')[1];
-          const postingList = this.termDictionary.getPostingList(term);
+      // Get all terms for the specified field
+      const fieldTerms = allTerms.filter(term => term.startsWith(`${field}:`));
 
-          return {
+      // Structure to hold our suggestions with scores
+      interface Suggestion {
+        text: string;
+        score: number;
+        freq: number;
+        distance: number;
+      }
+
+      const suggestions = new Map<string, Suggestion>();
+
+      // Process each term
+      for (const term of fieldTerms) {
+        const actualTerm = term.split(':')[1];
+
+        // Skip if the term is too short
+        if (actualTerm.length < 2) continue;
+
+        // Calculate Levenshtein distance for fuzzy matching
+        const distance = this.levenshteinDistance(inputText, actualTerm);
+        const maxDistance = Math.min(3, Math.floor(actualTerm.length / 3));
+
+        // Consider terms that either:
+        // 1. Start with the input text (prefix match)
+        // 2. Are within acceptable edit distance (fuzzy match)
+        // 3. Contain the input text (substring match)
+        if (
+          actualTerm.startsWith(inputText) ||
+          distance <= maxDistance ||
+          actualTerm.includes(inputText)
+        ) {
+          const postingList = await this.termDictionary.getPostingList(term);
+          const freq = postingList ? postingList.size() : 0;
+
+          // Calculate score based on multiple factors
+          let score = 0;
+
+          // Prefix matches get highest base score
+          if (actualTerm.startsWith(inputText)) {
+            score += 100;
+          }
+
+          // Exact matches get perfect score
+          if (actualTerm === inputText) {
+            score += 200;
+          }
+
+          // Substring matches get medium score
+          if (actualTerm.includes(inputText) && !actualTerm.startsWith(inputText)) {
+            score += 50;
+          }
+
+          // Adjust score based on edit distance (closer = better)
+          score += maxDistance - distance;
+
+          // Adjust score based on term frequency (more frequent = better)
+          score += Math.log1p(freq) * 10;
+
+          // Adjust score based on length difference (closer to input length = better)
+          const lengthDiff = Math.abs(actualTerm.length - inputText.length);
+          score -= lengthDiff * 2;
+
+          suggestions.set(actualTerm, {
             text: actualTerm,
-            score: 1.0 / (1 + allTerms.indexOf(term)), // Simple scoring based on term frequency
-            freq: postingList.size(),
-          };
-        })
-        .sort((a, b) => b.freq - a.freq)
-        .slice(0, suggestQuery.size || 5);
+            score,
+            freq,
+            distance,
+          });
+        }
+      }
 
-      return matchingTerms;
+      // Convert to array and sort by score
+      const sortedSuggestions = Array.from(suggestions.values())
+        .sort((a, b) => {
+          // First by score
+          const scoreDiff = b.score - a.score;
+          if (scoreDiff !== 0) return scoreDiff;
+
+          // Then by frequency if scores are equal
+          const freqDiff = b.freq - a.freq;
+          if (freqDiff !== 0) return freqDiff;
+
+          // Finally by edit distance if both score and freq are equal
+          return a.distance - b.distance;
+        })
+        .slice(0, size);
+
+      return sortedSuggestions;
     } catch (error) {
       this.logger.error(`Suggestion error: ${error.message}`);
       throw new BadRequestException(`Suggestion error: ${error.message}`);
     }
+  }
+
+  /**
+   * Calculate Levenshtein distance between two strings
+   * This helps in finding similar terms for fuzzy matching
+   */
+  private levenshteinDistance(str1: string, str2: string): number {
+    const m = str1.length;
+    const n = str2.length;
+    const dp: number[][] = Array(m + 1)
+      .fill(null)
+      .map(() => Array(n + 1).fill(0));
+
+    // Initialize first row and column
+    for (let i = 0; i <= m; i++) dp[i][0] = i;
+    for (let j = 0; j <= n; j++) dp[0][j] = j;
+
+    // Fill the matrix
+    for (let i = 1; i <= m; i++) {
+      for (let j = 1; j <= n; j++) {
+        if (str1[i - 1] === str2[j - 1]) {
+          dp[i][j] = dp[i - 1][j - 1];
+        } else {
+          dp[i][j] =
+            Math.min(
+              dp[i - 1][j - 1], // substitution
+              dp[i - 1][j], // deletion
+              dp[i][j - 1], // insertion
+            ) + 1;
+        }
+      }
+    }
+
+    return dp[m][n];
   }
 
   private getHighlights(hit: any, queryText: string): Record<string, string[]> {
@@ -185,5 +293,19 @@ export class SearchService {
     }
 
     return facets;
+  }
+
+  async getTermStats(indexName: string): Promise<Array<{ term: string; freq: number }>> {
+    const terms = this.termDictionary.getTerms();
+    const stats = await Promise.all(
+      terms.map(async term => {
+        const postingList = await this.termDictionary.getPostingList(term);
+        return {
+          term,
+          freq: postingList ? postingList.size() : 0,
+        };
+      }),
+    );
+    return stats;
   }
 }

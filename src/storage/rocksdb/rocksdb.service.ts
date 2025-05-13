@@ -3,17 +3,15 @@ import { ConfigService } from '@nestjs/config';
 import { promisify } from 'util';
 import * as fs from 'fs';
 import * as path from 'path';
-import encodingDown from 'encoding-down';
+import { ClassicLevel } from 'classic-level';
+import { AbstractBatchOperation } from 'abstract-level';
 
 @Injectable()
 export class RocksDBService implements OnModuleInit, OnModuleDestroy {
-  private db: any;
+  private db: ClassicLevel<string, string>;
   private readonly logger = new Logger(RocksDBService.name);
   private readonly dbPath: string;
   private isAvailable = false;
-  private rocksdb: any;
-  private levelup: any;
-  private encodingDown: any;
 
   constructor(private configService: ConfigService) {
     // Check if we're running in Docker (environment variable set in Dockerfile)
@@ -23,32 +21,17 @@ export class RocksDBService implements OnModuleInit, OnModuleDestroy {
     this.dbPath =
       this.configService.get<string>('ROCKSDB_PATH') ||
       (isDocker ? '/usr/src/app/data/rocksdb' : path.join(process.cwd(), 'data', 'rocksdb'));
-
-    this.logger.log(`Initializing RocksDB with path: ${this.dbPath}`);
-
-    try {
-      // Use import() for dynamic imports instead of require()
-      // eslint-disable-next-line @typescript-eslint/no-var-requires
-      this.rocksdb = require('rocksdb');
-      // eslint-disable-next-line @typescript-eslint/no-var-requires
-      this.levelup = require('levelup');
-      // eslint-disable-next-line @typescript-eslint/no-var-requires
-      this.encodingDown = require('encoding-down');
-      this.isAvailable = true;
-    } catch (error) {
-      this.logger.warn(`RocksDB dependencies not available: ${error.message}`);
-      this.isAvailable = false;
-    }
   }
 
   async onModuleInit() {
-    if (!this.isAvailable) {
-      this.logger.warn('RocksDB is not available, skipping initialization');
-      return;
-    }
+    this.logger.log(`Initializing RocksDB with path: ${this.dbPath}`);
 
     try {
-      await this.ensureDbDirectoryExists();
+      // Ensure the directory exists
+      await fs.promises.mkdir(path.dirname(this.dbPath), { recursive: true });
+      this.logger.log(`Created RocksDB directory at: ${this.dbPath}`);
+
+      // Initialize the database
       await this.connect();
     } catch (error) {
       this.logger.error(`Failed to initialize RocksDB: ${error.message}`);
@@ -57,130 +40,146 @@ export class RocksDBService implements OnModuleInit, OnModuleDestroy {
   }
 
   async onModuleDestroy() {
-    await this.close();
-  }
-
-  private async ensureDbDirectoryExists() {
-    const mkdirAsync = promisify(fs.mkdir);
-    try {
-      await mkdirAsync(this.dbPath, { recursive: true });
-      this.logger.log(`Created RocksDB directory at: ${this.dbPath}`);
-    } catch (error) {
-      if (error.code !== 'EEXIST') {
-        this.logger.error(`Failed to create RocksDB directory: ${error.message}`);
+    if (this.db) {
+      try {
+        await this.db.close();
+        this.isAvailable = false;
+        this.logger.log('RocksDB connection closed');
+      } catch (error) {
+        this.logger.error(`Error closing RocksDB: ${error.message}`);
         throw error;
       }
     }
   }
 
   private async connect() {
-    if (!this.isAvailable) {
-      throw new Error('RocksDB dependencies are not available');
-    }
+    const maxRetries = 3;
+    const retryDelay = 1000; // 1 second
 
-    try {
-      const db = this.levelup(
-        this.encodingDown(this.rocksdb(this.dbPath), { valueEncoding: 'binary' }),
-      );
-      this.db = db;
-      this.logger.log('Connected to RocksDB successfully');
-    } catch (error) {
-      this.logger.error(`Failed to connect to RocksDB: ${error.message}`);
-      throw error;
-    }
-  }
-
-  async close() {
-    if (this.db) {
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
-        await this.db.close();
-        this.logger.log('RocksDB connection closed');
+        // Close any existing connection
+        if (this.db) {
+          try {
+            await this.db.close();
+          } catch (e) {
+            // Ignore close errors
+          }
+        }
+
+        // Try to remove the lock file
+        const lockFile = path.join(this.dbPath, 'LOCK');
+        try {
+          await fs.promises.unlink(lockFile);
+        } catch (e) {
+          // Ignore if lock file doesn't exist
+        }
+
+        this.db = new ClassicLevel(this.dbPath, {
+          keyEncoding: 'utf8',
+          valueEncoding: 'utf8',
+        });
+        await this.db.open();
+        this.isAvailable = true;
+        this.logger.log('Connected to RocksDB successfully');
+        return;
       } catch (error) {
-        this.logger.error(`Error closing RocksDB connection: ${error.message}`);
+        if (error.code === 'LEVEL_DATABASE_NOT_OPEN' && error.cause?.code === 'LEVEL_CORRUPTION') {
+          this.logger.warn('Database corruption detected, recreating database...');
+          await fs.promises.rm(this.dbPath, { recursive: true, force: true });
+          await fs.promises.mkdir(this.dbPath, { recursive: true });
+          continue;
+        }
+
+        if (attempt === maxRetries) {
+          this.logger.error(
+            `Failed to connect to RocksDB after ${maxRetries} attempts: ${error.message}`,
+          );
+          throw error;
+        }
+
+        this.logger.warn(`Connection attempt ${attempt} failed, retrying in ${retryDelay}ms...`);
+        await new Promise(resolve => setTimeout(resolve, retryDelay));
       }
-    }
-  }
-
-  async get<T>(key: string): Promise<T | null> {
-    if (!this.db) {
-      this.logger.error('Attempted to get key before RocksDB initialization');
-      return null;
-    }
-
-    try {
-      const value = await this.db.get(key);
-      if (!value) return null;
-
-      return this.deserializeBuffer(value);
-    } catch (error) {
-      // Handle "not found" errors
-      if (error.notFound) {
-        return null;
-      }
-      this.logger.error(`Error getting key ${key}: ${error.message}`);
-      throw error;
     }
   }
 
   async put(key: string, value: any): Promise<void> {
+    if (!this.isAvailable) {
+      throw new Error('RocksDB is not available');
+    }
+    const serialized = JSON.stringify(value);
+    await this.db.put(key, serialized);
+  }
+
+  async get(key: string): Promise<any> {
+    if (!this.isAvailable) {
+      throw new Error('RocksDB is not available');
+    }
     try {
-      const serialized = this.serialize(value);
-      await this.db.put(key, serialized);
+      const value = await this.db.get(key);
+      return value ? JSON.parse(value) : null;
     } catch (error) {
-      this.logger.error(`Error putting key ${key}: ${error.message}`);
+      if (error.code === 'LEVEL_NOT_FOUND') {
+        return null;
+      }
       throw error;
     }
   }
 
   async delete(key: string): Promise<void> {
-    try {
-      await this.db.del(key);
-    } catch (error) {
-      this.logger.error(`Error deleting key ${key}: ${error.message}`);
-      throw error;
+    if (!this.isAvailable) {
+      throw new Error('RocksDB is not available');
     }
+    await this.db.del(key);
   }
 
-  async getMany<T>(keys: string[]): Promise<Array<T | null>> {
-    const promises = keys.map(key => this.get<T>(key));
-    return Promise.all(promises);
-  }
-
-  async putMany(entries: Array<{ key: string; value: any }>): Promise<void> {
-    const batch = this.db.batch();
-
-    for (const { key, value } of entries) {
-      const serialized = this.serialize(value);
-      batch.put(key, serialized);
+  async batch(
+    operations: Array<AbstractBatchOperation<ClassicLevel<string, string>, string, string>>,
+  ): Promise<void> {
+    if (!this.isAvailable) {
+      throw new Error('RocksDB is not available');
     }
-
-    await batch.write();
-  }
-
-  async getByPrefix<T>(prefix: string): Promise<Array<{ key: string; value: T }>> {
-    const result: Array<{ key: string; value: T }> = [];
-
-    return new Promise((resolve, reject) => {
-      const stream = this.db.createReadStream({
-        gte: prefix,
-        lt: prefix + '\uffff', // End of Unicode range to match all keys with the prefix
-      });
-
-      stream.on('data', data => {
-        result.push({
-          key: data.key.toString(),
-          value: this.deserializeBuffer(data.value),
-        });
-      });
-
-      stream.on('error', error => {
-        reject(error);
-      });
-
-      stream.on('end', () => {
-        resolve(result);
-      });
+    const serializedOps = operations.map(op => {
+      if (op.type === 'put') {
+        return {
+          ...op,
+          value: JSON.stringify(op.value),
+        };
+      }
+      return op;
     });
+    await this.db.batch(serializedOps);
+  }
+
+  async clear(): Promise<void> {
+    if (!this.isAvailable) {
+      throw new Error('RocksDB is not available');
+    }
+    await this.db.clear();
+  }
+
+  async getMany(keys: string[]): Promise<any[]> {
+    if (!this.isAvailable) {
+      throw new Error('RocksDB is not available');
+    }
+    return Promise.all(keys.map(key => this.get(key)));
+  }
+
+  async getByPrefix(prefix: string): Promise<Array<{ key: string; value: any }>> {
+    const result: Array<{ key: string; value: any }> = [];
+
+    for await (const [key, value] of this.db.iterator({
+      gte: prefix,
+      lt: prefix + '\uffff', // End of Unicode range to match all keys with the prefix
+    })) {
+      result.push({
+        key: key.toString(),
+        value,
+      });
+    }
+
+    return result;
   }
 
   async getKeysWithPrefix(prefix: string): Promise<string[]> {
@@ -201,33 +200,80 @@ export class RocksDBService implements OnModuleInit, OnModuleDestroy {
     return `stats:${indexName}:${statName}`;
   }
 
-  private serialize(data: any): Buffer {
-    return Buffer.from(JSON.stringify(data));
+  private serialize(value: any): Buffer {
+    try {
+      // Handle special types like Date, Map, Set
+      const serialized = JSON.stringify(value, (key, value) => {
+        if (value instanceof Date) {
+          return { __type: 'Date', value: value.toISOString() };
+        }
+        if (value instanceof Map) {
+          return { __type: 'Map', value: Array.from(value.entries()) };
+        }
+        if (value instanceof Set) {
+          return { __type: 'Set', value: Array.from(value) };
+        }
+        return value;
+      });
+      return Buffer.from(serialized);
+    } catch (error) {
+      this.logger.error(`Serialization error: ${error.message}`);
+      throw new Error(`Failed to serialize value: ${error.message}`);
+    }
   }
 
   private deserializeBuffer(data: any): any {
-    // If it's a Buffer-like object
-    if (data && data.type === 'Buffer' && Array.isArray(data.data)) {
-      const buffer = Buffer.from(data.data);
-      return JSON.parse(buffer.toString());
-    }
+    try {
+      // If null or undefined, return as is
+      if (!data) {
+        return data;
+      }
 
-    // If it's a Buffer
-    if (Buffer.isBuffer(data)) {
-      return JSON.parse(data.toString());
-    }
+      // Convert Buffer or Buffer-like to string
+      let strData: string;
+      if (Buffer.isBuffer(data)) {
+        strData = data.toString('utf8');
+      } else if (data.type === 'Buffer' && Array.isArray(data.data)) {
+        strData = Buffer.from(data.data).toString('utf8');
+      } else if (typeof data === 'string') {
+        strData = data;
+      } else {
+        throw new Error('Invalid data format');
+      }
 
-    // If it's already a string
-    if (typeof data === 'string') {
-      return JSON.parse(data);
+      // Parse JSON with reviver for special types
+      return JSON.parse(strData, (key, value) => {
+        if (value && typeof value === 'object') {
+          if (value.__type === 'Date') {
+            return new Date(value.value);
+          }
+          if (value.__type === 'Map') {
+            return new Map(value.value);
+          }
+          if (value.__type === 'Set') {
+            return new Set(value.value);
+          }
+        }
+        return value;
+      });
+    } catch (error) {
+      this.logger.error(`Deserialization error: ${error.message}`);
+      throw new Error(`Failed to deserialize data: ${error.message}`);
     }
+  }
 
-    // If it's already parsed
-    if (typeof data === 'object') {
-      return data;
+  private toBuffer(value: Buffer | string | object): Buffer {
+    try {
+      if (Buffer.isBuffer(value)) {
+        return value;
+      } else if (typeof value === 'string') {
+        return Buffer.from(value);
+      } else {
+        return this.serialize(value);
+      }
+    } catch (error) {
+      this.logger.error(`Buffer conversion error: ${error.message}`);
+      throw new Error(`Failed to convert to buffer: ${error.message}`);
     }
-
-    // Fallback
-    return data;
   }
 }

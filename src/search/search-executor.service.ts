@@ -11,6 +11,12 @@ import { DocumentStorageService } from '../storage/document-storage/document-sto
 import { IndexStatsService } from '../index/index-stats.service';
 import { InMemoryTermDictionary } from '../index/term-dictionary';
 
+interface SearchMatch {
+  id: string;
+  score: number;
+  index: string;
+}
+
 interface SearchOptions {
   from?: number;
   size?: number;
@@ -49,10 +55,13 @@ export class SearchExecutorService {
     const { from = 0, size = 10, sort, filter } = options;
 
     // Execute the query plan to get matching document IDs with scores
-    const matches = await this.executeQueryPlan(indexName, executionPlan);
+    const matches = (await this.executeQueryPlan(indexName, executionPlan)).map(match => ({
+      ...match,
+      index: indexName,
+    }));
 
     // Apply any filter conditions if provided
-    const filteredMatches = filter ? this.applyFilters(matches, filter) : matches;
+    const filteredMatches = await this.applyFilters(matches, filter);
 
     // Sort results by score or specified sort field
     const sortedMatches = this.sortMatches(filteredMatches, sort);
@@ -112,31 +121,44 @@ export class SearchExecutorService {
     indexName: string,
     step: TermQueryStep,
   ): Promise<Array<{ id: string; score: number }>> {
-    const { term, field = '_all' /*isPrefix = false*/ } = step;
+    const { term, field = '_all' } = step;
+    this.logger.debug(`Executing term step for field:${field} term:${term}`);
+    this.logger.debug(`All terms in dictionary: ${this.termDictionary.getTerms().join(', ')}`);
 
     const postingLists: PostingList[] = [];
     const bm25Scores: { id: string; score: number }[] = [];
 
-    // if (isPrefix) {
-    // Get all terms in the field that start with the prefix
+    // Use the term directly as it already includes the field prefix
+    this.logger.debug(`Looking for exact term match: ${term}`);
+    const exactPostingList = await this.termDictionary.getPostingList(term);
+    if (exactPostingList && exactPostingList.size() > 0) {
+      this.logger.debug(`Found exact match for ${term} with ${exactPostingList.size()} documents`);
+      const scores = this.calculateScores(indexName, exactPostingList, term);
+      bm25Scores.push(...scores);
+      postingLists.push(exactPostingList);
+    } else {
+      this.logger.debug(`No exact match found for ${term}`);
+    }
+
+    // Get prefix matches if no exact match found
     const matchingTerms = this.getMatchingTerms(term);
+    this.logger.debug(`Found ${matchingTerms.length} prefix matches: ${matchingTerms.join(', ')}`);
+
     for (const t of matchingTerms) {
-      const postingList = this.termDictionary.getPostingList(t);
-      if (postingList && postingList.size() > 0) {
-        // Calculate BM25 scores for matching documents
-        const scores = this.calculateScores(indexName, postingList, t);
-        bm25Scores.push(...scores);
-        postingLists.push(postingList);
+      if (t !== term) {
+        // Skip exact term as we already processed it
+        const postingList = await this.termDictionary.getPostingList(t);
+        if (postingList && postingList.size() > 0) {
+          this.logger.debug(`Found prefix match for ${t} with ${postingList.size()} documents`);
+          const scores = this.calculateScores(indexName, postingList, t);
+          bm25Scores.push(...scores);
+          postingLists.push(postingList);
+        }
       }
     }
-    // } else {
-    //   const postingList = this.termDictionary.getPostingList(`${field}:${term}`);
-    //   if (postingList && postingList.size() > 0) {
-    //     postingLists.push(postingList);
-    //   }
-    // }
 
     if (postingLists.length === 0) {
+      this.logger.debug('No matching terms found in dictionary');
       return [];
     }
 
@@ -171,10 +193,12 @@ export class SearchExecutorService {
     step: PhraseQueryStep,
   ): Promise<Array<{ id: string; score: number }>> {
     // Get postings for each term in the phrase
-    const termPostings = step.terms.map(term => ({
-      term,
-      postings: this.termDictionary.getPostingList(`${step.field}:${term}`),
-    }));
+    const termPostings = await Promise.all(
+      step.terms.map(async term => ({
+        term,
+        postings: await this.termDictionary.getPostingList(`${step.field}:${term}`),
+      })),
+    );
 
     // Check if all terms exist
     if (termPostings.some(tp => !tp.postings || tp.postings.size() === 0)) {
@@ -427,13 +451,40 @@ export class SearchExecutorService {
     return [...matches].sort((a, b) => b.score - a.score);
   }
 
-  private applyFilters(
-    matches: Array<{ id: string; score: number }>,
+  private async applyFilters(
+    matches: SearchMatch[],
     filter: Record<string, any>,
-  ): Array<{ id: string; score: number }> {
-    // This would filter documents based on field values
-    // Would require document content to be available or another lookup
-    // For simplicity, we're returning unfiltered results
+  ): Promise<SearchMatch[]> {
+    if (!filter || !matches.length) {
+      return matches;
+    }
+
+    // Get documents for filtering
+    const documents = await this.fetchDocuments(
+      matches[0].index,
+      matches.map(m => m.id),
+    );
+
+    // Apply term filter
+    if (filter.term) {
+      const { field, value } = filter.term;
+      return matches.filter(match => {
+        const doc = documents[match.id];
+        if (!doc) return false;
+
+        const fieldValue = doc[field];
+
+        // Handle array fields (like categories)
+        if (Array.isArray(fieldValue)) {
+          return fieldValue.includes(value);
+        }
+
+        // Handle scalar fields
+        return fieldValue === value;
+      });
+    }
+
+    // Add support for other filter types here (range, exists, etc.)
     return matches;
   }
 

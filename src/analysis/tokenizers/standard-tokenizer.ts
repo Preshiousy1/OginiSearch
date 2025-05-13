@@ -106,13 +106,19 @@ export class StandardTokenizer implements Tokenizer {
       processedText = processedText.toLowerCase();
     }
 
-    // Remove special characters if option is enabled
-    if (this.options.removeSpecialChars && this.options.specialCharsPattern) {
-      processedText = processedText.replace(this.options.specialCharsPattern, ' ');
-    }
+    let tokens: string[];
 
-    // Split text into tokens using standard word boundaries
-    let tokens = processedText.split(/\s+/).filter(token => token.length > 0);
+    if (this.options.removeSpecialChars && this.options.specialCharsPattern) {
+      // Remove special characters and split on word boundaries
+      processedText = processedText.replace(this.options.specialCharsPattern, ' ');
+      tokens = processedText
+        .split(/\b|\s+/)
+        .map(token => token.trim())
+        .filter(token => token.length > 0);
+    } else {
+      // When preserving special characters, only split on whitespace
+      tokens = processedText.split(/\s+/).filter(token => token.length > 0);
+    }
 
     // Remove stop words if option is enabled
     if (this.options.removeStopWords && this.options.stopWords) {
@@ -126,7 +132,8 @@ export class StandardTokenizer implements Tokenizer {
       // tokens = tokens.map(token => stemmer.stem(token));
     }
 
-    return tokens;
+    // Final check to ensure no empty tokens
+    return tokens.filter(token => token.length > 0);
   }
 
   getName(): string {

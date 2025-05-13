@@ -152,7 +152,16 @@ export class SearchController {
       this.logger.log(`Processing object query: ${JSON.stringify(searchDto.query)}`);
     }
 
-    return this.searchService.search(index, searchDto);
+    try {
+      const result = await this.searchService.search(index, searchDto);
+      this.logger.log(
+        `Search completed for index '${index}': Found ${result.data.total} results in ${result.took}ms`,
+      );
+      return result;
+    } catch (error) {
+      this.logger.error(`Search error for index '${index}': ${error.message}`, error.stack);
+      throw error;
+    }
   }
 
   @Post('_suggest')

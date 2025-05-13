@@ -1,7 +1,11 @@
-import { Injectable, Logger, NotFoundException, ConflictException } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException, ConflictException, Inject } from '@nestjs/common';
 import { CreateIndexDto, IndexResponseDto, UpdateIndexSettingsDto } from '../api/dtos/index.dto';
 import { IndexStorageService } from '../storage/index-storage/index-storage.service';
 import { AnalyzerRegistryService } from '../analysis/analyzer-registry.service';
+import { DocumentStorageService } from '../storage/document-storage/document-storage.service';
+import { IndexStatsService } from '../index/index-stats.service';
+import { InMemoryTermDictionary } from '../index/term-dictionary';
+import { Index, IndexSettings } from './interfaces/index.interface';
 
 @Injectable()
 export class IndexService {
@@ -10,6 +14,9 @@ export class IndexService {
   constructor(
     private readonly indexStorage: IndexStorageService,
     private readonly analyzerRegistry: AnalyzerRegistryService,
+    private readonly documentStorage: DocumentStorageService,
+    private readonly indexStats: IndexStatsService,
+    @Inject('TERM_DICTIONARY') private readonly termDictionary: InMemoryTermDictionary,
   ) {}
 
   async createIndex(createIndexDto: CreateIndexDto): Promise<IndexResponseDto> {
@@ -77,7 +84,46 @@ export class IndexService {
       throw new NotFoundException(`Index with name ${name} not found`);
     }
 
-    await this.indexStorage.deleteIndex(name);
+    try {
+      // 1. Delete all documents from MongoDB storage
+      await this.documentStorage.deleteAllDocumentsInIndex(name);
+
+      // 2. Delete all index data from RocksDB
+      await this.indexStorage.deleteIndex(name);
+
+      // 3. Reset index statistics
+      this.indexStats.reset();
+
+      // 4. Clear term dictionary entries for this index
+      // Get all terms for this index and remove them
+      const terms = this.termDictionary.getTerms().filter(term => term.startsWith(`${name}:`));
+      for (const term of terms) {
+        this.termDictionary.removeTerm(term);
+      }
+
+      this.logger.log(`Successfully deleted index ${name} and all its data`);
+    } catch (error) {
+      this.logger.error(`Error deleting index ${name}: ${error.message}`);
+      throw error;
+    }
+  }
+
+  async rebuildDocumentCount(indexName: string): Promise<void> {
+    this.logger.log(`Rebuilding document count for index ${indexName}`);
+
+    const index = await this.indexStorage.getIndex(indexName);
+    if (!index) {
+      throw new NotFoundException(`Index ${indexName} not found`);
+    }
+
+    // Get total document count from storage
+    const { total } = await this.documentStorage.getDocuments(indexName, { limit: 0 });
+
+    // Update index metadata
+    index.documentCount = total;
+    await this.indexStorage.updateIndex(indexName, index);
+
+    this.logger.log(`Document count rebuilt for index ${indexName}: ${total} documents`);
   }
 
   private mapToIndexResponse(index: any): IndexResponseDto {

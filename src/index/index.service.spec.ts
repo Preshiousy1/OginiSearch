@@ -4,11 +4,18 @@ import { IndexStorageService } from '../storage/index-storage/index-storage.serv
 import { AnalyzerRegistryService } from '../analysis/analyzer-registry.service';
 import { NotFoundException, ConflictException } from '@nestjs/common';
 import { CreateIndexDto } from '../api/dtos/index.dto';
+import { DocumentStorageService } from '../storage/document-storage/document-storage.service';
+import { IndexStatsService } from './index-stats.service';
+import { InMemoryTermDictionary } from './term-dictionary';
+import { ConfigService } from '@nestjs/config';
 
 describe('IndexService', () => {
   let service: IndexService;
   let indexStorageService: Partial<IndexStorageService>;
   let analyzerRegistryService: Partial<AnalyzerRegistryService>;
+  let documentStorageService: Partial<DocumentStorageService>;
+  let indexStatsService: Partial<IndexStatsService>;
+  let termDictionary: InMemoryTermDictionary;
 
   beforeEach(async () => {
     // Create mock for IndexStorageService
@@ -71,6 +78,30 @@ describe('IndexService', () => {
       }),
     };
 
+    // Create mock for DocumentStorageService
+    documentStorageService = {
+      storeDocument: jest.fn().mockResolvedValue(true),
+      getDocument: jest.fn().mockResolvedValue(null),
+      deleteDocument: jest.fn().mockResolvedValue(true),
+      deleteAllDocumentsInIndex: jest.fn().mockResolvedValue(true),
+    };
+
+    // Create mock for IndexStatsService
+    indexStatsService = {
+      totalDocuments: 0,
+      getDocumentFrequency: jest.fn().mockReturnValue(0),
+      getAverageFieldLength: jest.fn().mockReturnValue(0),
+      getFieldLength: jest.fn().mockReturnValue(0),
+      updateDocumentStats: jest.fn(),
+      updateTermStats: jest.fn(),
+      reset: jest.fn(),
+    };
+
+    // Create mock for TermDictionary
+    const configService = new ConfigService();
+    termDictionary = new InMemoryTermDictionary({ persistToDisk: false });
+    await termDictionary.onModuleInit();
+
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         IndexService,
@@ -81,6 +112,18 @@ describe('IndexService', () => {
         {
           provide: AnalyzerRegistryService,
           useValue: analyzerRegistryService,
+        },
+        {
+          provide: DocumentStorageService,
+          useValue: documentStorageService,
+        },
+        {
+          provide: IndexStatsService,
+          useValue: indexStatsService,
+        },
+        {
+          provide: 'TERM_DICTIONARY',
+          useValue: termDictionary,
         },
       ],
     }).compile();
@@ -173,7 +216,11 @@ describe('IndexService', () => {
   describe('deleteIndex', () => {
     it('should delete an index', async () => {
       await service.deleteIndex('existing-index');
+      expect(documentStorageService.deleteAllDocumentsInIndex).toHaveBeenCalledWith(
+        'existing-index',
+      );
       expect(indexStorageService.deleteIndex).toHaveBeenCalledWith('existing-index');
+      expect(indexStatsService.reset).toHaveBeenCalled();
     });
 
     it('should throw NotFoundException if index not found', async () => {

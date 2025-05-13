@@ -31,7 +31,7 @@ export class SchemaVersionManagerService {
   async getSchema(name: string, version?: number): Promise<Schema | null> {
     if (version) {
       const key = this.formatSchemaKey(name, version);
-      return this.rocksDBService.get<Schema>(key);
+      return this.rocksDBService.get(key) as Promise<Schema>;
     }
 
     // If no version specified, get the latest
@@ -48,7 +48,7 @@ export class SchemaVersionManagerService {
 
   async getSchemaVersions(name: string): Promise<Schema[]> {
     const prefix = `${this.schemaKeyPrefix}${name}:`;
-    const schemas = await this.rocksDBService.getByPrefix<Schema>(prefix);
+    const schemas = await this.rocksDBService.getByPrefix(prefix);
     return schemas.map(item => item.value).sort((a, b) => b.version - a.version);
   }
 

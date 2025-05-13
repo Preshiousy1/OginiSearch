@@ -1,23 +1,37 @@
-import { Module } from '@nestjs/common';
+import { forwardRef, Module } from '@nestjs/common';
+import { ScheduleModule } from '@nestjs/schedule';
+import { IndexService } from './index.service';
+import { StorageModule } from '../storage/storage.module';
+import { AnalysisModule } from '../analysis/analysis.module';
 import { InMemoryTermDictionary } from './term-dictionary';
+import { IndexStatsService } from './index-stats.service';
 import { SimplePostingList } from './posting-list';
 import { CompressedPostingList } from './compressed-posting-list';
-import { IndexStatsService } from './index-stats.service';
-import { BM25Scorer } from './bm25-scorer';
-import { IndexService } from './index.service';
-import { AnalysisModule } from '../analysis/analysis.module';
-import { StorageModule } from '../storage/storage.module';
 import { RocksDBService } from 'src/storage/rocksdb/rocksdb.service';
+import { BM25Scorer } from './bm25-scorer';
+import { DocumentCountVerifierService } from './document-count-verifier.service';
+
 @Module({
-  imports: [StorageModule, AnalysisModule],
+  imports: [
+    ScheduleModule.forRoot(),
+    forwardRef(() => StorageModule),
+    forwardRef(() => AnalysisModule),
+  ],
   providers: [
+    IndexService,
+    IndexStatsService,
     {
       provide: 'TERM_DICTIONARY',
       useFactory: (rocksDBService: RocksDBService) =>
-        new InMemoryTermDictionary({ useCompression: true }, rocksDBService),
+        new InMemoryTermDictionary(
+          {
+            useCompression: false,
+            persistToDisk: true,
+          },
+          rocksDBService,
+        ),
       inject: [RocksDBService],
     },
-    IndexStatsService,
     {
       provide: 'BM25_SCORER',
       useFactory: (indexStats: IndexStatsService) =>
@@ -30,7 +44,7 @@ import { RocksDBService } from 'src/storage/rocksdb/rocksdb.service';
     },
     SimplePostingList,
     CompressedPostingList,
-    IndexService,
+    DocumentCountVerifierService,
   ],
   exports: [
     'TERM_DICTIONARY',
@@ -39,6 +53,7 @@ import { RocksDBService } from 'src/storage/rocksdb/rocksdb.service';
     SimplePostingList,
     CompressedPostingList,
     IndexService,
+    DocumentCountVerifierService,
   ],
 })
 export class IndexModule {}

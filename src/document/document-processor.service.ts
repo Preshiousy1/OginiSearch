@@ -1,4 +1,4 @@
-import { Injectable, Inject } from '@nestjs/common';
+import { Injectable, Inject, OnModuleInit } from '@nestjs/common';
 import {
   DocumentProcessor,
   DocumentMapping,
@@ -8,10 +8,14 @@ import {
 } from './interfaces/document-processor.interface';
 import { AnalyzerRegistryService } from '../analysis/analyzer-registry.service';
 @Injectable()
-export class DocumentProcessorService implements DocumentProcessor {
+export class DocumentProcessorService implements DocumentProcessor, OnModuleInit {
   private mapping: DocumentMapping = { fields: {} };
 
   constructor(private readonly analyzerRegistryService: AnalyzerRegistryService) {}
+
+  async onModuleInit() {
+    this.initializeDefaultMapping();
+  }
 
   /**
    * Process a document for indexing
@@ -81,24 +85,15 @@ export class DocumentProcessorService implements DocumentProcessor {
    * Extract field value from document source using dot notation for nested fields
    */
   private extractFieldValue(source: Record<string, any>, fieldPath: string): any {
-    // Handle dot notation for nested fields
     const parts = fieldPath.split('.');
-
-    // Start with the source object
-    let value: any = source;
-
-    // Traverse the path
+    let current = source;
     for (const part of parts) {
-      // If we hit a null/undefined value or the property doesn't exist, return null
-      if (value === null || value === undefined || !(part in value)) {
-        return null;
+      if (current === null || current === undefined) {
+        return undefined;
       }
-
-      // Move to the next level
-      value = value[part];
+      current = current[part];
     }
-
-    return value;
+    return current;
   }
 
   /**
@@ -110,27 +105,23 @@ export class DocumentProcessorService implements DocumentProcessor {
     }
 
     if (typeof value === 'string') {
-      return value;
-    }
-
-    if (typeof value === 'number' || typeof value === 'boolean') {
+      const trimmed = value.trim();
+      return trimmed || ''; // Return empty string for whitespace-only strings
+    } else if (Array.isArray(value)) {
+      const normalized = value
+        .map(v => this.normalizeFieldContent(v))
+        .filter(v => v.length > 0) // Filter out empty strings before joining
+        .join(' ');
+      return normalized || '';
+    } else if (typeof value === 'number') {
       return value.toString();
-    }
-
-    if (Array.isArray(value)) {
-      return value.map(item => this.normalizeFieldContent(item)).join(' ');
-    }
-
-    if (typeof value === 'object') {
-      // For dates, convert to ISO string
-      if (value instanceof Date) {
-        return value.toISOString();
-      }
-
-      // For other objects, stringify
+    } else if (typeof value === 'boolean') {
+      return value.toString();
+    } else if (value instanceof Date) {
+      return value.toISOString();
+    } else if (typeof value === 'object' && value !== null) {
       return JSON.stringify(value);
     }
-
     return '';
   }
 
@@ -166,5 +157,52 @@ export class DocumentProcessorService implements DocumentProcessor {
         throw new Error(`Default analyzer "${this.mapping.defaultAnalyzer}" not found`);
       }
     }
+  }
+
+  /**
+   * Initialize default mapping for common field types
+   */
+  initializeDefaultMapping(): void {
+    this.mapping = {
+      defaultAnalyzer: 'standard',
+      fields: {
+        title: {
+          analyzer: 'standard',
+          indexed: true,
+          stored: true,
+          weight: 2.0,
+        },
+        description: {
+          analyzer: 'standard',
+          indexed: true,
+          stored: true,
+          weight: 1.5,
+        },
+        content: {
+          analyzer: 'standard',
+          indexed: true,
+          stored: true,
+          weight: 1.0,
+        },
+        categories: {
+          analyzer: 'keyword',
+          indexed: true,
+          stored: true,
+          weight: 1.0,
+        },
+        price: {
+          analyzer: 'standard',
+          indexed: true,
+          stored: true,
+          weight: 1.0,
+        },
+        tags: {
+          analyzer: 'keyword',
+          indexed: true,
+          stored: true,
+          weight: 1.0,
+        },
+      },
+    };
   }
 }

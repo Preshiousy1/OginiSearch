@@ -5,7 +5,7 @@ export interface PostingEntry {
   /**
    * Document ID
    */
-  docId: number | string;
+  docId: string | number;
 
   /**
    * Term frequency in the document
@@ -35,12 +35,12 @@ export interface PostingList {
   /**
    * Remove a document from the posting list
    */
-  removeEntry(docId: number | string): boolean;
+  removeEntry(docId: string | number): boolean;
 
   /**
    * Get a posting entry by document ID
    */
-  getEntry(docId: number | string): PostingEntry | undefined;
+  getEntry(docId: string | number): PostingEntry | undefined;
 
   /**
    * Get all posting entries
@@ -70,12 +70,12 @@ export interface TermDictionary {
   /**
    * Add a term to the dictionary
    */
-  addTerm(term: string): PostingList;
+  addTerm(term: string): Promise<PostingList>;
 
   /**
    * Get a posting list for a term
    */
-  getPostingList(term: string): PostingList | undefined;
+  getPostingList(term: string): Promise<PostingList | undefined>;
 
   /**
    * Check if a term exists in the dictionary
@@ -85,7 +85,7 @@ export interface TermDictionary {
   /**
    * Remove a term from the dictionary
    */
-  removeTerm(term: string): boolean;
+  removeTerm(term: string): Promise<boolean>;
 
   /**
    * Get all terms in the dictionary
@@ -100,12 +100,12 @@ export interface TermDictionary {
   /**
    * Add a document to a term's posting list
    */
-  addPosting(term: string, entry: PostingEntry): void;
+  addPosting(term: string, entry: PostingEntry): Promise<void>;
 
   /**
    * Remove a document from a term's posting list
    */
-  removePosting(term: string, docId: number | string): boolean;
+  removePosting(term: string, docId: number | string): Promise<boolean>;
 
   /**
    * Serialize the dictionary for storage
@@ -115,5 +115,10 @@ export interface TermDictionary {
   /**
    * Deserialize a dictionary from storage
    */
-  deserialize(data: Buffer): void;
+  deserialize(data: Buffer | Record<string, any>): void;
+
+  /**
+   * Save the current state to disk
+   */
+  saveToDisk(): Promise<void>;
 }

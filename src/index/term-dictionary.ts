@@ -4,6 +4,10 @@ import { CompressedPostingList } from './compressed-posting-list';
 import { Injectable, Inject, Logger, OnModuleInit } from '@nestjs/common';
 import { RocksDBService } from '../storage/rocksdb/rocksdb.service';
 
+const BATCH_SIZE = 1000;
+const TERM_PREFIX = 'term:';
+const TERM_LIST_KEY = 'term_list';
+
 export interface TermDictionaryOptions {
   useCompression?: boolean;
   persistToDisk?: boolean;
@@ -16,6 +20,7 @@ export class InMemoryTermDictionary implements TermDictionary, OnModuleInit {
   private readonly logger = new Logger(InMemoryTermDictionary.name);
   private rocksDBService?: RocksDBService;
   private initialized = false;
+  private termList: Set<string> = new Set();
 
   constructor(options: TermDictionaryOptions = {}, rocksDBService?: RocksDBService) {
     this.options = {
@@ -27,14 +32,12 @@ export class InMemoryTermDictionary implements TermDictionary, OnModuleInit {
   }
 
   async onModuleInit() {
-    // Wait for RocksDB to be initialized before loading dictionary
     if (this.options.persistToDisk && this.rocksDBService) {
       try {
-        await this.loadFromDisk();
+        await this.loadTermList();
         this.initialized = true;
       } catch (err) {
-        this.logger.warn(`Failed to load term dictionary from disk: ${err.message}`);
-        // Still mark as initialized even if loading fails
+        this.logger.warn(`Failed to load term list: ${err.message}`);
         this.initialized = true;
       }
     } else {
@@ -42,49 +45,113 @@ export class InMemoryTermDictionary implements TermDictionary, OnModuleInit {
     }
   }
 
-  private ensureInitialized() {
-    if (!this.initialized) {
-      throw new Error('Term dictionary not yet initialized');
+  private async loadTermList() {
+    if (!this.rocksDBService) return;
+
+    try {
+      const data = await this.rocksDBService.get(TERM_LIST_KEY);
+      if (data) {
+        let terms;
+
+        // Handle data based on its type
+        if (data.type === 'Buffer' && Array.isArray(data.data)) {
+          // Convert Buffer-like object to actual Buffer
+          const buffer = Buffer.from(data.data);
+          terms = JSON.parse(buffer.toString());
+        } else if (typeof data === 'object' && data !== null && !(data instanceof Buffer)) {
+          // If it's already a JavaScript object, use it directly
+          terms = data;
+        } else {
+          // If it's a string or Buffer
+          terms = typeof data === 'string' ? JSON.parse(data) : JSON.parse(data.toString());
+        }
+
+        this.termList = new Set(terms);
+        this.logger.log(`Loaded ${this.termList.size} terms from term list`);
+      }
+    } catch (error) {
+      if (error.code !== 'NOT_FOUND') {
+        this.logger.error(`Failed to load term list: ${error.message}`);
+      }
     }
   }
 
-  addTerm(term: string): PostingList {
+  private async saveTermList() {
+    if (!this.rocksDBService) return;
+
+    try {
+      const terms = Array.from(this.termList);
+      await this.rocksDBService.put(TERM_LIST_KEY, Buffer.from(JSON.stringify(terms)));
+    } catch (error) {
+      this.logger.error(`Failed to save term list: ${error.message}`);
+    }
+  }
+
+  private getTermKey(term: string): string {
+    return `${TERM_PREFIX}${term}`;
+  }
+
+  async addTerm(term: string): Promise<PostingList> {
     this.ensureInitialized();
+
     if (!this.dictionary.has(term)) {
       const postingList = this.options.useCompression
         ? new CompressedPostingList()
         : new SimplePostingList();
-      this.dictionary.set(term, postingList);
 
-      // Persist the updated dictionary if enabled
+      // Try to load existing postings if they exist
       if (this.options.persistToDisk && this.rocksDBService) {
-        this.saveToDisk().catch(err => {
-          this.logger.warn(`Failed to persist term dictionary: ${err.message}`);
-        });
+        try {
+          const data = await this.rocksDBService.get(this.getTermKey(term));
+          if (data) {
+            postingList.deserialize(data);
+          }
+        } catch (error) {
+          if (error.code !== 'NOT_FOUND') {
+            this.logger.warn(`Failed to load postings for term ${term}: ${error.message}`);
+          }
+        }
+      }
+
+      this.dictionary.set(term, postingList);
+      this.termList.add(term);
+
+      if (this.options.persistToDisk && this.rocksDBService) {
+        await this.saveTermList();
       }
     }
+
     return this.dictionary.get(term);
   }
 
-  getPostingList(term: string): PostingList | undefined {
+  async getPostingList(term: string): Promise<PostingList | undefined> {
     this.ensureInitialized();
+
+    if (!this.dictionary.has(term) && this.termList.has(term)) {
+      await this.addTerm(term);
+    }
+
     return this.dictionary.get(term);
   }
 
   hasTerm(term: string): boolean {
     this.ensureInitialized();
-    return this.dictionary.has(term);
+    return this.termList.has(term);
   }
 
-  removeTerm(term: string): boolean {
+  async removeTerm(term: string): Promise<boolean> {
     this.ensureInitialized();
-    const result = this.dictionary.delete(term);
 
-    // Persist the updated dictionary if enabled
+    const result = this.dictionary.delete(term);
+    this.termList.delete(term);
+
     if (result && this.options.persistToDisk && this.rocksDBService) {
-      this.saveToDisk().catch(err => {
-        this.logger.warn(`Failed to persist term dictionary after term removal: ${err.message}`);
-      });
+      try {
+        await this.rocksDBService.delete(this.getTermKey(term));
+        await this.saveTermList();
+      } catch (error) {
+        this.logger.error(`Failed to remove term ${term} from storage: ${error.message}`);
+      }
     }
 
     return result;
@@ -92,119 +159,67 @@ export class InMemoryTermDictionary implements TermDictionary, OnModuleInit {
 
   getTerms(): string[] {
     this.ensureInitialized();
-    return Array.from(this.dictionary.keys());
+    return Array.from(this.termList);
   }
 
   size(): number {
     this.ensureInitialized();
-    return this.dictionary.size;
+    return this.termList.size;
   }
 
-  addPosting(term: string, entry: PostingEntry): void {
+  async addPosting(term: string, entry: PostingEntry): Promise<void> {
     this.ensureInitialized();
-    const postingList = this.addTerm(term);
+
+    const postingList = await this.addTerm(term);
     postingList.addEntry(entry);
 
-    // Persist the updated dictionary if enabled
     if (this.options.persistToDisk && this.rocksDBService) {
-      this.saveToDisk().catch(err => {
-        this.logger.warn(
-          `Failed to persist term dictionary after posting addition: ${err.message}`,
-        );
-      });
+      try {
+        const serialized = postingList.serialize();
+        await this.rocksDBService.put(this.getTermKey(term), serialized);
+      } catch (error) {
+        this.logger.error(`Failed to persist postings for term ${term}: ${error.message}`);
+      }
     }
   }
 
-  removePosting(term: string, docId: number | string): boolean {
-    const postingList = this.dictionary.get(term);
+  async removePosting(term: string, docId: number | string): Promise<boolean> {
+    const postingList = await this.getPostingList(term);
     if (!postingList) {
       return false;
     }
 
     const removed = postingList.removeEntry(docId);
 
-    // If posting list is empty, remove the term
-    if (postingList.size() === 0) {
-      this.dictionary.delete(term);
-    }
-
-    // Persist the updated dictionary if enabled
     if (removed && this.options.persistToDisk && this.rocksDBService) {
-      this.saveToDisk().catch(err => {
-        this.logger.warn(`Failed to persist term dictionary after posting removal: ${err.message}`);
-      });
+      try {
+        if (postingList.size() === 0) {
+          await this.removeTerm(term);
+        } else {
+          const serialized = postingList.serialize();
+          await this.rocksDBService.put(this.getTermKey(term), serialized);
+        }
+      } catch (error) {
+        this.logger.error(`Failed to update postings for term ${term}: ${error.message}`);
+      }
     }
 
     return removed;
   }
 
+  private ensureInitialized() {
+    if (!this.initialized) {
+      throw new Error('Term dictionary not initialized');
+    }
+  }
+
+  // These methods are now deprecated as we use per-term storage
   serialize(): Buffer {
-    // Serialize each term and its posting list
-    const serialized = {};
-
-    for (const [term, postingList] of this.dictionary.entries()) {
-      serialized[term] = postingList.serialize();
-    }
-
-    return Buffer.from(JSON.stringify(serialized));
+    throw new Error('Bulk serialization is deprecated');
   }
 
-  deserialize(data: Buffer): void {
-    this.dictionary.clear();
-
-    const serialized = JSON.parse(data.toString());
-
-    for (const term in serialized) {
-      if (Object.prototype.hasOwnProperty.call(serialized, term)) {
-        const postingList = this.options.useCompression
-          ? new CompressedPostingList()
-          : new SimplePostingList();
-
-        // Convert string back to Buffer before deserializing
-        const buffer = Buffer.from(serialized[term]);
-        postingList.deserialize(buffer);
-
-        this.dictionary.set(term, postingList);
-      }
-    }
-  }
-
-  /**
-   * Save term dictionary to disk using RocksDB
-   */
-  async saveToDisk(): Promise<void> {
-    if (!this.rocksDBService) {
-      throw new Error('RocksDBService not available for persisting term dictionary');
-    }
-
-    const serialized = this.serialize();
-    await this.rocksDBService.put('term_dictionary', serialized);
-    this.logger.debug(`Term dictionary saved to disk (${this.dictionary.size} terms)`);
-  }
-
-  /**
-   * Load term dictionary from disk using RocksDB
-   */
-  async loadFromDisk(): Promise<void> {
-    if (!this.rocksDBService) {
-      throw new Error('RocksDBService not available for loading term dictionary');
-    }
-
-    try {
-      const data = await this.rocksDBService.get('term_dictionary');
-      if (data) {
-        this.deserialize(data as Buffer);
-        this.logger.log(`Term dictionary loaded from disk (${this.dictionary.size} terms)`);
-      } else {
-        this.logger.log('No term dictionary found in storage');
-      }
-    } catch (error) {
-      if (error.code === 'NOT_FOUND') {
-        this.logger.log('No term dictionary found in storage');
-      } else {
-        throw error;
-      }
-    }
+  deserialize(data: Buffer | Record<string, any>): void {
+    throw new Error('Bulk deserialization is deprecated');
   }
 
   /**
@@ -236,5 +251,33 @@ export class InMemoryTermDictionary implements TermDictionary, OnModuleInit {
     }
 
     return result;
+  }
+
+  /**
+   * Save the current state to disk
+   */
+  async saveToDisk(): Promise<void> {
+    if (!this.options.persistToDisk || !this.rocksDBService) {
+      return;
+    }
+
+    try {
+      // Save term list
+      await this.saveTermList();
+
+      // Save each term's posting list
+      await Promise.all(
+        Array.from(this.dictionary.entries()).map(async ([term, postingList]) => {
+          const key = this.getTermKey(term);
+          const serialized = postingList.serialize();
+          await this.rocksDBService.put(key, serialized);
+        }),
+      );
+
+      this.logger.log('Term dictionary saved to disk successfully');
+    } catch (error) {
+      this.logger.error(`Failed to save term dictionary to disk: ${error.message}`);
+      throw error;
+    }
   }
 }

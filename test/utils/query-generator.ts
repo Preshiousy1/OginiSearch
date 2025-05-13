@@ -62,7 +62,7 @@ export class QueryGenerator {
     return {
       query: {
         match: {
-          field: fields[0],
+          field: 'content',
           value: value || faker.lorem.word(),
         },
       },
@@ -74,11 +74,18 @@ export class QueryGenerator {
    * Generate a term query for exact matching
    */
   static generateTermQuery(field = 'tags', value?: string): SearchQueryRequest {
+    const termValue = value || faker.word.sample();
     return {
       query: {
+        match: {
+          field,
+          value: termValue,
+        },
+      },
+      filter: {
         term: {
           field,
-          value: value || faker.word.sample(),
+          value: termValue,
         },
       },
     };
@@ -105,8 +112,6 @@ export class QueryGenerator {
    * Generate a boolean query combining multiple sub-queries
    */
   static generateBoolQuery(): SearchQueryRequest {
-    const termQuery = this.generateTermQuery('tags');
-    const termFilter = termQuery.query as { term: TermSearchQuery };
     return {
       query: {
         match: {
@@ -116,7 +121,10 @@ export class QueryGenerator {
         },
       },
       filter: {
-        term: termFilter.term,
+        term: {
+          field: 'tags',
+          value: 'test',
+        },
       },
     };
   }
@@ -126,7 +134,7 @@ export class QueryGenerator {
    */
   static generateRandomQuery(): SearchQueryRequest {
     const types = ['match', 'term', 'range'];
-    const type = faker.helpers.arrayElement(types);
+    const type = types[faker.number.int({ min: 0, max: types.length - 1 })];
 
     switch (type) {
       case 'match':

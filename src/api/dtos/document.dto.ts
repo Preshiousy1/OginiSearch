@@ -126,6 +126,13 @@ export class BulkResponseDto {
   took: number;
 
   @ApiProperty({
+    name: 'successCount',
+    example: 1,
+    description: 'Number of documents indexed successfully',
+  })
+  successCount: number;
+
+  @ApiProperty({
     name: 'errors',
     example: false,
     description: 'Whether there were any errors during indexing',
@@ -231,4 +238,24 @@ export class DeleteByQueryResponseDto {
     description: 'Array of failures',
   })
   failures: any[];
+}
+
+export class ListDocumentsResponseDto {
+  @ApiProperty({
+    description: 'Total number of documents in the index',
+    example: 100,
+  })
+  total: number;
+
+  @ApiProperty({
+    description: 'Documents returned in this page',
+    type: [DocumentResponseDto],
+  })
+  documents: DocumentResponseDto[];
+
+  @ApiProperty({
+    description: 'Time taken to fetch documents in milliseconds',
+    example: 50,
+  })
+  took: number;
 }

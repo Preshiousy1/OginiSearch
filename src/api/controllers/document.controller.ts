@@ -10,6 +10,8 @@ import {
   HttpStatus,
   HttpCode,
   ValidationPipe,
+  DefaultValuePipe,
+  ParseIntPipe,
 } from '@nestjs/common';
 import {
   IndexDocumentDto,
@@ -18,6 +20,7 @@ import {
   BulkResponseDto,
   DeleteByQueryResponseDto,
   DeleteByQueryDto,
+  ListDocumentsResponseDto,
 } from '../dtos/document.dto';
 import {
   ApiTags,
@@ -384,5 +387,60 @@ export class DocumentController {
     @Body(ValidationPipe) deleteByQueryDto: DeleteByQueryDto,
   ): Promise<DeleteByQueryResponseDto> {
     return this.documentService.deleteByQuery(index, deleteByQueryDto);
+  }
+
+  @Get()
+  @ApiOperation({
+    summary: 'List documents in an index',
+    description: 'Retrieves a paginated list of documents from the specified index',
+  })
+  @ApiParam({
+    name: 'index',
+    description: 'Index name',
+    example: 'products',
+  })
+  @ApiQuery({
+    name: 'limit',
+    description: 'Number of documents to return',
+    required: false,
+    type: Number,
+    example: 10,
+  })
+  @ApiQuery({
+    name: 'offset',
+    description: 'Number of documents to skip',
+    required: false,
+    type: Number,
+    example: 0,
+  })
+  @ApiQuery({
+    name: 'filter',
+    description: 'Filter criteria',
+    required: false,
+    type: 'object',
+    example: { category: 'electronics' },
+  })
+  @ApiResponse({
+    status: HttpStatus.OK,
+    description: 'Returns a paginated list of documents',
+    type: ListDocumentsResponseDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.NOT_FOUND,
+    description: 'Index not found',
+  })
+  async listDocuments(
+    @Param('index') index: string,
+    @Query('limit', new DefaultValuePipe(10), ParseIntPipe) limit: number,
+    @Query('offset', new DefaultValuePipe(0), ParseIntPipe) offset: number,
+    @Query('filter') filter?: string,
+  ): Promise<ListDocumentsResponseDto> {
+    const options = {
+      limit,
+      offset,
+      filter: filter ? JSON.parse(filter) : undefined,
+    };
+
+    return this.documentService.listDocuments(index, options);
   }
 }

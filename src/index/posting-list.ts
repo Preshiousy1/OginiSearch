@@ -8,7 +8,7 @@ export class SimplePostingList implements PostingList {
   }
 
   addEntry(entry: PostingEntry): void {
-    this.entries.set(entry.docId, entry);
+    this.entries.set(entry.docId, { ...entry });
   }
 
   removeEntry(docId: string | number): boolean {
@@ -28,14 +28,42 @@ export class SimplePostingList implements PostingList {
   }
 
   serialize(): Buffer {
-    // Convert to a format that can be stored efficiently
-    const data = JSON.stringify(Array.from(this.entries.entries()));
-    return Buffer.from(data);
+    // Convert entries to a serializable array format
+    const serializable = Array.from(this.entries.entries()).map(([docId, entry]) => ({
+      docId,
+      ...entry,
+    }));
+    return Buffer.from(JSON.stringify(serializable));
   }
 
-  deserialize(data: Buffer): void {
-    const entriesArray = JSON.parse(data.toString());
-    this.entries = new Map(entriesArray);
+  deserialize(data: Buffer | Record<string, any> | string): void {
+    try {
+      let parsed;
+      
+      // Handle different data types
+      if (Buffer.isBuffer(data)) {
+        parsed = JSON.parse(data.toString());
+      } else if (data && typeof data === 'object' && data.type === 'Buffer' && Array.isArray(data.data)) {
+        // Handle Buffer-like object
+        const buffer = Buffer.from(data.data);
+        parsed = JSON.parse(buffer.toString());
+      } else if (typeof data === 'string') {
+        parsed = JSON.parse(data);
+      } else {
+        // If it's already a JavaScript object
+        parsed = data;
+      }
+      
+      this.entries.clear();
+
+      // Reconstruct entries from the parsed array
+      for (const entry of parsed) {
+        const { docId, ...rest } = entry;
+        this.entries.set(docId, { docId, ...rest });
+      }
+    } catch (error) {
+      throw new Error(`Failed to deserialize posting list: ${error.message}`);
+    }
   }
 
   /**

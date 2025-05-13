@@ -307,4 +307,26 @@ export class IndexController {
   async deleteIndex(@Param('name') name: string): Promise<void> {
     await this.indexService.deleteIndex(name);
   }
+
+  @Post(':name/_rebuild_count')
+  @ApiOperation({
+    summary: 'Rebuild document count',
+    description: 'Rebuilds the document count for an index by scanning all documents.',
+  })
+  @ApiParam({
+    name: 'name',
+    description: 'Index name to rebuild count for',
+    example: 'products',
+  })
+  @ApiResponse({
+    status: HttpStatus.OK,
+    description: 'Document count rebuilt successfully',
+  })
+  @ApiResponse({
+    status: HttpStatus.NOT_FOUND,
+    description: 'Index with the specified name does not exist',
+  })
+  async rebuildDocumentCount(@Param('name') name: string): Promise<void> {
+    await this.indexService.rebuildDocumentCount(name);
+  }
 }

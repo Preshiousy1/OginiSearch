@@ -52,7 +52,7 @@ describe('SearchExecutorService', () => {
     // Create mock term dictionary
     mockTermDictionary = {
       getTerms: jest.fn(() => ['title:search', 'content:search', 'title:engine']),
-      getPostingList: jest.fn((term: string) => {
+      getPostingList: jest.fn(async (term: string) => {
         const postings = {
           'title:search': titleSearchPostings,
           'content:search': contentSearchPostings,
@@ -192,7 +192,7 @@ describe('SearchExecutorService', () => {
 
     it('should handle an empty result set', async () => {
       // Override the mock to return an empty posting list
-      jest.spyOn(mockTermDictionary, 'getPostingList').mockReturnValueOnce({
+      jest.spyOn(mockTermDictionary, 'getPostingList').mockResolvedValue({
         size: () => 0,
         getAll: () => [],
         getEntries: () => [],

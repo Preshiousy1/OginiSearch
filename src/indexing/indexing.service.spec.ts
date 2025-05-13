@@ -7,12 +7,14 @@ import {
   ProcessedDocument,
   ProcessedField,
 } from '../document/interfaces/document-processor.interface';
+import { InMemoryTermDictionary } from '../index/term-dictionary';
 
 describe('IndexingService', () => {
   let service: IndexingService;
   let indexStorage: jest.Mocked<IndexStorageService>;
   let documentProcessor: jest.Mocked<DocumentProcessorService>;
   let indexStats: jest.Mocked<IndexStatsService>;
+  let termDictionary: InMemoryTermDictionary;
 
   const mockProcessedDoc: ProcessedDocument = {
     id: 'doc123',
@@ -37,6 +39,9 @@ describe('IndexingService', () => {
   };
 
   beforeEach(async () => {
+    termDictionary = new InMemoryTermDictionary({ persistToDisk: false });
+    await termDictionary.onModuleInit();
+
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         IndexingService,
@@ -51,6 +56,14 @@ describe('IndexingService', () => {
             deleteTermPostings: jest.fn(),
             getAllDocuments: jest.fn(),
             clearIndex: jest.fn(),
+            getIndex: jest.fn().mockImplementation(name => ({
+              name,
+              documentCount: 0,
+              settings: {},
+              mappings: {},
+              status: 'open',
+            })),
+            updateIndex: jest.fn(),
           }),
         },
         {
@@ -65,6 +78,10 @@ describe('IndexingService', () => {
             updateDocumentStats: jest.fn(),
             updateTermStats: jest.fn(),
           }),
+        },
+        {
+          provide: 'TERM_DICTIONARY',
+          useValue: termDictionary,
         },
       ],
     }).compile();
@@ -122,8 +139,8 @@ describe('IndexingService', () => {
         expect.any(Map),
       );
 
-      // Check total number of terms indexed (6 total terms)
-      expect(indexStorage.storeTermPostings).toHaveBeenCalledTimes(6);
+      // Check total number of terms indexed (6 unique terms + 6 _all field terms = 12)
+      expect(indexStorage.storeTermPostings).toHaveBeenCalledTimes(12);
     });
 
     it('should update index statistics', async () => {
@@ -162,11 +179,11 @@ describe('IndexingService', () => {
     it('should remove document from all term posting lists', async () => {
       await service.removeDocument(indexName, documentId);
 
-      // Check all terms were retrieved
-      expect(indexStorage.getTermPostings).toHaveBeenCalledTimes(6); // 6 unique terms
+      // Check all terms were retrieved (6 unique terms + 6 _all field terms = 12)
+      expect(indexStorage.getTermPostings).toHaveBeenCalledTimes(12);
 
       // All postings should be deleted because they're all empty after removal
-      expect(indexStorage.deleteTermPostings).toHaveBeenCalledTimes(6);
+      expect(indexStorage.deleteTermPostings).toHaveBeenCalledTimes(12);
     });
 
     it('should remove processed document from storage', async () => {
@@ -195,12 +212,17 @@ describe('IndexingService', () => {
 
     it('should update the posting list if other documents still contain the term', async () => {
       // Setup: Make one term appear in multiple documents
+      let allFieldCallCount = 0;
       indexStorage.getTermPostings.mockImplementation(async (index, fieldTerm) => {
         const map = new Map();
         map.set(documentId, [0]); // Doc being removed
 
-        // Only add another document to the first term
-        if (fieldTerm === 'title:test') {
+        // Only add another document to the first term and its _all field version
+        if (
+          fieldTerm === 'title:test' ||
+          fieldTerm === 'content:test' ||
+          (fieldTerm === '_all:test' && allFieldCallCount++ === 0) // Only return other doc on first _all:test call
+        ) {
           map.set('otherDoc', [1, 2]); // Another doc with the same term
         }
 
@@ -209,12 +231,23 @@ describe('IndexingService', () => {
 
       await service.removeDocument(indexName, documentId);
 
-      // Should have deleted 5 terms completely and updated 1
-      expect(indexStorage.deleteTermPostings).toHaveBeenCalledTimes(5);
-      expect(indexStorage.storeTermPostings).toHaveBeenCalledTimes(1);
+      // Should have deleted 9 terms completely (4 field terms - title:test, content:test + 4 _all terms - _all:test)
+      // and updated 3 (title:test, content:test, _all:test)
+      expect(indexStorage.deleteTermPostings).toHaveBeenCalledTimes(9);
+      expect(indexStorage.storeTermPostings).toHaveBeenCalledTimes(3);
       expect(indexStorage.storeTermPostings).toHaveBeenCalledWith(
         indexName,
         'title:test',
+        expect.any(Map),
+      );
+      expect(indexStorage.storeTermPostings).toHaveBeenCalledWith(
+        indexName,
+        'content:test',
+        expect.any(Map),
+      );
+      expect(indexStorage.storeTermPostings).toHaveBeenCalledWith(
+        indexName,
+        '_all:test',
         expect.any(Map),
       );
     });

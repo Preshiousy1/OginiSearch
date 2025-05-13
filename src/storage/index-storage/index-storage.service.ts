@@ -27,7 +27,12 @@ export class IndexStorageService {
       return JSON.parse(buffer.toString());
     }
 
-    // If it's already a string or Buffer
+    // If it's already a JavaScript object (not Buffer or string), return it directly
+    if (typeof data === 'object' && data !== null && !(data instanceof Buffer)) {
+      return data;
+    }
+
+    // If it's a string or Buffer
     return typeof data === 'string' ? JSON.parse(data) : JSON.parse(data.toString());
   }
 
@@ -40,13 +45,12 @@ export class IndexStorageService {
     }
     const indexedIndex = {
       ...index,
-      createdAt: new Date(),
+      createdAt: new Date().toISOString(),
       status: 'open' as IndexStatus,
       documentCount: 0,
     };
     const key = SerializationUtils.createIndexMetadataKey(index.name);
-    const serialized = Buffer.from(JSON.stringify(indexedIndex));
-    await this.rocksDBService.put(key, serialized);
+    await this.rocksDBService.put(key, indexedIndex);
     return indexedIndex;
   }
 
@@ -56,10 +60,13 @@ export class IndexStorageService {
       throw new Error(`Index ${name} not found`);
     }
 
-    const updatedIndex = { ...index, ...updates };
+    const updatedIndex = {
+      ...index,
+      ...updates,
+      updatedAt: new Date().toISOString(),
+    };
     const key = SerializationUtils.createIndexMetadataKey(name);
-    const serialized = Buffer.from(JSON.stringify(updatedIndex));
-    await this.rocksDBService.put(key, serialized);
+    await this.rocksDBService.put(key, updatedIndex);
     return updatedIndex;
   }
 
@@ -69,25 +76,26 @@ export class IndexStorageService {
       const indices: Index[] = [];
 
       for (const key of keys) {
-        const data: { type: 'Buffer'; data: Buffer } | any = await this.rocksDBService.get(key);
+        const data = await this.rocksDBService.get(key);
+        if (!data) continue;
 
-        let indexData: Index;
-        if (data.type === 'Buffer' && Array.isArray(data.data)) {
-          // Convert Buffer-like object to actual Buffer
-          const buffer = Buffer.from(data.data);
-          indexData = JSON.parse(buffer.toString());
-        } else if (typeof data === 'string') {
-          indexData = JSON.parse(data);
-        } else {
-          indexData = JSON.parse(data.toString());
-        }
+        try {
+          const indexData = data as Index;
+          if (!this.isValidIndex(indexData)) {
+            this.logger.warn(`Skipping invalid index data for key ${key}`);
+            continue;
+          }
 
-        // If status is provided, filter by status
-        if (status && indexData.status !== status) {
+          // If status is provided, filter by status
+          if (status && indexData.status !== status) {
+            continue;
+          }
+
+          indices.push(indexData);
+        } catch (error) {
+          this.logger.warn(`Failed to parse index data for key ${key}: ${error.message}`);
           continue;
         }
-
-        indices.push(indexData);
       }
 
       return indices;
@@ -97,14 +105,31 @@ export class IndexStorageService {
     }
   }
 
+  private isValidIndex(data: unknown): data is Index {
+    if (typeof data !== 'object' || data === null) return false;
+    const index = data as Partial<Index>;
+    return (
+      typeof index.name === 'string' &&
+      typeof index.createdAt === 'string' &&
+      typeof index.settings === 'object' &&
+      typeof index.mappings === 'object' &&
+      typeof index.status === 'string'
+    );
+  }
+
   async storeTermPostings(
     indexName: string,
     term: string,
     postings: Map<string, number[]>,
   ): Promise<void> {
-    const key = SerializationUtils.createTermKey(indexName, term);
-    const serialized = SerializationUtils.serializePostingList(postings);
-    await this.rocksDBService.put(key, serialized);
+    try {
+      const key = SerializationUtils.createTermKey(indexName, term);
+      const serialized = SerializationUtils.serializePostingList(postings);
+      await this.rocksDBService.put(key, serialized);
+    } catch (error) {
+      this.logger.error(`Failed to store term postings: ${error.message}`);
+      throw error;
+    }
   }
 
   async deleteTermPostings(indexName: string, term: string): Promise<void> {
@@ -113,10 +138,15 @@ export class IndexStorageService {
   }
 
   async getTermPostings(indexName: string, term: string): Promise<Map<string, number[]> | null> {
-    const key = SerializationUtils.createTermKey(indexName, term);
-    const data = await this.rocksDBService.get(key);
-    if (!data) return null;
-    return SerializationUtils.deserializePostingList(data as Buffer);
+    try {
+      const key = SerializationUtils.createTermKey(indexName, term);
+      const data = await this.rocksDBService.get(key);
+      if (!data) return null;
+      return SerializationUtils.deserializePostingList(data as Buffer | object);
+    } catch (error) {
+      this.logger.error(`Failed to get term postings: ${error.message}`);
+      throw error;
+    }
   }
 
   async storeProcessedDocument(indexName: string, document: ProcessedDocument): Promise<void> {

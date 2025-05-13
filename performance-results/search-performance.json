@@ -1,1 +1,56 @@
-[]
+[
+  {
+    "test": "basic-query-latency",
+    "p95": 20.176833000000443,
+    "requirement": 100,
+    "passed": true
+  },
+  {
+    "test": "complex-query-latency",
+    "p95": 11.200666000000638,
+    "requirement": 150,
+    "passed": true
+  },
+  {
+    "test": "term-query-latency",
+    "p95": 4.355666999999812,
+    "requirement": 50,
+    "passed": true
+  },
+  {
+    "test": "multi-match-query-latency",
+    "p95": 4.5609170000007,
+    "requirement": 120,
+    "passed": true
+  },
+  {
+    "test": "indexing-speed",
+    "docsPerSecond": 19.14075630895287,
+    "requirement": 15,
+    "passed": true
+  },
+  {
+    "test": "bulk-indexing-speed",
+    "docsPerSecond": 79.52384834962444,
+    "requirement": 50,
+    "passed": true
+  },
+  {
+    "test": "concurrent-searches",
+    "totalTime": 27.930209000000104,
+    "requirement": 500,
+    "passed": true
+  },
+  {
+    "test": "mixed-operations",
+    "totalTime": 25.77862500000083,
+    "requirement": 1000,
+    "passed": true
+  },
+  {
+    "test": "memory-usage-under-load",
+    "heapUsedMB": 261.81822967529297,
+    "requirement": 512,
+    "passed": true
+  }
+]

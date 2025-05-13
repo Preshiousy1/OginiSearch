@@ -14,6 +14,7 @@ import {
   BulkResponseDto,
   DeleteByQueryResponseDto,
   DeleteByQueryDto,
+  ListDocumentsResponseDto,
 } from '../api/dtos/document.dto';
 import { v4 as uuidv4 } from 'uuid';
 import { SearchService } from '../search/search.service';
@@ -52,52 +53,60 @@ export class DocumentService implements OnModuleInit {
     try {
       // Get all indices
       const indices = await this.indexService.listIndices();
+      const BATCH_SIZE = 100; // Process 100 documents at a time
 
       for (const indexInfo of indices) {
         const indexName = indexInfo.name;
         this.logger.log(`Rebuilding index for ${indexName}...`);
 
-        // Get all documents for this index
-        const result = await this.documentStorage.getDocuments(indexName, { limit: 1000 });
+        let processed = 0;
+        let hasMore = true;
 
-        // Index each document
-        for (const doc of result.documents) {
-          await this.indexingService.indexDocument(indexName, doc.documentId, doc.content);
+        while (hasMore) {
+          // Get documents in batches
+          const result = await this.documentStorage.getDocuments(indexName, {
+            offset: processed,
+            limit: BATCH_SIZE,
+          });
 
-          // Also add to term dictionary directly
-          for (const [field, value] of Object.entries(doc.content)) {
-            if (typeof value === 'string') {
-              const tokens = value.toLowerCase().split(/\W+/).filter(Boolean);
-              const tokenPositions: Record<string, number[]> = {};
-              tokens.forEach((token, idx) => {
-                if (!tokenPositions[token]) tokenPositions[token] = [];
-                tokenPositions[token].push(idx);
-              });
+          if (result.documents.length === 0) {
+            hasMore = false;
+            continue;
+          }
 
-              for (const [token, positions] of Object.entries(tokenPositions)) {
-                const frequency = positions.length;
+          // Process each document in the batch
+          for (const doc of result.documents) {
+            try {
+              await this.indexingService.indexDocument(indexName, doc.documentId, doc.content);
+              processed++;
 
-                // Add to field-specific posting list
-                this.termDictionary.addPosting(`${field}:${token}`, {
-                  docId: doc.documentId,
-                  frequency,
-                  positions,
-                  metadata: { field },
-                });
-
-                // Add to _all field posting list
-                this.termDictionary.addPosting(`_all:${token}`, {
-                  docId: doc.documentId,
-                  frequency,
-                  positions,
-                  metadata: { field },
-                });
+              // Log progress every 1000 documents
+              if (processed % 1000 === 0) {
+                this.logger.log(`Processed ${processed} documents in ${indexName}`);
               }
+            } catch (error) {
+              this.logger.error(
+                `Error indexing document ${doc.documentId} in ${indexName}: ${error.message}`,
+              );
+              // Continue with next document
             }
+          }
+
+          // Save term dictionary periodically
+          if (processed % 1000 === 0) {
+            try {
+              await this.termDictionary.saveToDisk();
+            } catch (error) {
+              this.logger.warn(`Failed to save term dictionary: ${error.message}`);
+            }
+          }
+
+          if (result.documents.length < BATCH_SIZE) {
+            hasMore = false;
           }
         }
 
-        this.logger.log(`Index for ${indexName} rebuilt with ${result.documents.length} documents`);
+        this.logger.log(`Completed rebuilding index ${indexName} with ${processed} documents`);
       }
     } catch (error) {
       this.logger.error(`Error rebuilding index: ${error.message}`);
@@ -126,38 +135,6 @@ export class DocumentService implements OnModuleInit {
     // Index the document for search
     await this.indexingService.indexDocument(indexName, documentId, documentDto.document);
 
-    // After storing the document in DB:
-    for (const [field, value] of Object.entries(documentDto.document)) {
-      if (typeof value === 'string') {
-        const tokens = value.toLowerCase().split(/\W+/).filter(Boolean);
-        const tokenPositions: Record<string, number[]> = {};
-        tokens.forEach((token, idx) => {
-          if (!tokenPositions[token]) tokenPositions[token] = [];
-          tokenPositions[token].push(idx);
-        });
-
-        for (const [token, positions] of Object.entries(tokenPositions)) {
-          const frequency = positions.length;
-
-          // Add to field-specific posting list
-          this.termDictionary.addPosting(`${field}:${token}`, {
-            docId: documentId,
-            frequency,
-            positions,
-            metadata: { field },
-          });
-
-          // Add to _all field posting list
-          this.termDictionary.addPosting(`_all:${token}`, {
-            docId: documentId,
-            frequency,
-            positions,
-            metadata: { field },
-          });
-        }
-      }
-    }
-
     return {
       id: documentId,
       index: indexName,
@@ -179,6 +156,7 @@ export class DocumentService implements OnModuleInit {
     const startTime = Date.now();
     const results = [];
     let hasErrors = false;
+    let successCount = 0;
 
     // Process each document
     for (const doc of documents) {
@@ -195,44 +173,14 @@ export class DocumentService implements OnModuleInit {
         // Index document
         await this.indexingService.indexDocument(indexName, documentId, doc.document);
 
-        // After storing the document in DB:
-        for (const [field, value] of Object.entries(doc.document)) {
-          if (typeof value === 'string') {
-            const tokens = value.toLowerCase().split(/\W+/).filter(Boolean);
-            const tokenPositions: Record<string, number[]> = {};
-            tokens.forEach((token, idx) => {
-              if (!tokenPositions[token]) tokenPositions[token] = [];
-              tokenPositions[token].push(idx);
-            });
-
-            for (const [token, positions] of Object.entries(tokenPositions)) {
-              const frequency = positions.length;
-
-              // Add to field-specific posting list
-              this.termDictionary.addPosting(`${field}:${token}`, {
-                docId: documentId,
-                frequency,
-                positions,
-                metadata: { field },
-              });
-
-              // Add to _all field posting list
-              this.termDictionary.addPosting(`_all:${token}`, {
-                docId: documentId,
-                frequency,
-                positions,
-                metadata: { field },
-              });
-            }
-          }
-        }
-
         results.push({
           documentId,
           index: indexName,
           success: true,
           status: 201,
         });
+
+        successCount++;
       } catch (error) {
         hasErrors = true;
         results.push({
@@ -248,6 +196,7 @@ export class DocumentService implements OnModuleInit {
     return {
       items: results,
       took: Date.now() - startTime,
+      successCount,
       errors: hasErrors,
     };
   }
@@ -295,40 +244,8 @@ export class DocumentService implements OnModuleInit {
       metadata: existingDoc.metadata,
     });
 
-    // Reindex document
+    // Reindex document - this will handle all tokenization and term dictionary updates
     await this.indexingService.indexDocument(indexName, id, document);
-
-    // After storing the document in DB:
-    for (const [field, value] of Object.entries(document)) {
-      if (typeof value === 'string') {
-        const tokens = value.toLowerCase().split(/\W+/).filter(Boolean);
-        const tokenPositions: Record<string, number[]> = {};
-        tokens.forEach((token, idx) => {
-          if (!tokenPositions[token]) tokenPositions[token] = [];
-          tokenPositions[token].push(idx);
-        });
-
-        for (const [token, positions] of Object.entries(tokenPositions)) {
-          const frequency = positions.length;
-
-          // Add to field-specific posting list
-          this.termDictionary.addPosting(`${field}:${token}`, {
-            docId: id,
-            frequency,
-            positions,
-            metadata: { field },
-          });
-
-          // Add to _all field posting list
-          this.termDictionary.addPosting(`_all:${token}`, {
-            docId: id,
-            frequency,
-            positions,
-            metadata: { field },
-          });
-        }
-      }
-    }
 
     return {
       id,
@@ -352,8 +269,29 @@ export class DocumentService implements OnModuleInit {
       throw new NotFoundException(`Document with id ${id} not found in index ${indexName}`);
     }
 
-    // Remove from index
-    await this.indexingService.removeDocument(indexName, id);
+    // Get all terms for this document
+    const terms = this.termDictionary.getTerms();
+
+    // Remove document from all posting lists
+    await Promise.all(
+      terms.map(async term => {
+        const postingList = await this.termDictionary.getPostingList(term);
+        if (postingList && postingList.getEntry(id)) {
+          await this.termDictionary.removePosting(term, id);
+        }
+      }),
+    );
+
+    // Save changes to disk
+    await this.termDictionary.saveToDisk();
+
+    try {
+      // Remove from index - this will handle the case where the document might not exist in the processed store
+      await this.indexingService.removeDocument(indexName, id);
+    } catch (error) {
+      this.logger.error(`Error removing document from index: ${error.message}`);
+      // We've already deleted from storage, so we should continue and not throw
+    }
   }
 
   async deleteByQuery(
@@ -416,6 +354,40 @@ export class DocumentService implements OnModuleInit {
       this.logger.error(`Error deleting by query: ${error.message}`);
       throw new BadRequestException(`Invalid query: ${error.message}`);
     }
+  }
+
+  async listDocuments(
+    indexName: string,
+    options: {
+      limit?: number;
+      offset?: number;
+      filter?: Record<string, any>;
+    } = {},
+  ): Promise<ListDocumentsResponseDto> {
+    this.logger.log(`Listing documents from ${indexName} with options: ${JSON.stringify(options)}`);
+
+    // Check if index exists
+    await this.checkIndexExists(indexName);
+
+    const startTime = Date.now();
+
+    // Get documents with pagination
+    const { documents, total } = await this.documentStorage.getDocuments(indexName, options);
+
+    // Convert to response format
+    const response: ListDocumentsResponseDto = {
+      total,
+      documents: documents.map(doc => ({
+        id: doc.documentId,
+        index: indexName,
+        version: 1,
+        found: true,
+        source: doc.content,
+      })),
+      took: Date.now() - startTime,
+    };
+
+    return response;
   }
 
   private async checkIndexExists(indexName: string): Promise<void> {

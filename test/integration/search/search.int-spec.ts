@@ -6,6 +6,7 @@ import { DocumentGenerator } from '../../utils/document-generator';
 import { QueryGenerator } from '../../utils/query-generator';
 import { TestCorpusLoader } from '../../utils/test-corpus-loader';
 import { Ogini } from '../../../packages/client/src';
+import { faker } from '@faker-js/faker';
 
 describe('Search Integration Tests', () => {
   let app: INestApplication;
@@ -16,11 +17,12 @@ describe('Search Integration Tests', () => {
   beforeAll(async () => {
     // Setup test app
     app = await setupTestApp([AppModule]);
-    await app.listen(3456);
+    const port = 3457;
+    await app.listen(port);
 
     // Initialize client
     client = new Ogini({
-      baseURL: 'http://localhost:3456',
+      baseURL: `http://localhost:${port}`,
     });
 
     // Create a unique test index name
@@ -34,6 +36,11 @@ describe('Search Integration Tests', () => {
         category: 'test',
         createdAt: new Date().toISOString(),
       },
+      documentGenerator: () =>
+        DocumentGenerator.generateDocument({
+          content: `This is a test document containing test-related content for testing search functionality. ${faker.lorem.paragraph()}`,
+          tags: ['test', ...Array.from({ length: 2 }, () => faker.word.sample())],
+        }),
     });
 
     // Create index
@@ -42,12 +49,36 @@ describe('Search Integration Tests', () => {
       settings: {
         numberOfShards: 1,
         refreshInterval: '1s',
+        analysis: {
+          analyzer: {
+            default: {
+              type: 'standard',
+              tokenizer: 'standard',
+              filter: ['lowercase', 'stop'],
+            },
+          },
+          normalizer: {
+            lowercase: {
+              type: 'custom',
+              filter: ['lowercase'],
+            },
+          },
+        },
       },
       mappings: {
         properties: {
-          title: { type: 'text' },
-          content: { type: 'text' },
-          tags: { type: 'keyword' },
+          title: {
+            type: 'text',
+            analyzer: 'standard',
+          },
+          content: {
+            type: 'text',
+            analyzer: 'standard',
+          },
+          tags: {
+            type: 'keyword',
+            normalizer: 'lowercase',
+          },
           metadata: {
             type: 'object',
             properties: {
@@ -62,10 +93,11 @@ describe('Search Integration Tests', () => {
 
     // Load test corpus and index documents
     const corpus = TestCorpusLoader.loadCorpus(testCorpus);
-    await client.documents.bulkIndexDocuments(
-      testIndexName,
-      corpus.documents.map(doc => ({ document: doc })),
+    await Promise.all(
+      corpus.documents.map(doc => client.documents.indexDocument(testIndexName, { document: doc })),
     );
+    // Verify index
+    await client.indices.getIndex(testIndexName);
   }, 30000);
 
   afterAll(async () => {
@@ -119,18 +151,17 @@ describe('Search Integration Tests', () => {
   describe('Document Generation', () => {
     it('should generate and index a single document', async () => {
       // Generate a single document
-      const document = DocumentGenerator.generateDocument({
+      const doc = DocumentGenerator.generateDocument({
         title: 'Test Document',
         content: 'This is a test document for search testing.',
         tags: ['test', 'search'],
       });
 
       // Index the document
-      const response = await client.documents.indexDocument(testIndexName, document);
+      const response = await client.documents.indexDocument(testIndexName, { document: doc });
 
       expect(response.id).toBeDefined();
-      expect(response.index).toBe(testIndexName);
-      expect(response.found).toBe(true);
+      expect(response.version).toBeGreaterThan(0);
     });
 
     it('should generate and index multiple documents', async () => {
@@ -140,22 +171,18 @@ describe('Search Integration Tests', () => {
       });
 
       // Index the documents
-      const response = await client.documents.bulkIndexDocuments(
-        testIndexName,
-        documents.map(doc => ({ document: doc })),
+      await Promise.all(
+        documents.map(doc => client.documents.indexDocument(testIndexName, { document: doc })),
       );
-
-      expect(response.items.length).toBe(5);
-      expect(response.errors).toBe(false);
     });
 
     it('should generate and index searchable documents', async () => {
       // Generate a document with specific keywords
       const keywords = ['typescript', 'nodejs', 'testing'];
-      const document = DocumentGenerator.generateSearchableDocument(keywords);
+      const doc = DocumentGenerator.generateSearchableDocument(keywords);
 
       // Index the document
-      const response = await client.documents.indexDocument(testIndexName, document);
+      const response = await client.documents.indexDocument(testIndexName, { document: doc });
 
       // Search for the document using one of the keywords
       const query = QueryGenerator.generateMatchQuery('content', keywords[0]);

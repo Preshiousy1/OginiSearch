@@ -25,9 +25,9 @@ async function indexDocument(
       const fieldTerm = `${fieldName}:${term}`;
 
       // Get or create posting list for this term
-      let postingList = termDictionary.getPostingList(fieldTerm);
+      let postingList = await termDictionary.getPostingList(fieldTerm);
       if (!postingList) {
-        postingList = termDictionary.addTerm(fieldTerm);
+        postingList = await termDictionary.addTerm(fieldTerm);
       }
 
       // Add document to posting list with term frequency

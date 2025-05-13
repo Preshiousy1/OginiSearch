@@ -48,8 +48,8 @@ export interface IndexStats {
 export interface Index {
   // Basic metadata
   name: string;
-  createdAt: Date;
-  updatedAt?: Date;
+  createdAt: string;
+  updatedAt?: string;
 
   // Configuration
   settings: IndexSettings;

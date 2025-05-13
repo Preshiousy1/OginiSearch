@@ -1,119 +1,139 @@
 import { PostingEntry, PostingList } from './interfaces/posting.interface';
-import { SimplePostingList } from './posting-list';
+import { Logger } from '@nestjs/common';
 
 /**
  * A posting list implementation with compression for storage efficiency
  */
 export class CompressedPostingList implements PostingList {
-  private internalList: SimplePostingList;
-
-  constructor() {
-    this.internalList = new SimplePostingList();
-  }
+  private entries: PostingEntry[] = [];
+  private readonly logger = new Logger(CompressedPostingList.name);
+  private readonly BATCH_SIZE = 1000; // Process entries in batches
 
   addEntry(entry: PostingEntry): void {
-    this.internalList.addEntry(entry);
+    if (entry && entry.docId && typeof entry.frequency === 'number' && entry.frequency > 0) {
+      // Only add valid entries
+      this.entries.push(entry);
+    }
   }
 
-  removeEntry(docId: string | number): boolean {
-    return this.internalList.removeEntry(docId);
+  removeEntry(docId: number | string): boolean {
+    const index = this.entries.findIndex(e => e.docId === docId);
+    if (index !== -1) {
+      this.entries.splice(index, 1);
+      return true;
+    }
+    return false;
   }
 
-  getEntry(docId: string | number): PostingEntry | undefined {
-    return this.internalList.getEntry(docId);
+  getEntry(docId: number | string): PostingEntry | undefined {
+    return this.entries.find(e => e.docId === docId);
   }
 
   getEntries(): PostingEntry[] {
-    return this.internalList.getEntries();
+    return [...this.entries];
   }
 
   size(): number {
-    return this.internalList.size();
+    return this.entries.length;
   }
 
   /**
    * Compress a posting list using delta encoding for docIds and frequencies
    */
   serialize(): Buffer {
-    const entries = this.internalList.getEntries().sort((a, b) => {
-      if (typeof a.docId === 'number' && typeof b.docId === 'number') {
-        return a.docId - b.docId;
+    try {
+      // Process entries in batches to avoid memory issues
+      const batches = [];
+      for (let i = 0; i < this.entries.length; i += this.BATCH_SIZE) {
+        const batch = this.entries.slice(i, i + this.BATCH_SIZE);
+        const serializedBatch = batch.map(entry => ({
+          d: entry.docId,
+          f: entry.frequency,
+          p: Array.isArray(entry.positions) ? entry.positions : [],
+          m: entry.metadata || {},
+        }));
+        batches.push(serializedBatch);
       }
-      return String(a.docId).localeCompare(String(b.docId));
-    });
 
-    if (entries.length === 0) {
-      return Buffer.from([]);
+      // Combine all batches
+      const data = {
+        entries: batches.flat(),
+        version: 1,
+      };
+
+      return Buffer.from(JSON.stringify(data));
+    } catch (error) {
+      this.logger.error(`Failed to serialize posting list: ${error.message}`);
+      throw error;
     }
-
-    // Delta encode document IDs and frequencies for compression
-    const encoded = {
-      docIds: this.deltaEncode(entries.map(e => Number(e.docId))),
-      frequencies: entries.map(e => e.frequency),
-      // Store positions differently - as arrays of positions per document
-      positions: entries.map(e => e.positions || []),
-    };
-
-    return Buffer.from(JSON.stringify(encoded));
   }
 
   /**
    * Decompress a posting list from delta-encoded format
    */
-  deserialize(data: Buffer): void {
-    if (data.length === 0) {
-      this.internalList = new SimplePostingList();
-      return;
+  deserialize(data: Buffer | Record<string, any> | string): void {
+    try {
+      // Clear existing entries first
+      this.entries = [];
+
+      let parsed;
+
+      // Handle different data types
+      if (Buffer.isBuffer(data)) {
+        try {
+          parsed = JSON.parse(data.toString());
+        } catch (parseError) {
+          this.logger.warn(`Invalid JSON data in posting list: ${parseError.message}`);
+          return; // Return early rather than throwing
+        }
+      } else if (
+        data &&
+        typeof data === 'object' &&
+        data.type === 'Buffer' &&
+        Array.isArray(data.data)
+      ) {
+        // Handle Buffer-like object
+        const buffer = Buffer.from(data.data);
+        try {
+          parsed = JSON.parse(buffer.toString());
+        } catch (parseError) {
+          this.logger.warn(`Invalid JSON data in posting list: ${parseError.message}`);
+          return;
+        }
+      } else if (typeof data === 'string') {
+        try {
+          parsed = JSON.parse(data);
+        } catch (parseError) {
+          this.logger.warn(`Invalid JSON data in posting list: ${parseError.message}`);
+          return;
+        }
+      } else {
+        // If it's already a JavaScript object
+        parsed = data;
+      }
+
+      // Handle versioned data structure
+      if (typeof parsed === 'object' && parsed !== null && Array.isArray(parsed.entries)) {
+        // Process entries in batches
+        for (let i = 0; i < parsed.entries.length; i += this.BATCH_SIZE) {
+          const batch = parsed.entries.slice(i, i + this.BATCH_SIZE);
+          for (const entry of batch) {
+            if (entry && entry.d && typeof entry.f === 'number' && entry.f > 0) {
+              this.entries.push({
+                docId: entry.d,
+                frequency: entry.f,
+                positions: Array.isArray(entry.p) ? entry.p : [],
+                metadata: entry.m || {},
+              });
+            }
+          }
+        }
+      } else {
+        this.logger.warn('Invalid posting list data format');
+      }
+    } catch (error) {
+      this.logger.error(`Failed to deserialize posting list: ${error.message}`);
+      // Don't throw, just log the error and continue with empty entries
     }
-
-    const encoded = JSON.parse(data.toString());
-    const docIds = this.deltaDecode(encoded.docIds);
-    const entries: PostingEntry[] = [];
-
-    for (let i = 0; i < docIds.length; i++) {
-      entries.push({
-        docId: docIds[i],
-        frequency: encoded.frequencies[i],
-        positions: encoded.positions[i],
-      });
-    }
-
-    this.internalList = new SimplePostingList();
-    for (const entry of entries) {
-      this.internalList.addEntry(entry);
-    }
-  }
-
-  /**
-   * Apply delta encoding to a list of numbers
-   * Stores differences between consecutive values instead of absolute values
-   */
-  private deltaEncode(numbers: number[]): number[] {
-    if (!numbers.length) return [];
-
-    const result = [numbers[0]]; // First number is stored as-is
-
-    for (let i = 1; i < numbers.length; i++) {
-      // Store the difference from the previous number
-      result.push(numbers[i] - numbers[i - 1]);
-    }
-
-    return result;
-  }
-
-  /**
-   * Decode a delta-encoded list back to absolute values
-   */
-  private deltaDecode(deltas: number[]): number[] {
-    if (!deltas.length) return [];
-
-    const result = [deltas[0]]; // First number is stored as-is
-
-    for (let i = 1; i < deltas.length; i++) {
-      // Add the delta to the previous result to get the actual value
-      result.push(result[i - 1] + deltas[i]);
-    }
-
-    return result;
   }
 }
