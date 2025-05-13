@@ -17,8 +17,7 @@ export class RocksDBService implements OnModuleInit, OnModuleDestroy {
   private encodingDown: any;
 
   constructor(private configService: ConfigService) {
-    this.dbPath =
-      this.configService.get<string>('ROCKSDB_PATH') || path.join(process.cwd(), 'data', 'rocksdb');
+    this.dbPath = this.configService.get<string>('ROCKSDB_PATH');
 
     try {
       // Use import() for dynamic imports instead of require()
