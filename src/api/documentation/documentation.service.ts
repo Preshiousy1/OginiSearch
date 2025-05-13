@@ -6,7 +6,20 @@ import { marked } from 'marked';
 @Injectable()
 export class DocumentationService {
   private readonly logger = new Logger(DocumentationService.name);
-  private readonly docsPath = join(process.cwd(), 'src', 'api', 'documentation', 'docs');
+  private readonly docsPath: string;
+
+  constructor() {
+    // In Railway production, files are in /usr/src/app/dist/api/documentation/docs
+    // In local production, files are in dist/api/documentation/docs
+    // In development, files are in src/api/documentation/docs
+    if (process.env.RAILWAY_ENVIRONMENT) {
+      this.docsPath = join('/usr/src/app/dist/api/documentation/docs');
+    } else {
+      const baseDir = process.env.NODE_ENV === 'production' ? 'dist' : 'src';
+      this.docsPath = join(process.cwd(), baseDir, 'api', 'documentation', 'docs');
+    }
+    this.logger.log(`Documentation path set to: ${this.docsPath}`);
+  }
 
   async getDocumentationFile(path: string): Promise<string> {
     try {
