@@ -1,7 +1,7 @@
 import { PostingEntry, PostingList, TermDictionary } from './interfaces/posting.interface';
 import { SimplePostingList } from './posting-list';
 import { CompressedPostingList } from './compressed-posting-list';
-import { Injectable, Inject, Logger } from '@nestjs/common';
+import { Injectable, Inject, Logger, OnModuleInit } from '@nestjs/common';
 import { RocksDBService } from '../storage/rocksdb/rocksdb.service';
 
 export interface TermDictionaryOptions {
@@ -9,11 +9,13 @@ export interface TermDictionaryOptions {
   persistToDisk?: boolean;
 }
 
-export class InMemoryTermDictionary implements TermDictionary {
+@Injectable()
+export class InMemoryTermDictionary implements TermDictionary, OnModuleInit {
   private dictionary: Map<string, PostingList> = new Map();
   private options: TermDictionaryOptions;
   private readonly logger = new Logger(InMemoryTermDictionary.name);
   private rocksDBService?: RocksDBService;
+  private initialized = false;
 
   constructor(options: TermDictionaryOptions = {}, rocksDBService?: RocksDBService) {
     this.options = {
@@ -22,16 +24,32 @@ export class InMemoryTermDictionary implements TermDictionary {
       ...options,
     };
     this.rocksDBService = rocksDBService;
+  }
 
-    // Attempt to load dictionary from persistent storage on startup
+  async onModuleInit() {
+    // Wait for RocksDB to be initialized before loading dictionary
     if (this.options.persistToDisk && this.rocksDBService) {
-      this.loadFromDisk().catch(err => {
+      try {
+        await this.loadFromDisk();
+        this.initialized = true;
+      } catch (err) {
         this.logger.warn(`Failed to load term dictionary from disk: ${err.message}`);
-      });
+        // Still mark as initialized even if loading fails
+        this.initialized = true;
+      }
+    } else {
+      this.initialized = true;
+    }
+  }
+
+  private ensureInitialized() {
+    if (!this.initialized) {
+      throw new Error('Term dictionary not yet initialized');
     }
   }
 
   addTerm(term: string): PostingList {
+    this.ensureInitialized();
     if (!this.dictionary.has(term)) {
       const postingList = this.options.useCompression
         ? new CompressedPostingList()
@@ -49,14 +67,17 @@ export class InMemoryTermDictionary implements TermDictionary {
   }
 
   getPostingList(term: string): PostingList | undefined {
+    this.ensureInitialized();
     return this.dictionary.get(term);
   }
 
   hasTerm(term: string): boolean {
+    this.ensureInitialized();
     return this.dictionary.has(term);
   }
 
   removeTerm(term: string): boolean {
+    this.ensureInitialized();
     const result = this.dictionary.delete(term);
 
     // Persist the updated dictionary if enabled
@@ -70,14 +91,17 @@ export class InMemoryTermDictionary implements TermDictionary {
   }
 
   getTerms(): string[] {
+    this.ensureInitialized();
     return Array.from(this.dictionary.keys());
   }
 
   size(): number {
+    this.ensureInitialized();
     return this.dictionary.size;
   }
 
   addPosting(term: string, entry: PostingEntry): void {
+    this.ensureInitialized();
     const postingList = this.addTerm(term);
     postingList.addEntry(entry);
 

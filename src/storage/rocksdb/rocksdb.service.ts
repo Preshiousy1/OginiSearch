@@ -4,7 +4,6 @@ import { promisify } from 'util';
 import * as fs from 'fs';
 import * as path from 'path';
 import encodingDown from 'encoding-down';
-// const encodingDown = require('encoding-down');
 
 @Injectable()
 export class RocksDBService implements OnModuleInit, OnModuleDestroy {
@@ -17,7 +16,15 @@ export class RocksDBService implements OnModuleInit, OnModuleDestroy {
   private encodingDown: any;
 
   constructor(private configService: ConfigService) {
-    this.dbPath = this.configService.get<string>('ROCKSDB_PATH');
+    // Check if we're running in Docker (environment variable set in Dockerfile)
+    const isDocker = this.configService.get<string>('DOCKER') === 'true';
+
+    // Use Docker path if in Docker, otherwise use local path
+    this.dbPath =
+      this.configService.get<string>('ROCKSDB_PATH') ||
+      (isDocker ? '/usr/src/app/data/rocksdb' : path.join(process.cwd(), 'data', 'rocksdb'));
+
+    this.logger.log(`Initializing RocksDB with path: ${this.dbPath}`);
 
     try {
       // Use import() for dynamic imports instead of require()
@@ -35,8 +42,18 @@ export class RocksDBService implements OnModuleInit, OnModuleDestroy {
   }
 
   async onModuleInit() {
-    await this.ensureDbDirectoryExists();
-    await this.connect();
+    if (!this.isAvailable) {
+      this.logger.warn('RocksDB is not available, skipping initialization');
+      return;
+    }
+
+    try {
+      await this.ensureDbDirectoryExists();
+      await this.connect();
+    } catch (error) {
+      this.logger.error(`Failed to initialize RocksDB: ${error.message}`);
+      throw error;
+    }
   }
 
   async onModuleDestroy() {
@@ -47,6 +64,7 @@ export class RocksDBService implements OnModuleInit, OnModuleDestroy {
     const mkdirAsync = promisify(fs.mkdir);
     try {
       await mkdirAsync(this.dbPath, { recursive: true });
+      this.logger.log(`Created RocksDB directory at: ${this.dbPath}`);
     } catch (error) {
       if (error.code !== 'EEXIST') {
         this.logger.error(`Failed to create RocksDB directory: ${error.message}`);
@@ -56,6 +74,10 @@ export class RocksDBService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async connect() {
+    if (!this.isAvailable) {
+      throw new Error('RocksDB dependencies are not available');
+    }
+
     try {
       const db = this.levelup(
         this.encodingDown(this.rocksdb(this.dbPath), { valueEncoding: 'binary' }),
@@ -80,6 +102,11 @@ export class RocksDBService implements OnModuleInit, OnModuleDestroy {
   }
 
   async get<T>(key: string): Promise<T | null> {
+    if (!this.db) {
+      this.logger.error('Attempted to get key before RocksDB initialization');
+      return null;
+    }
+
     try {
       const value = await this.db.get(key);
       if (!value) return null;
