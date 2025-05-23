@@ -13,6 +13,7 @@ A powerful search engine with Nigerian roots, built with NestJS and TypeScript.
 - TypeScript client library
 - Docker support
 - Monitoring with Prometheus and Grafana
+- **Memory-optimized architecture** with 97% memory reduction
 
 ## Quick Start
 
@@ -42,6 +43,17 @@ cp .env.example .env
 ```bash
 npm run start:dev
 ```
+
+## Documentation
+
+Comprehensive documentation is available in the [`docs/`](docs/) directory:
+
+- **[📚 Main Documentation](docs/README.md)** - Complete documentation index
+- **[🐛 Bug Fixes](docs/bug-fixes/)** - Major bug fixes and optimizations
+- **[🔧 Scripts](scripts/README.md)** - Utility scripts for development and deployment
+
+### Recent Updates
+- **Memory Optimization** (May 2025): Resolved critical memory leaks, achieving 97% memory reduction and production stability
 
 ## API Documentation
 

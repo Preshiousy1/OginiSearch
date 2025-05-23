@@ -20,11 +20,16 @@
     "test:debug": "node --inspect-brk -r tsconfig-paths/register -r ts-node/register node_modules/.bin/jest --runInBand",
     "test:e2e": "jest --config ./test/jest-e2e.json",
     "test:int": "jest --config ./test/jest-int.json",
+    "test:memory": "./scripts/testing/run-memory-tests.sh",
     "docker:build": "docker build --no-cache -t ogini .",
     "docker:dev": "sudo docker-compose up",
     "docker:prod": "docker-compose -f docker-compose.prod.yml up -d",
     "docker:down": "docker-compose down",
-    "docker:logs": "docker-compose logs -f"
+    "docker:logs": "docker-compose logs -f",
+    "cleanup:heap": "./scripts/cleanup-heap-snapshots.sh",
+    "dev:start": "./scripts/development/start-debug.sh",
+    "prod:start": "./scripts/production/start-optimized.sh",
+    "coverage:verify": "./scripts/verify-coverage.sh"
   },
   "dependencies": {
     "@nestjs/common": "^11.0.13",

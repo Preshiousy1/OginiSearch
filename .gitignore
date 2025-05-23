@@ -39,9 +39,15 @@ lerna-debug.log*
 #prd files
 complete-ogini-prd.md
 ogini-implementation-to-do-list.md
+ogini-scout-driver-prd.md
+ogini-scout-driver-todo-list.md
 
 #env
 .env
 .env.local
 .env.development.local
 .env.test.local
+# Memory profiling files
+profiles/
+*.heapsnapshot
+*.cpuprofile

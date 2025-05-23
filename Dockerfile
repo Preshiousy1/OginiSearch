@@ -58,6 +58,13 @@ RUN npm ci --only=production --no-optional || \
 # Copy built application from build stage
 COPY --from=build /usr/src/app/dist ./dist
 
+# Copy production scripts
+COPY scripts/production ./scripts/production
+COPY scripts/cleanup-heap-snapshots.sh ./scripts/
+
+# Make scripts executable
+RUN chmod +x scripts/production/*.sh scripts/cleanup-heap-snapshots.sh
+
 # Create data directories
 RUN mkdir -p /usr/src/app/data/rocksdb && \
     chmod -R 777 /usr/src/app/data
@@ -69,5 +76,5 @@ EXPOSE 3000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
     CMD wget -qO- http://localhost:3000/health || exit 1
 
-# Start the application
-CMD ["node", "dist/src/main"]
+# Start the application using npm script for consistency
+CMD ["npm", "run", "prod:start"]

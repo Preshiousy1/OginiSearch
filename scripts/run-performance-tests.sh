@@ -16,11 +16,11 @@ mkdir -p performance-results
 
 # Run performance tests
 echo "Running performance tests..."
-npx jest --config jest.config.js test/performance --json --outputFile=performance-results/results.json
+npx jest --config test/jest-e2e.json test/performance --json --outputFile=performance-results/results.json
 
 # Generate performance report
 echo "Generating performance report..."
-node scripts/generate-performance-report.mjs
+node scripts/generate-performance-report.js
 
 
 # Check if tests passed

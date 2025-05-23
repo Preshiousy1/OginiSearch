@@ -23,7 +23,7 @@ services:
     depends_on:
       mongodb:
         condition: service_healthy
-    command: npm run start:dev
+    command: npm run dev:start
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:3000/health"]
       interval: 30s
