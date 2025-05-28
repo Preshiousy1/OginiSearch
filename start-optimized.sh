@@ -33,4 +33,4 @@ echo ""
 echo "🎯 Starting production server..."
 
 # Start with minimal logging for production
-node dist/src/main.js 
+node dist/src/main.js

@@ -61,8 +61,12 @@ COPY --from=build /usr/src/app/dist ./dist
 # Copy all scripts with proper directory structure
 COPY scripts/ ./scripts/
 
+# Copy the root-level production script
+COPY start-optimized.sh ./start-optimized.sh
+
 # Make all scripts executable
-RUN find ./scripts -name "*.sh" -type f -exec chmod +x {} \;
+RUN find ./scripts -name "*.sh" -type f -exec chmod +x {} \; && \
+    chmod +x ./start-optimized.sh
 
 # Create data directories
 RUN mkdir -p /usr/src/app/data/rocksdb && \
