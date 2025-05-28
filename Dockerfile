@@ -45,7 +45,7 @@ ENV DOCKER=true
 WORKDIR /usr/src/app
 
 # Install runtime dependencies
-RUN apk add --no-cache ca-certificates snappy zlib bzip2 lz4 zstd
+RUN apk add --no-cache ca-certificates snappy zlib bzip2 lz4 zstd bash
 
 # Copy package files
 COPY package*.json ./
@@ -64,9 +64,13 @@ COPY scripts/ ./scripts/
 # Copy the root-level production script
 COPY start-optimized.sh ./start-optimized.sh
 
-# Make all scripts executable
+# Make all scripts executable and verify
 RUN find ./scripts -name "*.sh" -type f -exec chmod +x {} \; && \
-    chmod +x ./start-optimized.sh
+    chmod +x ./start-optimized.sh && \
+    echo "Verifying script exists and is executable:" && \
+    ls -la ./start-optimized.sh && \
+    echo "Script content preview:" && \
+    head -3 ./start-optimized.sh
 
 # Create data directories
 RUN mkdir -p /usr/src/app/data/rocksdb && \
@@ -80,4 +84,4 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
     CMD wget -qO- http://localhost:3000/health || exit 1
 
 # Start the application using npm script for consistency
-CMD ["npm", "run", "prod:start"]
+CMD ["sh", "-c", "echo 'Starting container...' && pwd && ls -la start-optimized.sh && npm run prod:start"]

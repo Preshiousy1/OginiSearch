@@ -28,7 +28,7 @@
     "docker:logs": "docker-compose logs -f",
     "cleanup:heap": "./scripts/cleanup-heap-snapshots.sh",
     "dev:start": "./scripts/development/start-debug.sh",
-    "prod:start": "./start-optimized.sh",
+    "prod:start": "bash ./start-optimized.sh || node dist/src/main.js",
     "coverage:verify": "./scripts/verify-coverage.sh"
   },
   "dependencies": {
