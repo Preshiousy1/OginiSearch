@@ -58,12 +58,11 @@ RUN npm ci --only=production --no-optional || \
 # Copy built application from build stage
 COPY --from=build /usr/src/app/dist ./dist
 
-# Copy production scripts
-COPY scripts/production ./scripts/production
-COPY scripts/cleanup-heap-snapshots.sh ./scripts/
+# Copy all scripts with proper directory structure
+COPY scripts/ ./scripts/
 
-# Make scripts executable
-RUN chmod +x scripts/production/*.sh scripts/cleanup-heap-snapshots.sh
+# Make all scripts executable
+RUN find ./scripts -name "*.sh" -type f -exec chmod +x {} \;
 
 # Create data directories
 RUN mkdir -p /usr/src/app/data/rocksdb && \
