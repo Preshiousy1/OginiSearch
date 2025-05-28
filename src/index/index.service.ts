@@ -6,6 +6,7 @@ import { DocumentStorageService } from '../storage/document-storage/document-sto
 import { IndexStatsService } from '../index/index-stats.service';
 import { InMemoryTermDictionary } from '../index/term-dictionary';
 import { Index, IndexSettings } from './interfaces/index.interface';
+import { PersistentTermDictionaryService } from '../storage/index-storage/persistent-term-dictionary.service';
 
 @Injectable()
 export class IndexService {
@@ -17,6 +18,7 @@ export class IndexService {
     private readonly documentStorage: DocumentStorageService,
     private readonly indexStats: IndexStatsService,
     @Inject('TERM_DICTIONARY') private readonly termDictionary: InMemoryTermDictionary,
+    private readonly persistentTermDictionary: PersistentTermDictionaryService,
   ) {}
 
   async createIndex(createIndexDto: CreateIndexDto): Promise<IndexResponseDto> {
@@ -101,7 +103,10 @@ export class IndexService {
         this.termDictionary.removeTerm(term);
       }
 
-      this.logger.log(`Successfully deleted index ${name} and all its data`);
+      // 5. Delete term postings from MongoDB
+      await this.persistentTermDictionary.deleteIndexTermPostings(name);
+
+      this.logger.log(`Index ${name} deleted successfully`);
     } catch (error) {
       this.logger.error(`Error deleting index ${name}: ${error.message}`);
       throw error;

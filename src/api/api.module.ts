@@ -5,9 +5,11 @@ import { SearchController } from './controllers/search.controller';
 import { IndexModule } from '../index/index.module';
 import { DocumentModule } from '../document/document.module';
 import { SearchModule } from '../search/search.module';
+import { MongoDBModule } from '../storage/mongodb/mongodb.module';
+import { StorageModule } from '../storage/storage.module';
 
 @Module({
-  imports: [IndexModule, DocumentModule, SearchModule],
+  imports: [IndexModule, DocumentModule, SearchModule, MongoDBModule, StorageModule],
   controllers: [IndexController, DocumentController, SearchController],
 })
 export class ApiModule {}

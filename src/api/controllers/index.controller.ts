@@ -28,13 +28,17 @@ import {
   ApiBody,
   ApiExtraModels,
 } from '@nestjs/swagger';
+import { IndexRepository } from '../../storage/mongodb/repositories/index.repository';
 
 @ApiTags('Indices')
 @ApiExtraModels(CreateIndexDto, UpdateIndexSettingsDto)
 @ApiBearerAuth('JWT-auth')
 @Controller('api/indices')
 export class IndexController {
-  constructor(private readonly indexService: IndexService) {}
+  constructor(
+    private readonly indexService: IndexService,
+    private readonly indexRepository: IndexRepository,
+  ) {}
 
   @Post()
   @ApiOperation({
@@ -328,5 +332,25 @@ export class IndexController {
   })
   async rebuildDocumentCount(@Param('name') name: string): Promise<void> {
     await this.indexService.rebuildDocumentCount(name);
+  }
+
+  @Get('debug/mongodb')
+  async debugMongoDB() {
+    try {
+      // Test MongoDB connection by trying to find all indices
+      const indices = await this.indexRepository.findAll();
+      return {
+        status: 'success',
+        message: 'MongoDB connection working',
+        indicesCount: indices.length,
+        indices: indices.map(idx => ({ name: idx.name, createdAt: idx.createdAt })),
+      };
+    } catch (error) {
+      return {
+        status: 'error',
+        message: 'MongoDB connection failed',
+        error: error.message,
+      };
+    }
   }
 }

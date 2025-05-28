@@ -122,47 +122,25 @@ export class SearchExecutorService {
     step: TermQueryStep,
   ): Promise<Array<{ id: string; score: number }>> {
     const { term, field = '_all' } = step;
-    this.logger.debug(`Executing term step for field:${field} term:${term}`);
-    this.logger.debug(`All terms in dictionary: ${this.termDictionary.getTerms().join(', ')}`);
 
-    const postingLists: PostingList[] = [];
-    const bm25Scores: { id: string; score: number }[] = [];
-
-    // Use the term directly as it already includes the field prefix
-    this.logger.debug(`Looking for exact term match: ${term}`);
     const exactPostingList = await this.termDictionary.getPostingList(term);
     if (exactPostingList && exactPostingList.size() > 0) {
-      this.logger.debug(`Found exact match for ${term} with ${exactPostingList.size()} documents`);
       const scores = this.calculateScores(indexName, exactPostingList, term);
-      bm25Scores.push(...scores);
-      postingLists.push(exactPostingList);
-    } else {
-      this.logger.debug(`No exact match found for ${term}`);
+      return scores;
     }
 
-    // Get prefix matches if no exact match found
     const matchingTerms = this.getMatchingTerms(term);
-    this.logger.debug(`Found ${matchingTerms.length} prefix matches: ${matchingTerms.join(', ')}`);
 
+    const allScores: Array<{ id: string; score: number }> = [];
     for (const t of matchingTerms) {
-      if (t !== term) {
-        // Skip exact term as we already processed it
-        const postingList = await this.termDictionary.getPostingList(t);
-        if (postingList && postingList.size() > 0) {
-          this.logger.debug(`Found prefix match for ${t} with ${postingList.size()} documents`);
-          const scores = this.calculateScores(indexName, postingList, t);
-          bm25Scores.push(...scores);
-          postingLists.push(postingList);
-        }
+      const postingList = await this.termDictionary.getPostingList(t);
+      if (postingList && postingList.size() > 0) {
+        const scores = this.calculateScores(indexName, postingList, t);
+        allScores.push(...scores);
       }
     }
 
-    if (postingLists.length === 0) {
-      this.logger.debug('No matching terms found in dictionary');
-      return [];
-    }
-
-    return bm25Scores;
+    return allScores;
   }
 
   private async executeBooleanStep(

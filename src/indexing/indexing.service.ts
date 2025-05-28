@@ -4,6 +4,7 @@ import { DocumentProcessorService } from '../document/document-processor.service
 import { IndexStatsService } from '../index/index-stats.service';
 import { ProcessedDocument } from '../document/interfaces/document-processor.interface';
 import { InMemoryTermDictionary } from '../index/term-dictionary';
+import { PersistentTermDictionaryService } from '../storage/index-storage/persistent-term-dictionary.service';
 
 @Injectable()
 export class IndexingService {
@@ -14,6 +15,7 @@ export class IndexingService {
     private readonly documentProcessor: DocumentProcessorService,
     private readonly indexStats: IndexStatsService,
     @Inject('TERM_DICTIONARY') private readonly termDictionary: InMemoryTermDictionary,
+    private readonly persistentTermDictionary: PersistentTermDictionaryService,
   ) {}
 
   async indexDocument(indexName: string, documentId: string, document: any): Promise<void> {
@@ -35,32 +37,34 @@ export class IndexingService {
         const positions = fieldData.positions?.[term] || [];
         const frequency = fieldData.termFrequencies[term] || 1;
 
-        // Add to field-specific posting list in both RocksDB and in-memory dictionary
-        const postings =
-          (await this.indexStorage.getTermPostings(indexName, fieldTerm)) || new Map();
-        postings.set(documentId, positions);
-        await this.indexStorage.storeTermPostings(indexName, fieldTerm, postings);
-
-        this.termDictionary.addPosting(fieldTerm, {
+        // Add to in-memory term dictionary
+        const postingList = await this.termDictionary.addTerm(fieldTerm);
+        postingList.addEntry({
           docId: documentId,
           frequency,
           positions,
           metadata: { field },
         });
+
+        // Save to both RocksDB and MongoDB via PersistentTermDictionaryService
+        await this.persistentTermDictionary.saveTermPostings(indexName, fieldTerm, postingList);
 
         // Also add to _all field for cross-field search
         const allFieldTerm = `_all:${term}`;
-        const allPostings =
-          (await this.indexStorage.getTermPostings(indexName, allFieldTerm)) || new Map();
-        allPostings.set(documentId, positions);
-        await this.indexStorage.storeTermPostings(indexName, allFieldTerm, allPostings);
-
-        this.termDictionary.addPosting(allFieldTerm, {
+        const allPostingList = await this.termDictionary.addTerm(allFieldTerm);
+        allPostingList.addEntry({
           docId: documentId,
           frequency,
           positions,
           metadata: { field },
         });
+
+        // Save _all field term postings to both RocksDB and MongoDB
+        await this.persistentTermDictionary.saveTermPostings(
+          indexName,
+          allFieldTerm,
+          allPostingList,
+        );
       }
     }
 
@@ -97,37 +101,43 @@ export class IndexingService {
           // Remove from field-specific posting list
           const fieldTerm = `${field}:${term}`;
           try {
-            // Get existing postings for this term
-            const postings = await this.indexStorage.getTermPostings(indexName, fieldTerm);
-
-            if (postings && postings.has(documentId)) {
-              // Remove document from posting list
-              postings.delete(documentId);
-
-              // If no more documents for this term, remove the term
-              if (postings.size === 0) {
-                await this.indexStorage.deleteTermPostings(indexName, fieldTerm);
-                this.termDictionary.removeTerm(fieldTerm);
-              } else {
-                // Otherwise update the posting list
-                await this.indexStorage.storeTermPostings(indexName, fieldTerm, postings);
-                this.termDictionary.removePosting(fieldTerm, documentId);
+            const postingList = await this.termDictionary.getPostingList(fieldTerm);
+            if (postingList) {
+              const removed = postingList.removeEntry(documentId);
+              if (removed) {
+                if (postingList.size() === 0) {
+                  // Remove term completely from both RocksDB and MongoDB
+                  await this.persistentTermDictionary.deleteTermPostings(indexName, fieldTerm);
+                  await this.termDictionary.removeTerm(fieldTerm);
+                } else {
+                  // Update the posting list in both RocksDB and MongoDB
+                  await this.persistentTermDictionary.saveTermPostings(
+                    indexName,
+                    fieldTerm,
+                    postingList,
+                  );
+                }
               }
             }
 
             // Also remove from _all field posting list
             const allFieldTerm = `_all:${term}`;
-            const allPostings = await this.indexStorage.getTermPostings(indexName, allFieldTerm);
-
-            if (allPostings && allPostings.has(documentId)) {
-              allPostings.delete(documentId);
-
-              if (allPostings.size === 0) {
-                await this.indexStorage.deleteTermPostings(indexName, allFieldTerm);
-                this.termDictionary.removeTerm(allFieldTerm);
-              } else {
-                await this.indexStorage.storeTermPostings(indexName, allFieldTerm, allPostings);
-                this.termDictionary.removePosting(allFieldTerm, documentId);
+            const allPostingList = await this.termDictionary.getPostingList(allFieldTerm);
+            if (allPostingList) {
+              const removed = allPostingList.removeEntry(documentId);
+              if (removed) {
+                if (allPostingList.size() === 0) {
+                  // Remove term completely from both RocksDB and MongoDB
+                  await this.persistentTermDictionary.deleteTermPostings(indexName, allFieldTerm);
+                  await this.termDictionary.removeTerm(allFieldTerm);
+                } else {
+                  // Update the posting list in both RocksDB and MongoDB
+                  await this.persistentTermDictionary.saveTermPostings(
+                    indexName,
+                    allFieldTerm,
+                    allPostingList,
+                  );
+                }
               }
             }
           } catch (error) {

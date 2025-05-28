@@ -37,5 +37,5 @@ echo "   - Memory monitoring: ${MEMORY_MONITOR_INTERVAL}ms"
 echo ""
 echo "🚀 Building and starting development server..."
 
-# Build and run directly
-npm run build && node --trace-gc --trace-warnings dist/src/main.js 
+# Build and run without garbage collection tracing
+npm run build && node --trace-warnings dist/src/main.js 

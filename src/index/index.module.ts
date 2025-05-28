@@ -7,7 +7,7 @@ import { InMemoryTermDictionary } from './term-dictionary';
 import { IndexStatsService } from './index-stats.service';
 import { SimplePostingList } from './posting-list';
 import { CompressedPostingList } from './compressed-posting-list';
-import { RocksDBService } from 'src/storage/rocksdb/rocksdb.service';
+import { RocksDBService } from '../storage/rocksdb/rocksdb.service';
 import { BM25Scorer } from './bm25-scorer';
 import { DocumentCountVerifierService } from './document-count-verifier.service';
 
