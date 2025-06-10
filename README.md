@@ -4,6 +4,11 @@ A powerful search engine with Nigerian roots, built with NestJS and TypeScript.
 
 ## Features
 
+- **🧠 Smart Field Mapping Auto-Detection** - AI-powered automatic field type detection
+- **🔍 Advanced Query Types** - Support for match, wildcard, and match-all queries
+- **⚡ Wildcard Pattern Matching** - Sophisticated pattern matching with `*` and `?` wildcards
+- **📄 Complete Document Retrieval** - Efficient match-all queries for browsing scenarios
+- **🚀 Smart Query Processing** - Automatic detection and optimization of query patterns
 - Full-text search with advanced query capabilities
 - Real-time indexing and search
 - Faceted search and filtering
@@ -87,12 +92,40 @@ await client.indices.createIndex({
   }
 });
 
-// Search
+// Basic search
 const results = await client.search.search('products', {
   query: {
     match: {
       field: 'title',
       value: 'nike'
+    }
+  }
+});
+
+// Wildcard search
+const wildcardResults = await client.search.search('products', {
+  query: {
+    wildcard: {
+      field: 'title',
+      value: 'nik*'
+    }
+  }
+});
+
+// Match-all query (get all documents)
+const allResults = await client.search.search('products', {
+  query: {
+    match_all: {}
+  },
+  size: 10
+});
+
+// Smart wildcard auto-detection
+const smartResults = await client.search.search('products', {
+  query: {
+    match: {
+      field: 'title',
+      value: '*shoes*'
     }
   }
 });

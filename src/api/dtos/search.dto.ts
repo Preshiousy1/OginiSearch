@@ -31,14 +31,67 @@ export class MatchQueryDto {
   value: string;
 }
 
+export class MatchAllQueryDto {
+  @ApiProperty({
+    description: 'Boost factor for match-all query',
+    required: false,
+    example: 1.0,
+  })
+  @IsOptional()
+  @IsNumber()
+  boost?: number;
+}
+
+export class WildcardQueryDto {
+  @ApiProperty({
+    description: 'Field to search in (optional for wildcard across all fields)',
+    required: false,
+    example: 'title',
+  })
+  @IsOptional()
+  @IsString()
+  field?: string;
+
+  @ApiProperty({
+    description: 'Wildcard pattern (* for multiple chars, ? for single char)',
+    example: 'smart*',
+  })
+  @IsString()
+  @IsNotEmpty()
+  value: string;
+
+  @ApiProperty({
+    description: 'Boost factor for wildcard query',
+    required: false,
+    example: 1.0,
+  })
+  @IsOptional()
+  @IsNumber()
+  boost?: number;
+}
+
 export class SearchQueryDto {
   @ApiProperty({
     description: 'Search query definition',
-    example: {
+    examples: {
       match: {
-        field: 'title',
-        value: 'smartphone',
+        match: {
+          field: 'title',
+          value: 'smartphone',
+        },
       },
+      match_all: {
+        match_all: {
+          boost: 1.0,
+        },
+      },
+      wildcard: {
+        wildcard: {
+          field: 'title',
+          value: 'smart*',
+        },
+      },
+      string: 'smartphone',
     },
   })
   @IsObject()
@@ -46,6 +99,8 @@ export class SearchQueryDto {
   query:
     | {
         match?: MatchQueryDto;
+        match_all?: MatchAllQueryDto;
+        wildcard?: WildcardQueryDto | Record<string, { value: string; boost?: number }>;
         term?: Record<string, any>;
       }
     | string;

@@ -1,10 +1,124 @@
 # Document Indexing Guide
 
-This guide covers best practices and techniques for indexing documents in Ogini.
+This guide covers the revolutionary **Smart Auto-Detection** approach and traditional techniques for indexing documents in Ogini.
 
-## Basic Document Indexing
+## 🧠 Smart Auto-Detection Approach (Recommended)
 
-### Single Document Indexing
+### ⚡ Zero Configuration Required
+
+With Ogini's Smart Field Mapping Auto-Detection, you can start indexing immediately without any field mapping configuration:
+
+```typescript
+// 1. Create index (no mappings needed!)
+const index = await client.indices.createIndex({
+  name: 'products',
+  settings: {}  // Empty settings - smart detection will configure everything!
+});
+
+// 2. Index documents (auto-detection triggers)
+const result = await client.documents.bulkIndexDocuments('products', [
+  {
+    document: {
+      title: 'Smartphone X',
+      description: 'Latest smartphone with advanced features',
+      price: 999.99,
+      tags: ['electronics', 'mobile'],
+      created_at: '2024-01-15T10:30:00Z',
+      email: 'support@company.com',
+      specifications: {
+        battery: {
+          life: 24,
+          fast_charging: true
+        },
+        display: {
+          size: 6.1,
+          resolution: '2560x1140'
+        }
+      },
+      is_featured: true
+    }
+  }
+]);
+
+// 3. Start searching immediately! Mappings auto-configured:
+// ✅ title → text with keyword sub-field
+// ✅ price → float (auto-detected from 999.99)
+// ✅ created_at → date (ISO format detected)
+// ✅ email → keyword (email pattern detected)
+// ✅ specifications.battery.life → integer
+// ✅ is_featured → boolean
+```
+
+### 🎯 Intelligent Type Detection
+
+The system automatically detects optimal field types:
+
+```typescript
+const smartDocument = {
+  // Text fields (long content)
+  title: 'Gaming Laptop Pro',
+  description: 'High-performance gaming laptop with RGB lighting and advanced cooling',
+  
+  // Keyword fields (short identifiers)
+  sku: 'GLB-2024-001',
+  category: 'Electronics',
+  
+  // Numeric fields
+  price: 1299.99,        // → float (decimal detected)
+  stock: 15,             // → integer (whole number)
+  
+  // Date fields
+  created_at: '2024-01-15T10:30:00Z',  // → date (ISO format)
+  release_date: '2024-02-01',          // → date (date only)
+  
+  // Email and URL detection
+  contact_email: 'sales@company.com',  // → keyword (email pattern)
+  support_url: 'https://support.company.com',  // → keyword (URL pattern)
+  
+  // Boolean fields
+  is_featured: true,     // → boolean
+  in_stock: false,       // → boolean
+  
+  // Complex nested structures
+  specifications: {      // → object
+    processor: {         // → nested object
+      brand: 'Intel',    // → keyword
+      cores: 8,          // → integer
+      speed: 3.2         // → float
+    },
+    storage: [           // → nested array
+      {
+        type: 'SSD',     // → keyword
+        capacity: 1000   // → integer
+      }
+    ]
+  }
+};
+
+// All field types automatically detected and optimized!
+```
+
+## Traditional Manual Approach
+
+### Index Creation with Manual Mappings
+
+```typescript
+const index = await client.indices.createIndex({
+  name: 'products',
+  mappings: {
+    properties: {
+      title: { type: 'text', analyzer: 'standard' },
+      description: { type: 'text', analyzer: 'standard' },
+      price: { type: 'number' },
+      tags: { type: 'keyword' }
+    }
+  }
+});
+```
+
+### Basic Document Indexing
+
+#### Single Document Indexing
 
 ```typescript
 const document = {
@@ -19,7 +133,7 @@ const result = await client.documents.indexDocument('products', {
 });
 ```
 
-### Bulk Document Indexing
+#### Bulk Document Indexing
 
 ```typescript
 const documents = [
@@ -45,14 +159,61 @@ const result = await client.documents.bulkIndexDocuments(
 
 ## Document Structure
 
-### Required Fields
+### Smart Auto-Detection Compatible Structure
 
-Every document should have:
-- A unique identifier (auto-generated if not provided)
-- Fields that match the index mapping
-- Valid data types for each field
+```typescript
+interface SmartProductDocument {
+  // Auto-detected as text fields
+  name: string;
+  description: string;
+  
+  // Auto-detected as keyword fields
+  sku: string;
+  category: string;
+  brand: string;
+  
+  // Auto-detected as numeric fields
+  price: number;
+  weight: number;
+  stock_quantity: number;
+  
+  // Auto-detected as date fields
+  created_at: string;  // ISO format recommended
+  updated_at: string;
+  
+  // Auto-detected as email/URL keywords
+  contact_email: string;
+  support_url: string;
+  
+  // Auto-detected as boolean fields
+  is_featured: boolean;
+  is_available: boolean;
+  
+  // Auto-detected as arrays
+  tags: string[];
+  categories: string[];
+  
+  // Auto-detected as nested objects
+  specifications: {
+    dimensions: {
+      length: number;
+      width: number;
+      height: number;
+    };
+    features: string[];
+  };
+  
+  // Auto-detected as nested arrays
+  reviews: Array<{
+    rating: number;
+    comment: string;
+    reviewer_email: string;
+    date: string;
+  }>;
+}
+```
 
-### Example Document Structure
+### Traditional Manual Structure
 
 ```typescript
 interface ProductDocument {
@@ -72,7 +233,29 @@ interface ProductDocument {
 
 ## Indexing Best Practices
 
-### 1. Batch Processing
+### 1. Leverage Smart Auto-Detection
+
+**✅ Recommended Approach:**
+```typescript
+// Use bulk uploads for better type detection
+const documents = [
+  // Multiple similar documents help with accurate type detection
+  { document: { price: 299.99, name: 'Product A' } },
+  { document: { price: 1299.00, name: 'Product B' } },
+  { document: { price: 49.95, name: 'Product C' } }
+];
+
+await client.documents.bulkIndexDocuments('products', documents);
+```
+
+**📝 Best Practices for Smart Detection:**
+- Use consistent field names across documents
+- Include representative data in first upload
+- Use bulk uploads when possible for better sampling
+- Ensure email fields contain valid email addresses
+- Use ISO date formats for reliable date detection
+
+### 2. Batch Processing
 
 For large datasets, use bulk indexing with appropriate batch sizes:
 
@@ -88,7 +271,7 @@ async function bulkIndexWithBatching(documents: any[], batchSize = 1000) {
 }
 ```
 
-### 2. Error Handling
+### 3. Error Handling
 
 Implement proper error handling for indexing operations:
 
@@ -108,101 +291,58 @@ try {
 }
 ```
 
-### 3. Document Validation
+### 4. Manual Override When Needed
 
-Validate documents before indexing:
+If you need to customize auto-detected mappings:
 
 ```typescript
-function validateDocument(document: any, mapping: any) {
-  // Check required fields
-  for (const [field, config] of Object.entries(mapping.properties)) {
-    if (config.required && !document[field]) {
-      throw new Error(`Missing required field: ${field}`);
-    }
-  }
+// Check what was auto-detected
+const index = await client.indices.getIndex('products');
+console.log(index.mappings);
 
-  // Validate field types
-  for (const [field, value] of Object.entries(document)) {
-    const fieldConfig = mapping.properties[field];
-    if (fieldConfig && !validateFieldType(value, fieldConfig.type)) {
-      throw new Error(`Invalid type for field: ${field}`);
+// Override specific fields if needed
+await client.indices.updateMappings('products', {
+  properties: {
+    custom_field: {
+      type: 'keyword',
+      ignore_above: 128  // Custom limit
     }
   }
-}
+});
+
+// Or trigger re-analysis after adding more documents
+await client.indices.autoDetectMappings('products');
 ```
 
-### 4. Optimizing Index Performance
+## 🚀 Smart vs Traditional Comparison
 
-1. **Use Appropriate Field Types**
-   - Use `text` for full-text search
-   - Use `keyword` for exact matches
-   - Use `number` for numeric values
-   - Use `date` for temporal data
-
-2. **Configure Analyzers**
-   ```typescript
-   const indexConfig = {
-     name: 'products',
-     settings: {
-       analysis: {
-         analyzer: {
-           custom_analyzer: {
-             type: 'custom',
-             tokenizer: 'standard',
-             filter: ['lowercase', 'stop', 'snowball']
-           }
-         }
-       }
-     },
-     mappings: {
-       properties: {
-         title: {
-           type: 'text',
-           analyzer: 'custom_analyzer'
-         }
-       }
-     }
-   };
-   ```
-
-3. **Use Bulk Operations**
-   - Always use bulk operations for multiple documents
-   - Implement retry logic for failed operations
-   - Monitor indexing performance
-
-4. **Handle Updates Efficiently**
-   ```typescript
-   async function updateDocument(index: string, id: string, updates: any) {
-     // Get existing document
-     const existing = await client.documents.getDocument(index, id);
-     
-     // Merge updates
-     const updated = { ...existing, ...updates };
-     
-     // Reindex
-     await client.documents.indexDocument(index, {
-       id,
-       document: updated
-     });
-   }
-   ```
+| Feature | Smart Auto-Detection | Traditional Manual |
+|---------|---------------------|-------------------|
+| **Setup Time** | ⚡ Instant | 🐌 Hours/Days |
+| **Configuration** | 🧠 Automatic | ✍️ Manual coding |
+| **Type Accuracy** | 🎯 AI-powered | 🤔 Human guesswork |
+| **Maintenance** | 🔧 Self-updating | 🛠️ Manual updates |
+| **Error Rate** | 📉 Minimal | 📈 Human errors |
+| **Reindexing** | ❌ Never needed | ✅ Often required |
 
 ## Monitoring and Maintenance
 
-1. **Monitor Index Size**
+1. **Check Auto-Detected Mappings**
+   ```typescript
+   const index = await client.indices.getIndex('products');
+   console.log('Auto-detected mappings:', index.mappings);
+   ```
+
+2. **Monitor Index Performance**
    ```typescript
    const stats = await client.indices.getStats('products');
-   console.log(`Index size: ${stats.size}`);
+   console.log(`Documents: ${stats.documentCount}`);
    ```
 
-2. **Check Index Health**
+3. **Re-analyze When Needed**
    ```typescript
-   const health = await client.indices.getHealth('products');
-   console.log(`Index health: ${health.status}`);
+   // Trigger re-analysis with more documents
+   await client.indices.autoDetectMappings('products');
    ```
 
-3. **Regular Maintenance**
-   - Monitor indexing performance
-   - Check for failed operations
-   - Optimize index settings
-   - Clean up old documents 
+Ready to experience effortless document indexing? Start with smart auto-detection and let Ogini handle the complexity for you! 🎉 

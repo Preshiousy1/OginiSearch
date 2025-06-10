@@ -5,6 +5,8 @@ import { IndexStatsService } from '../index/index-stats.service';
 import { ProcessedDocument } from '../document/interfaces/document-processor.interface';
 import { InMemoryTermDictionary } from '../index/term-dictionary';
 import { PersistentTermDictionaryService } from '../storage/index-storage/persistent-term-dictionary.service';
+import { DocumentMapping } from '../document/interfaces/document-processor.interface';
+import { IndexMappings } from '../index/interfaces/index.interface';
 
 @Injectable()
 export class IndexingService {
@@ -18,8 +20,29 @@ export class IndexingService {
     private readonly persistentTermDictionary: PersistentTermDictionaryService,
   ) {}
 
-  async indexDocument(indexName: string, documentId: string, document: any): Promise<void> {
-    this.logger.debug(`Processing and indexing document ${documentId} in index ${indexName}`);
+  async indexDocument(
+    indexName: string,
+    documentId: string,
+    document: any,
+    fromBulk = false,
+  ): Promise<void> {
+    if (!fromBulk) {
+      this.logger.debug(`Processing and indexing document ${documentId} in index ${indexName}`);
+    }
+
+    // 0. Get index configuration and set up document processor mapping
+    const indexConfig = await this.indexStorage.getIndex(indexName);
+    if (indexConfig && indexConfig.mappings && indexConfig.mappings.properties) {
+      // Convert index mappings to document processor mapping format
+      const documentMapping = this.convertIndexMappingsToDocumentMapping(indexConfig.mappings);
+      this.documentProcessor.setMapping(documentMapping);
+    } else {
+      // Use automatic field detection if no mappings are configured
+      this.documentProcessor.initializeDefaultMapping();
+      // Also detect fields from the current document and add them to mapping
+      const detectedMapping = this.detectFieldsFromDocument(document);
+      this.documentProcessor.setMapping(detectedMapping);
+    }
 
     // 1. Process the document (tokenization, normalization)
     const processedDoc = this.documentProcessor.processDocument({
@@ -72,10 +95,10 @@ export class IndexingService {
     await this.updateIndexStats(indexName, processedDoc);
 
     // 5. Update index metadata document count
-    const index = await this.indexStorage.getIndex(indexName);
-    if (index) {
-      index.documentCount = (index.documentCount || 0) + 1;
-      await this.indexStorage.updateIndex(indexName, index);
+    const indexMetadata = await this.indexStorage.getIndex(indexName);
+    if (indexMetadata) {
+      indexMetadata.documentCount = (indexMetadata.documentCount || 0) + 1;
+      await this.indexStorage.updateIndex(indexName, indexMetadata, fromBulk);
     }
   }
 
@@ -205,6 +228,95 @@ export class IndexingService {
       for (const [term, frequency] of Object.entries(fieldData.termFrequencies)) {
         const fieldTerm = `${field}:${term}`;
         await this.indexStats.updateTermStats(fieldTerm, processedDoc.id);
+      }
+    }
+  }
+
+  /**
+   * Convert index mappings to document processor mapping format
+   */
+  private convertIndexMappingsToDocumentMapping(indexMappings: IndexMappings): DocumentMapping {
+    const documentMapping: DocumentMapping = {
+      defaultAnalyzer: 'standard',
+      fields: {},
+    };
+
+    for (const [fieldName, fieldMapping] of Object.entries(indexMappings.properties)) {
+      documentMapping.fields[fieldName] = {
+        analyzer: fieldMapping.analyzer || 'standard',
+        indexed: fieldMapping.index !== false,
+        stored: fieldMapping.store !== false,
+        weight: fieldMapping.boost || 1.0,
+      };
+    }
+
+    return documentMapping;
+  }
+
+  /**
+   * Detect fields from a document and create automatic mapping
+   */
+  private detectFieldsFromDocument(document: any): DocumentMapping {
+    const documentMapping: DocumentMapping = {
+      defaultAnalyzer: 'standard',
+      fields: {},
+    };
+
+    // Recursively detect fields
+    this.detectFieldsRecursive(document, '', documentMapping.fields);
+
+    return documentMapping;
+  }
+
+  /**
+   * Recursively detect fields in nested objects
+   */
+  private detectFieldsRecursive(obj: any, prefix: string, fields: Record<string, any>): void {
+    if (!obj || typeof obj !== 'object') {
+      return;
+    }
+
+    for (const [key, value] of Object.entries(obj)) {
+      const fieldPath = prefix ? `${prefix}.${key}` : key;
+
+      if (value === null || value === undefined) {
+        continue;
+      }
+
+      if (typeof value === 'string') {
+        fields[fieldPath] = {
+          analyzer: 'standard',
+          indexed: true,
+          stored: true,
+          weight: 1.0,
+        };
+      } else if (typeof value === 'number') {
+        fields[fieldPath] = {
+          analyzer: 'keyword',
+          indexed: true,
+          stored: true,
+          weight: 1.0,
+        };
+      } else if (typeof value === 'boolean') {
+        fields[fieldPath] = {
+          analyzer: 'keyword',
+          indexed: true,
+          stored: true,
+          weight: 1.0,
+        };
+      } else if (Array.isArray(value)) {
+        // Handle arrays of strings/numbers
+        if (value.length > 0 && typeof value[0] === 'string') {
+          fields[fieldPath] = {
+            analyzer: 'keyword',
+            indexed: true,
+            stored: true,
+            weight: 1.0,
+          };
+        }
+      } else if (typeof value === 'object') {
+        // Recursively handle nested objects
+        this.detectFieldsRecursive(value, fieldPath, fields);
       }
     }
   }

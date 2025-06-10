@@ -37,6 +37,23 @@ export interface BooleanQuery extends Query {
 }
 
 /**
+ * Wildcard query (supports * and ? patterns)
+ */
+export interface WildcardQuery extends Query {
+  type: 'wildcard';
+  field?: string;
+  value: string;
+}
+
+/**
+ * Match-all query (returns all documents)
+ */
+export interface MatchAllQuery extends Query {
+  type: 'match_all';
+  boost?: number;
+}
+
+/**
  * Raw input query from user
  */
 export interface RawQuery {
@@ -47,6 +64,21 @@ export interface RawQuery {
           field?: string;
           value: string;
         };
+        match_all?: {
+          boost?: number;
+        };
+        wildcard?:
+          | {
+              [field: string]: {
+                value: string;
+                boost?: number;
+              };
+            }
+          | {
+              field?: string;
+              value: string;
+              boost?: number;
+            };
         term?: Record<string, any>;
       };
   fields?: string[];
@@ -117,4 +149,22 @@ export interface PhraseQueryStep extends QueryExecutionStep {
   terms: string[];
   steps: QueryExecutionStep[];
   positions?: number[]; // Relative positions of terms in the phrase
+}
+
+/**
+ * Wildcard execution step
+ */
+export interface WildcardQueryStep extends QueryExecutionStep {
+  type: 'wildcard';
+  field?: string;
+  pattern: string;
+  compiledPattern?: RegExp;
+}
+
+/**
+ * Match-all execution step
+ */
+export interface MatchAllQueryStep extends QueryExecutionStep {
+  type: 'match_all';
+  boost?: number;
 }

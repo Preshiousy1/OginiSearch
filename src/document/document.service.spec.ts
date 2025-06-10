@@ -1,3 +1,4 @@
+/// <reference types="jest" />
 import { Test, TestingModule } from '@nestjs/testing';
 import { DocumentService } from './document.service';
 import { DocumentStorageService } from '../storage/document-storage/document-storage.service';
@@ -7,6 +8,7 @@ import { SearchService } from '../search/search.service';
 import { NotFoundException, BadRequestException } from '@nestjs/common';
 import { IndexDocumentDto } from '../api/dtos/document.dto';
 import { InMemoryTermDictionary } from '../index/term-dictionary';
+
 describe('DocumentService', () => {
   let service: DocumentService;
   let documentStorageService: Partial<DocumentStorageService>;
@@ -17,7 +19,7 @@ describe('DocumentService', () => {
   beforeEach(async () => {
     // Mock for IndexService
     indexService = {
-      getIndex: jest.fn().mockImplementation(name => {
+      getIndex: jest.fn().mockImplementation((name: string) => {
         if (name === 'test-index') {
           return {
             name,
@@ -30,15 +32,16 @@ describe('DocumentService', () => {
         }
         throw new NotFoundException(`Index ${name} not found`);
       }),
+      updateMappings: jest.fn().mockResolvedValue(true),
     };
 
     // Mock for DocumentStorageService
     documentStorageService = {
-      storeDocument: jest.fn().mockImplementation((indexName, doc) => ({
+      storeDocument: jest.fn().mockImplementation((indexName: string, doc: any) => ({
         ...doc,
         version: 1,
       })),
-      getDocument: jest.fn().mockImplementation((indexName, id) => {
+      getDocument: jest.fn().mockImplementation((indexName: string, id: string) => {
         if (id === 'existing-doc') {
           return {
             id,
@@ -48,12 +51,12 @@ describe('DocumentService', () => {
         }
         return null;
       }),
-      deleteDocument: jest.fn().mockImplementation((indexName, id) => {
+      deleteDocument: jest.fn().mockImplementation((indexName: string, id: string) => {
         return id === 'existing-doc';
       }),
       bulkStoreDocuments: jest.fn().mockResolvedValue(3),
       bulkDeleteDocuments: jest.fn().mockResolvedValue(2),
-      getDocuments: jest.fn().mockImplementation((indexName, options) => {
+      getDocuments: jest.fn().mockImplementation((indexName: string, options: any) => {
         if (options.filter && options.filter.title === 'Test Document') {
           return {
             documents: [

@@ -112,7 +112,7 @@ export class IndexStorageService {
     }
   }
 
-  async updateIndex(name: string, updates: Partial<Index>): Promise<Index> {
+  async updateIndex(name: string, updates: Partial<Index>, fromBulk = false): Promise<Index> {
     const index = await this.getIndex(name);
     if (!index) {
       throw new Error(`Index ${name} not found`);
@@ -130,7 +130,9 @@ export class IndexStorageService {
       await this.rocksDBService.put(key, updatedIndex);
       await this.indexRepository.update(name, updatedIndex);
 
-      this.logger.debug(`Updated index ${name} in both RocksDB and MongoDB`);
+      if (!fromBulk) {
+        this.logger.debug(`Updated index ${name} in both RocksDB and MongoDB`);
+      }
       return updatedIndex;
     } catch (error) {
       this.logger.error(`Error updating index ${name}: ${error.message}`);

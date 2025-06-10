@@ -51,62 +51,34 @@ export class DocumentService implements OnModuleInit {
    */
   async rebuildIndex(): Promise<void> {
     try {
+      this.logger.log('Starting index rebuild...');
+
       // Get all indices
       const indices = await this.indexService.listIndices();
-      const BATCH_SIZE = 100; // Process 100 documents at a time
 
-      for (const indexInfo of indices) {
-        const indexName = indexInfo.name;
-        this.logger.log(`Rebuilding index for ${indexName}...`);
+      for (const index of indices) {
+        this.logger.log(`Rebuilding index: ${index.name}`);
 
+        // Get all documents for this index
+        const documents = await this.documentStorage.getDocuments(index.name);
         let processed = 0;
-        let hasMore = true;
 
-        while (hasMore) {
-          // Get documents in batches
-          const result = await this.documentStorage.getDocuments(indexName, {
-            offset: processed,
-            limit: BATCH_SIZE,
-          });
+        for (const doc of documents.documents) {
+          try {
+            await this.indexingService.indexDocument(index.name, doc.documentId, doc.content);
+            processed++;
 
-          if (result.documents.length === 0) {
-            hasMore = false;
-            continue;
-          }
-
-          // Process each document in the batch
-          for (const doc of result.documents) {
-            try {
-              await this.indexingService.indexDocument(indexName, doc.documentId, doc.content);
-              processed++;
-
-              // Log progress every 1000 documents
-              if (processed % 1000 === 0) {
-                this.logger.log(`Processed ${processed} documents in ${indexName}`);
-              }
-            } catch (error) {
-              this.logger.error(
-                `Error indexing document ${doc.documentId} in ${indexName}: ${error.message}`,
-              );
-              // Continue with next document
+            if (processed % 100 === 0) {
+              this.logger.log(`Processed ${processed} documents for index ${index.name}`);
             }
-          }
-
-          // Save term dictionary periodically
-          if (processed % 1000 === 0) {
-            try {
-              await this.termDictionary.saveToDisk();
-            } catch (error) {
-              this.logger.warn(`Failed to save term dictionary: ${error.message}`);
-            }
-          }
-
-          if (result.documents.length < BATCH_SIZE) {
-            hasMore = false;
+          } catch (error) {
+            this.logger.error(
+              `Failed to index document ${doc.documentId} in ${index.name}: ${error.message}`,
+            );
           }
         }
 
-        this.logger.log(`Completed rebuilding index ${indexName} with ${processed} documents`);
+        this.logger.log(`Completed rebuilding index ${index.name} with ${processed} documents`);
       }
     } catch (error) {
       this.logger.error(`Error rebuilding index: ${error.message}`);
@@ -121,6 +93,9 @@ export class DocumentService implements OnModuleInit {
 
     // Check if index exists
     await this.checkIndexExists(indexName);
+
+    // 🧠 Smart Auto-Detection: Check if we need to configure mappings first
+    await this.ensureFieldMappings(indexName, [documentDto.document]);
 
     // Generate ID if not provided
     const documentId = documentDto.id || uuidv4();
@@ -153,6 +128,12 @@ export class DocumentService implements OnModuleInit {
     // Check if index exists
     await this.checkIndexExists(indexName);
 
+    // 🧠 Smart Auto-Detection: Use entire batch as sample for better detection
+    await this.ensureFieldMappings(
+      indexName,
+      documents.map(doc => doc.document),
+    );
+
     const startTime = Date.now();
     const results = [];
     let hasErrors = false;
@@ -171,7 +152,7 @@ export class DocumentService implements OnModuleInit {
         });
 
         // Index document
-        await this.indexingService.indexDocument(indexName, documentId, doc.document);
+        await this.indexingService.indexDocument(indexName, documentId, doc.document, true);
 
         results.push({
           documentId,
@@ -192,6 +173,8 @@ export class DocumentService implements OnModuleInit {
         });
       }
     }
+
+    this.logger.log(`Successfully bulk indexed ${successCount} documents in ${indexName}`);
 
     return {
       items: results,
@@ -395,6 +378,265 @@ export class DocumentService implements OnModuleInit {
       await this.indexService.getIndex(indexName);
     } catch (error) {
       throw new NotFoundException(`Index ${indexName} not found`);
+    }
+  }
+
+  /**
+   * 🧠 Smart Auto-Detection System
+   *
+   * Automatically detects and configures field mappings on first document upload.
+   * This eliminates the need for reindexing by ensuring proper mappings are
+   * configured before any documents are processed.
+   *
+   * @param indexName - The index to check/configure
+   * @param sampleDocuments - Documents to use for field type detection
+   */
+  private async ensureFieldMappings(
+    indexName: string,
+    sampleDocuments: Record<string, any>[],
+  ): Promise<void> {
+    try {
+      // Get current index info
+      const index = await this.indexService.getIndex(indexName);
+
+      // Check if mappings are empty or only have default structure
+      if (this.hasMeaningfulMappings(index.mappings)) {
+        // Mappings already configured, no need to auto-detect
+        return;
+      }
+
+      this.logger.log(
+        `🧠 Auto-detecting field mappings for index ${indexName} from ${sampleDocuments.length} sample documents`,
+      );
+
+      // Analyze sample documents to detect field types
+      const fieldTypes = new Map<string, string>();
+      const fieldExamples = new Map<string, Set<any>>();
+
+      for (const doc of sampleDocuments) {
+        this.analyzeDocumentFields(doc, '', fieldTypes, fieldExamples);
+      }
+
+      if (fieldTypes.size === 0) {
+        this.logger.warn(`No fields detected in sample documents for index ${indexName}`);
+        return;
+      }
+
+      // Create intelligent mappings based on detected field types
+      const detectedMappings = {
+        dynamic: true,
+        properties: {} as Record<string, any>,
+      };
+
+      for (const [fieldPath, fieldType] of fieldTypes.entries()) {
+        detectedMappings.properties[fieldPath] = this.createFieldMapping(
+          fieldType,
+          fieldExamples.get(fieldPath),
+        );
+      }
+
+      // Update index with detected mappings
+      await this.indexService.updateMappings(indexName, detectedMappings);
+
+      this.logger.log(
+        `✅ Auto-configured mappings for ${fieldTypes.size} fields in index ${indexName}:`,
+      );
+      for (const [field, type] of fieldTypes.entries()) {
+        this.logger.log(`  • ${field}: ${type}`);
+      }
+    } catch (error) {
+      this.logger.error(`Failed to ensure field mappings for index ${indexName}: ${error.message}`);
+      // Don't throw - continue with document processing even if auto-detection fails
+    }
+  }
+
+  /**
+   * Check if index has meaningful field mappings (not empty)
+   */
+  private hasMeaningfulMappings(mappings: any): boolean {
+    if (!mappings || !mappings.properties) {
+      return false;
+    }
+
+    // Check if properties object is empty or only has metadata fields
+    const properties = mappings.properties;
+    const meaningfulFields = Object.keys(properties).filter(
+      key => !key.startsWith('_') && !key.startsWith('@'),
+    );
+
+    return meaningfulFields.length > 0;
+  }
+
+  /**
+   * Recursively analyze document fields to detect types
+   * (Enhanced version of IndexService method with better detection logic)
+   */
+  private analyzeDocumentFields(
+    obj: any,
+    prefix: string,
+    fieldTypes: Map<string, string>,
+    fieldExamples: Map<string, Set<any>>,
+  ): void {
+    if (!obj || typeof obj !== 'object') {
+      return;
+    }
+
+    for (const [key, value] of Object.entries(obj)) {
+      const fieldPath = prefix ? `${prefix}.${key}` : key;
+
+      if (value === null || value === undefined) {
+        continue;
+      }
+
+      // Initialize examples set if not exists
+      if (!fieldExamples.has(fieldPath)) {
+        fieldExamples.set(fieldPath, new Set());
+      }
+      fieldExamples.get(fieldPath)!.add(value);
+
+      if (typeof value === 'string') {
+        // Enhanced string type detection
+        const currentType = fieldTypes.get(fieldPath);
+
+        // Check for special string patterns
+        if (this.isEmailField(key, value)) {
+          fieldTypes.set(fieldPath, 'keyword');
+        } else if (this.isUrlField(value)) {
+          fieldTypes.set(fieldPath, 'keyword');
+        } else if (this.isDateField(value)) {
+          fieldTypes.set(fieldPath, 'date');
+        } else if (!currentType) {
+          // Determine text vs keyword based on content analysis
+          fieldTypes.set(fieldPath, this.determineStringType(value));
+        } else if (currentType === 'keyword' && this.determineStringType(value) === 'text') {
+          fieldTypes.set(fieldPath, 'text'); // Upgrade to text if we find long strings
+        }
+      } else if (typeof value === 'number') {
+        fieldTypes.set(fieldPath, Number.isInteger(value) ? 'integer' : 'float');
+      } else if (typeof value === 'boolean') {
+        fieldTypes.set(fieldPath, 'boolean');
+      } else if (Array.isArray(value)) {
+        // Analyze array elements
+        if (value.length > 0) {
+          const firstElement = value[0];
+          if (typeof firstElement === 'string') {
+            fieldTypes.set(fieldPath, 'keyword'); // Array of strings as keywords
+          } else if (typeof firstElement === 'object') {
+            fieldTypes.set(fieldPath, 'nested');
+            // Also analyze nested objects in array
+            value.forEach(item => {
+              if (typeof item === 'object') {
+                this.analyzeDocumentFields(item, fieldPath, fieldTypes, fieldExamples);
+              }
+            });
+          }
+        }
+      } else if (typeof value === 'object') {
+        // Recursively analyze nested objects
+        fieldTypes.set(fieldPath, 'object');
+        this.analyzeDocumentFields(value, fieldPath, fieldTypes, fieldExamples);
+      }
+    }
+  }
+
+  /**
+   * Determine if a string should be indexed as 'text' or 'keyword'
+   */
+  private determineStringType(value: string): 'text' | 'keyword' {
+    // Keyword criteria: short, no spaces, likely identifiers/tags
+    if (value.length <= 50 && !value.includes(' ') && !value.includes('\n')) {
+      return 'keyword';
+    }
+
+    // Text criteria: longer strings, contains spaces, sentences/paragraphs
+    return 'text';
+  }
+
+  /**
+   * Check if field/value indicates an email field
+   */
+  private isEmailField(fieldName: string, value: string): boolean {
+    const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    const emailFieldNames = ['email', 'email_address', 'contact_email', 'user_email'];
+
+    return emailFieldNames.includes(fieldName.toLowerCase()) || emailPattern.test(value);
+  }
+
+  /**
+   * Check if value is a URL
+   */
+  private isUrlField(value: string): boolean {
+    try {
+      new URL(value);
+      return true;
+    } catch {
+      return value.startsWith('http://') || value.startsWith('https://');
+    }
+  }
+
+  /**
+   * Check if value is a date string
+   */
+  private isDateField(value: string): boolean {
+    // ISO date patterns
+    const isoPattern = /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}:\d{2}(\.\d{3})?Z?)?$/;
+    if (isoPattern.test(value)) {
+      return !isNaN(Date.parse(value));
+    }
+    return false;
+  }
+
+  /**
+   * Create field mapping configuration based on detected type
+   * (Enhanced version with better mapping configurations)
+   */
+  private createFieldMapping(fieldType: string, examples?: Set<any>): any {
+    const baseMapping = {
+      type: fieldType,
+      store: true,
+      index: true,
+    };
+
+    switch (fieldType) {
+      case 'text':
+        return {
+          ...baseMapping,
+          analyzer: 'standard',
+          fields: {
+            keyword: {
+              type: 'keyword',
+              ignore_above: 256,
+            },
+          },
+        };
+      case 'keyword':
+        return {
+          ...baseMapping,
+          ignore_above: 256,
+        };
+      case 'integer':
+      case 'float':
+        return baseMapping;
+      case 'boolean':
+        return baseMapping;
+      case 'date':
+        return {
+          ...baseMapping,
+          format: 'strict_date_optional_time||epoch_millis',
+        };
+      case 'object':
+        return {
+          type: 'object',
+        };
+      case 'nested':
+        return {
+          type: 'nested',
+        };
+      default:
+        return {
+          type: 'text',
+          analyzer: 'standard',
+        };
     }
   }
 }

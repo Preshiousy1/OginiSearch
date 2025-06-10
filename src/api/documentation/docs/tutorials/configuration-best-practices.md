@@ -110,7 +110,40 @@ export default {
 };
 ```
 
-### 2. Caching Configuration
+### 2. Query Performance Settings
+
+```typescript
+// config/search.ts
+export default {
+  query: {
+    // Default pagination sizes
+    defaultSize: 10,
+    maxSize: 1000,
+    
+    // Wildcard query optimization
+    wildcardSettings: {
+      enableAutoDetection: true,
+      maxPatternComplexity: 5,
+      cacheCompiledRegex: true
+    },
+    
+    // Match-all query settings
+    matchAllSettings: {
+      defaultBoost: 1.0,
+      enablePagination: true,
+      maxResultsWithoutPagination: 100
+    },
+    
+    // Performance thresholds
+    timeouts: {
+      searchTimeout: '5s',
+      bulkTimeout: '30s'
+    }
+  }
+};
+```
+
+### 3. Memory and Cache Configuration
 
 ```typescript
 // config/cache.ts
@@ -124,6 +157,205 @@ export default {
   memory: {
     max: 100,
     ttl: 60000
+  },
+  // Query result caching
+  queryCache: {
+    enabled: true,
+    maxSize: 1000,
+    ttl: 300, // 5 minutes
+    excludePatterns: [
+      'match_all', // Don't cache match-all queries
+      'wildcard:*' // Don't cache overly broad wildcards
+    ]
+  }
+};
+```
+
+## Query Optimization Best Practices
+
+### 1. Wildcard Query Configuration
+
+```typescript
+// config/wildcardOptimization.ts
+export default {
+  wildcards: {
+    // Pattern complexity limits
+    maxWildcards: 3,
+    maxQuestionMarks: 5,
+    
+    // Performance thresholds
+    prefixOptimization: true, // Optimize prefix patterns (text*)
+    suffixWarningThreshold: 1000, // Warn on suffix patterns (*text) with many results
+    
+    // Auto-detection settings
+    autoDetection: {
+      enabled: true,
+      convertMatchToWildcard: true,
+      logConversions: true
+    },
+    
+    // Caching compiled regex patterns
+    regexCache: {
+      enabled: true,
+      maxSize: 500,
+      ttl: 3600 // 1 hour
+    }
+  }
+};
+```
+
+### 2. Match-All Query Optimization
+
+```typescript
+// config/matchAllOptimization.ts
+export default {
+  matchAll: {
+    // Pagination enforcement
+    enforcePagination: {
+      enabled: true,
+      maxUnpaginatedResults: 100,
+      defaultPageSize: 20
+    },
+    
+    // Auto-detection configuration
+    autoDetection: {
+      detectAsterisk: true, // Convert {"match": {"value": "*"}} to match_all
+      detectEmptyString: true, // Convert {"match": {"value": ""}} to match_all
+      logDetections: true
+    },
+    
+    // Performance monitoring
+    monitoring: {
+      logSlowQueries: true,
+      slowQueryThreshold: 100, // ms
+      trackResultCounts: true
+    }
+  }
+};
+```
+
+### 3. Field-Specific Query Settings
+
+```typescript
+// config/fieldOptimization.ts
+export default {
+  fields: {
+    // Optimize specific field types
+    textFields: {
+      enableWildcards: true,
+      maxWildcardLength: 100,
+      suggestPrefixPatterns: true
+    },
+    
+    keywordFields: {
+      enableExactMatch: true,
+      enableWildcards: true,
+      caseInsensitive: false
+    },
+    
+    // Field-specific wildcard rules
+    fieldRules: {
+      'email': {
+        allowedPatterns: ['*@domain.com', 'user@*'],
+        blockedPatterns: ['*@*'] // Too broad
+      },
+      'title': {
+        maxWildcards: 2,
+        preferPrefixPatterns: true
+      },
+      'sku': {
+        enablePatternValidation: true,
+        requiredFormat: /^[A-Z]{2,4}-\d+-[A-Z]*$/
+      }
+    }
+  }
+};
+```
+
+### 4. Query Performance Monitoring
+
+```typescript
+// config/queryMonitoring.ts
+export default {
+  monitoring: {
+    // Query performance tracking
+    performance: {
+      trackAllQueries: true,
+      logSlowQueries: true,
+      slowQueryThreshold: 100, // ms
+      
+      // Query-specific thresholds
+      thresholds: {
+        match_all: 50, // ms
+        wildcard: 30, // ms
+        match: 20, // ms
+        term: 10 // ms
+      }
+    },
+    
+    // Result size monitoring
+    resultSizes: {
+      warnLargeResults: true,
+      largeResultThreshold: 1000,
+      maxResultSize: 10000
+    },
+    
+    // Pattern analysis
+    patterns: {
+      trackWildcardPatterns: true,
+      identifySlowPatterns: true,
+      suggestOptimizations: true
+    }
+  }
+};
+```
+
+### 5. Development vs Production Settings
+
+#### Development Configuration
+```typescript
+// config/development/queryOptimization.ts
+export default {
+  wildcards: {
+    autoDetection: {
+      enabled: true,
+      logConversions: true, // Verbose logging in dev
+      logLevel: 'debug'
+    }
+  },
+  matchAll: {
+    enforcePagination: {
+      enabled: false, // Allow unpaginated queries in dev
+      warnOnly: true
+    }
+  },
+  monitoring: {
+    trackAllQueries: true,
+    logAllQueries: true // Full query logging
+  }
+};
+```
+
+#### Production Configuration
+```typescript
+// config/production/queryOptimization.ts
+export default {
+  wildcards: {
+    autoDetection: {
+      enabled: true,
+      logConversions: false, // Minimal logging in prod
+      logLevel: 'warn'
+    }
+  },
+  matchAll: {
+    enforcePagination: {
+      enabled: true, // Strict pagination in prod
+      maxUnpaginatedResults: 50
+    }
+  },
+  monitoring: {
+    trackAllQueries: false,
+    logSlowQueries: true // Only log problematic queries
   }
 };
 ```

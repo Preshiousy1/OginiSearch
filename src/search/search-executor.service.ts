@@ -5,6 +5,8 @@ import {
   TermQueryStep,
   BooleanQueryStep,
   PhraseQueryStep,
+  WildcardQueryStep,
+  MatchAllQueryStep,
 } from './interfaces/query-processor.interface';
 import { PostingList } from '../index/interfaces/posting.interface';
 import { DocumentStorageService } from '../storage/document-storage/document-storage.service';
@@ -112,6 +114,10 @@ export class SearchExecutorService {
       return this.executeBooleanStep(indexName, step as BooleanQueryStep);
     } else if (step.type === 'phrase') {
       return this.executePhraseStep(indexName, step as PhraseQueryStep);
+    } else if (step.type === 'wildcard') {
+      return this.executeWildcardStep(indexName, step as WildcardQueryStep);
+    } else if (step.type === 'match_all') {
+      return this.executeMatchAllStep(indexName, step as MatchAllQueryStep);
     }
 
     return [];
@@ -188,6 +194,96 @@ export class SearchExecutorService {
 
     // Calculate scores for matching documents
     return this.calculatePhaseScores(indexName, matchingDocs, termPostings);
+  }
+
+  private async executeWildcardStep(
+    indexName: string,
+    step: WildcardQueryStep,
+  ): Promise<Array<{ id: string; score: number }>> {
+    const { pattern, field, compiledPattern } = step;
+
+    this.logger.debug(`Executing wildcard query: ${pattern} on field: ${field}`);
+
+    // Get all terms from the dictionary
+    const allTerms = this.termDictionary.getTerms();
+
+    // Filter terms that match the wildcard pattern
+    const matchingTerms: string[] = [];
+
+    for (const term of allTerms) {
+      // Handle field-specific vs all-field matching
+      if (field && field !== '_all') {
+        // For specific field, check if term starts with field:
+        if (term.startsWith(`${field}:`)) {
+          const termValue = term.substring(field.length + 1);
+          if (compiledPattern && compiledPattern.test(termValue)) {
+            matchingTerms.push(term);
+          }
+        }
+      } else {
+        // For all fields, check the term value part
+        const termParts = term.split(':');
+        if (termParts.length >= 2) {
+          const termValue = termParts.slice(1).join(':'); // Handle terms with colons
+          if (compiledPattern && compiledPattern.test(termValue)) {
+            matchingTerms.push(term);
+          }
+        }
+      }
+    }
+
+    this.logger.debug(`Found ${matchingTerms.length} terms matching wildcard pattern: ${pattern}`);
+
+    // Get posting lists for all matching terms and calculate scores
+    const allScores: Array<{ id: string; score: number }> = [];
+
+    for (const term of matchingTerms) {
+      const postingList = await this.termDictionary.getPostingList(term);
+      if (postingList && postingList.size() > 0) {
+        const scores = this.calculateScores(indexName, postingList, term);
+        allScores.push(...scores);
+      }
+    }
+
+    // Merge scores for documents that match multiple terms
+    return this.mergeWildcardScores(allScores);
+  }
+
+  private async executeMatchAllStep(
+    indexName: string,
+    step: MatchAllQueryStep,
+  ): Promise<Array<{ id: string; score: number }>> {
+    this.logger.debug(`Executing match-all query with boost: ${step.boost}`);
+
+    // Get all documents in the index
+    const result = await this.documentStorage.getDocuments(indexName, {
+      limit: 100000, // Get all documents
+    });
+
+    // Return all documents with uniform score (boosted)
+    const baseScore = step.boost || 1.0;
+
+    return result.documents.map(doc => ({
+      id: doc.documentId,
+      score: baseScore,
+    }));
+  }
+
+  /**
+   * Merge scores from multiple terms for wildcard queries
+   */
+  private mergeWildcardScores(
+    scores: Array<{ id: string; score: number }>,
+  ): Array<{ id: string; score: number }> {
+    const mergedScores = new Map<string, number>();
+
+    // Sum scores for documents that appear in multiple terms
+    for (const { id, score } of scores) {
+      const existingScore = mergedScores.get(id) || 0;
+      mergedScores.set(id, existingScore + score);
+    }
+
+    return Array.from(mergedScores.entries()).map(([id, score]) => ({ id, score }));
   }
 
   private calculateScores(

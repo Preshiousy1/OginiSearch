@@ -7,6 +7,8 @@ import {
   TermQuery,
   PhraseQuery,
   BooleanQuery,
+  WildcardQuery,
+  MatchAllQuery,
   QueryExecutionPlan,
 } from './interfaces/query-processor.interface';
 import { AnalyzerRegistryService } from '../analysis/analyzer-registry.service';
@@ -40,9 +42,142 @@ export class QueryProcessorService implements QueryProcessor {
    * Parse raw query string into structured query objects
    */
   private parseQuery(rawQuery: RawQuery): Query {
-    // If no fields are specified, default to searching all fields
+    // Handle string queries first
+    if (typeof rawQuery.query === 'string') {
+      return this.parseStringQuery(rawQuery);
+    }
+
+    // Handle object queries
+    if (rawQuery.query.match_all) {
+      return this.createMatchAllQuery(rawQuery.query.match_all);
+    }
+
+    if (rawQuery.query.wildcard) {
+      return this.createWildcardQuery(rawQuery.query.wildcard, rawQuery.fields);
+    }
+
+    if (rawQuery.query.match) {
+      return this.parseMatchQuery(rawQuery);
+    }
+
+    if (rawQuery.query.term) {
+      return this.parseTermQuery(rawQuery);
+    }
+
+    // Default to empty boolean query
+    return {
+      type: 'boolean',
+      operator: 'or',
+      clauses: [],
+    };
+  }
+
+  /**
+   * Parse string queries (including wildcard detection)
+   */
+  private parseStringQuery(rawQuery: RawQuery): Query {
+    const queryText = rawQuery.query as string;
+    const fields = rawQuery.fields || ['_all'];
+
+    // Check for wildcard patterns
+    if (this.isWildcardQuery(queryText)) {
+      return this.createWildcardQuery({ value: queryText }, fields);
+    }
+
+    // Check for match-all pattern
+    if (queryText.trim() === '*' || queryText.trim() === '') {
+      return this.createMatchAllQuery({});
+    }
+
+    // Regular string query processing
+    const { text } = this.extractQueryTextAndFields(rawQuery);
+    return this.parseRegularStringQuery(text, fields);
+  }
+
+  /**
+   * Check if a query string contains wildcard patterns
+   */
+  private isWildcardQuery(query: string): boolean {
+    return query.includes('*') || query.includes('?');
+  }
+
+  /**
+   * Create a match-all query
+   */
+  private createMatchAllQuery(matchAllDto: { boost?: number }): MatchAllQuery {
+    return {
+      type: 'match_all',
+      boost: matchAllDto.boost || 1.0,
+    };
+  }
+
+  /**
+   * Create a wildcard query
+   */
+  private createWildcardQuery(
+    wildcardDto: { value: string; boost?: number; field?: string } | Record<string, any>,
+    fields?: string[],
+  ): WildcardQuery {
+    // Handle direct wildcard query format
+    if ('value' in wildcardDto) {
+      return {
+        type: 'wildcard',
+        field: wildcardDto.field || (fields && fields[0]) || '_all',
+        value: wildcardDto.value,
+      };
+    }
+
+    // Handle field-specific wildcard format: { "title": { "value": "smart*" } }
+    const entries = Object.entries(wildcardDto);
+    if (entries.length > 0) {
+      const [field, config] = entries[0];
+      const value = typeof config === 'string' ? config : config.value;
+      return {
+        type: 'wildcard',
+        field,
+        value,
+      };
+    }
+
+    // Fallback
+    return {
+      type: 'wildcard',
+      field: '_all',
+      value: '*',
+    };
+  }
+
+  /**
+   * Parse match queries
+   */
+  private parseMatchQuery(rawQuery: RawQuery): Query {
     const { text, fields } = this.extractQueryTextAndFields(rawQuery);
 
+    // Check if the match query value is actually a wildcard pattern
+    if (this.isWildcardQuery(text)) {
+      return this.createWildcardQuery({ value: text }, fields);
+    }
+
+    // Check for match-all pattern in match query
+    if (text.trim() === '*' || text.trim() === '') {
+      return this.createMatchAllQuery({});
+    }
+
+    return this.parseRegularStringQuery(text, fields);
+  }
+
+  /**
+   * Parse term queries
+   */
+  private parseTermQuery(rawQuery: RawQuery): Query {
+    const { text, fields } = this.extractQueryTextAndFields(rawQuery);
+    return this.parseRegularStringQuery(text, fields);
+  }
+
+  /**
+   * Parse regular string queries (existing logic)
+   */
+  private parseRegularStringQuery(text: string, fields: string[]): Query {
     // Normalize query string
     const normalizedQuery = this.normalizeQuery(text);
 

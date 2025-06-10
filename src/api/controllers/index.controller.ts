@@ -16,6 +16,7 @@ import {
   UpdateIndexSettingsDto,
   IndexResponseDto,
   IndexListResponseDto,
+  MappingsDto,
 } from '../dtos/index.dto';
 import { IndexService } from '../../index/index.service';
 import {
@@ -352,5 +353,38 @@ export class IndexController {
         error: error.message,
       };
     }
+  }
+
+  @Put(':indexName/mappings')
+  @ApiOperation({ summary: 'Update index field mappings' })
+  @ApiParam({ name: 'indexName', description: 'Name of the index' })
+  @ApiBody({
+    description: 'Field mappings configuration',
+    type: MappingsDto,
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Mappings updated successfully',
+    type: IndexResponseDto,
+  })
+  @ApiResponse({ status: 404, description: 'Index not found' })
+  async updateMappings(
+    @Param('indexName') indexName: string,
+    @Body() mappingsDto: MappingsDto,
+  ): Promise<IndexResponseDto> {
+    return this.indexService.updateMappings(indexName, mappingsDto);
+  }
+
+  @Post(':indexName/mappings/auto-detect')
+  @ApiOperation({ summary: 'Auto-detect field mappings from existing documents' })
+  @ApiParam({ name: 'indexName', description: 'Name of the index' })
+  @ApiResponse({
+    status: 200,
+    description: 'Mappings auto-detected and applied successfully',
+    type: IndexResponseDto,
+  })
+  @ApiResponse({ status: 404, description: 'Index not found' })
+  async autoDetectMappings(@Param('indexName') indexName: string): Promise<IndexResponseDto> {
+    return this.indexService.autoDetectMappings(indexName);
   }
 }

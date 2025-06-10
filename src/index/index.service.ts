@@ -131,6 +131,195 @@ export class IndexService {
     this.logger.log(`Document count rebuilt for index ${indexName}: ${total} documents`);
   }
 
+  async updateMappings(indexName: string, mappings: any): Promise<IndexResponseDto> {
+    this.logger.log(`Updating mappings for index: ${indexName}`);
+
+    // Check if index exists
+    const existingIndex = await this.indexStorage.getIndex(indexName);
+    if (!existingIndex) {
+      throw new NotFoundException(`Index with name ${indexName} not found`);
+    }
+
+    // Update index with new mappings
+    const updatedIndex = await this.indexStorage.updateIndex(indexName, {
+      ...existingIndex,
+      mappings: mappings,
+      updatedAt: new Date().toISOString(),
+    });
+
+    return this.mapToIndexResponse(updatedIndex);
+  }
+
+  async autoDetectMappings(indexName: string): Promise<IndexResponseDto> {
+    this.logger.log(`Auto-detecting mappings for index: ${indexName}`);
+
+    // Check if index exists
+    const existingIndex = await this.indexStorage.getIndex(indexName);
+    if (!existingIndex) {
+      throw new NotFoundException(`Index with name ${indexName} not found`);
+    }
+
+    // Get sample documents to analyze
+    const result = await this.documentStorage.getDocuments(indexName, { limit: 10 });
+    if (result.documents.length === 0) {
+      throw new NotFoundException(`No documents found in index ${indexName} to analyze`);
+    }
+
+    // Analyze first few documents to detect field types
+    const sampleSize = Math.min(10, result.documents.length);
+    const fieldTypes = new Map<string, string>();
+    const fieldExamples = new Map<string, Set<any>>();
+
+    for (let i = 0; i < sampleSize; i++) {
+      const doc = result.documents[i];
+      this.analyzeDocumentFields(doc.content, '', fieldTypes, fieldExamples);
+    }
+
+    // Create mappings based on detected field types
+    const detectedMappings = {
+      dynamic: true,
+      properties: {} as Record<string, any>,
+    };
+
+    for (const [fieldPath, fieldType] of fieldTypes.entries()) {
+      detectedMappings.properties[fieldPath] = this.createFieldMapping(
+        fieldType,
+        fieldExamples.get(fieldPath),
+      );
+    }
+
+    // Update index with detected mappings
+    const updatedIndex = await this.indexStorage.updateIndex(indexName, {
+      ...existingIndex,
+      mappings: detectedMappings,
+      updatedAt: new Date().toISOString(),
+    });
+
+    this.logger.log(`Auto-detected ${fieldTypes.size} fields for index ${indexName}`);
+
+    return this.mapToIndexResponse(updatedIndex);
+  }
+
+  /**
+   * Recursively analyze document fields to detect types
+   */
+  private analyzeDocumentFields(
+    obj: any,
+    prefix: string,
+    fieldTypes: Map<string, string>,
+    fieldExamples: Map<string, Set<any>>,
+  ): void {
+    if (!obj || typeof obj !== 'object') {
+      return;
+    }
+
+    for (const [key, value] of Object.entries(obj)) {
+      const fieldPath = prefix ? `${prefix}.${key}` : key;
+
+      if (value === null || value === undefined) {
+        continue;
+      }
+
+      // Initialize examples set if not exists
+      if (!fieldExamples.has(fieldPath)) {
+        fieldExamples.set(fieldPath, new Set());
+      }
+      fieldExamples.get(fieldPath)!.add(value);
+
+      if (typeof value === 'string') {
+        // Determine if it's a long text (use 'text') or short keyword (use 'keyword')
+        const currentType = fieldTypes.get(fieldPath);
+        if (!currentType) {
+          fieldTypes.set(fieldPath, value.length > 50 || value.includes(' ') ? 'text' : 'keyword');
+        } else if (currentType === 'keyword' && (value.length > 50 || value.includes(' '))) {
+          fieldTypes.set(fieldPath, 'text'); // Upgrade to text if we find long strings
+        }
+      } else if (typeof value === 'number') {
+        fieldTypes.set(fieldPath, Number.isInteger(value) ? 'integer' : 'float');
+      } else if (typeof value === 'boolean') {
+        fieldTypes.set(fieldPath, 'boolean');
+      } else if (
+        value instanceof Date ||
+        (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}/.test(value))
+      ) {
+        fieldTypes.set(fieldPath, 'date');
+      } else if (Array.isArray(value)) {
+        // Analyze array elements
+        if (value.length > 0) {
+          const firstElement = value[0];
+          if (typeof firstElement === 'string') {
+            fieldTypes.set(fieldPath, 'keyword'); // Array of strings as keywords
+          } else if (typeof firstElement === 'object') {
+            fieldTypes.set(fieldPath, 'nested');
+            // Also analyze nested objects in array
+            value.forEach((item, index) => {
+              if (typeof item === 'object') {
+                this.analyzeDocumentFields(item, fieldPath, fieldTypes, fieldExamples);
+              }
+            });
+          }
+        }
+      } else if (typeof value === 'object') {
+        // Recursively analyze nested objects
+        fieldTypes.set(fieldPath, 'object');
+        this.analyzeDocumentFields(value, fieldPath, fieldTypes, fieldExamples);
+      }
+    }
+  }
+
+  /**
+   * Create field mapping configuration based on detected type
+   */
+  private createFieldMapping(fieldType: string, examples?: Set<any>): any {
+    const baseMapping = {
+      type: fieldType,
+      store: true,
+      index: true,
+    };
+
+    switch (fieldType) {
+      case 'text':
+        return {
+          ...baseMapping,
+          analyzer: 'standard',
+          fields: {
+            keyword: {
+              type: 'keyword',
+              ignore_above: 256,
+            },
+          },
+        };
+      case 'keyword':
+        return {
+          ...baseMapping,
+          ignore_above: 256,
+        };
+      case 'integer':
+      case 'float':
+        return baseMapping;
+      case 'boolean':
+        return baseMapping;
+      case 'date':
+        return {
+          ...baseMapping,
+          format: 'strict_date_optional_time||epoch_millis',
+        };
+      case 'object':
+        return {
+          type: 'object',
+        };
+      case 'nested':
+        return {
+          type: 'nested',
+        };
+      default:
+        return {
+          type: 'text',
+          analyzer: 'standard',
+        };
+    }
+  }
+
   private mapToIndexResponse(index: any): IndexResponseDto {
     return {
       name: index.name,

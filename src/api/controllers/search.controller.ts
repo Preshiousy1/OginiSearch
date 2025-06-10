@@ -67,6 +67,50 @@ export class SearchController {
           from: 0,
         },
       },
+      match_all: {
+        summary: 'Match all documents',
+        value: {
+          query: {
+            match_all: {
+              boost: 1.0,
+            },
+          },
+          size: 10,
+        },
+      },
+      wildcard: {
+        summary: 'Wildcard query',
+        value: {
+          query: {
+            wildcard: {
+              field: 'title',
+              value: 'smart*',
+            },
+          },
+          size: 10,
+        },
+      },
+      wildcard_string: {
+        summary: 'Wildcard string query',
+        value: {
+          query: '*',
+          size: 10,
+        },
+      },
+      wildcard_pattern: {
+        summary: 'Complex wildcard pattern',
+        value: {
+          query: {
+            wildcard: {
+              title: {
+                value: 'smart*phone?',
+                boost: 1.5,
+              },
+            },
+          },
+          size: 10,
+        },
+      },
       term: {
         summary: 'Term query with filter',
         value: {

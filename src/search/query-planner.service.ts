@@ -4,10 +4,14 @@ import {
   TermQuery,
   PhraseQuery,
   BooleanQuery,
+  WildcardQuery,
+  MatchAllQuery,
   QueryExecutionPlan,
   QueryExecutionStep,
   TermQueryStep,
   BooleanQueryStep,
+  WildcardQueryStep,
+  MatchAllQueryStep,
 } from './interfaces/query-processor.interface';
 import { IndexStatsService } from '../index/index-stats.service';
 
@@ -40,6 +44,10 @@ export class QueryPlannerService {
         return this.createPhraseStep(query as PhraseQuery);
       case 'boolean':
         return this.createBooleanStep(query as BooleanQuery);
+      case 'wildcard':
+        return this.createWildcardStep(query as WildcardQuery);
+      case 'match_all':
+        return this.createMatchAllStep(query as MatchAllQuery);
       default:
         throw new Error(`Unsupported query type: ${query.type}`);
     }
@@ -63,6 +71,71 @@ export class QueryPlannerService {
       cost,
       estimatedResults: documentFrequency,
     };
+  }
+
+  /**
+   * Create an execution step for a wildcard query
+   */
+  private createWildcardStep(query: WildcardQuery): WildcardQueryStep {
+    // Wildcard queries are expensive as they require pattern matching
+    const totalDocs = this.indexStats.totalDocuments;
+
+    // Estimate cost based on wildcard pattern complexity
+    let cost = totalDocs * 2; // Base cost for scanning
+
+    // More wildcards = higher cost
+    const wildcardCount =
+      (query.value.match(/\*/g) || []).length + (query.value.match(/\?/g) || []).length;
+    cost = cost * (1 + wildcardCount * 0.5);
+
+    // Estimate results based on pattern specificity
+    let estimatedResults = totalDocs;
+
+    // More specific patterns should match fewer documents
+    const nonWildcardLength = query.value.replace(/[*?]/g, '').length;
+    if (nonWildcardLength > 0) {
+      estimatedResults = Math.max(1, Math.floor((totalDocs * 0.1) / nonWildcardLength));
+    }
+
+    // Compile regex pattern for execution
+    const regexPattern = this.compileWildcardPattern(query.value);
+
+    return {
+      type: 'wildcard',
+      field: query.field,
+      pattern: query.value,
+      compiledPattern: regexPattern,
+      cost,
+      estimatedResults,
+    };
+  }
+
+  /**
+   * Create an execution step for a match-all query
+   */
+  private createMatchAllStep(query: MatchAllQuery): MatchAllQueryStep {
+    const totalDocs = this.indexStats.totalDocuments;
+
+    return {
+      type: 'match_all',
+      boost: query.boost || 1.0,
+      cost: totalDocs, // Cost is proportional to total documents
+      estimatedResults: totalDocs, // Returns all documents
+    };
+  }
+
+  /**
+   * Compile wildcard pattern to regex
+   */
+  private compileWildcardPattern(pattern: string): RegExp {
+    // Escape regex special characters except * and ?
+    let regexPattern = pattern.replace(/[.+^${}()|[\]\\]/g, '\\$&');
+
+    // Convert wildcard characters to regex equivalents
+    regexPattern = regexPattern.replace(/\*/g, '.*').replace(/\?/g, '.');
+
+    // Make case-insensitive and match from start to end
+    return new RegExp(`^${regexPattern}$`, 'i');
   }
 
   /**

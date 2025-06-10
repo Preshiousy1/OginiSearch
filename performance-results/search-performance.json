@@ -1,55 +1,55 @@
 [
   {
     "test": "basic-query-latency",
-    "p95": 20.176833000000443,
+    "p95": 24.236957999999504,
     "requirement": 100,
     "passed": true
   },
   {
     "test": "complex-query-latency",
-    "p95": 11.200666000000638,
+    "p95": 8.02416699999958,
     "requirement": 150,
     "passed": true
   },
   {
     "test": "term-query-latency",
-    "p95": 4.355666999999812,
+    "p95": 6.846874999999272,
     "requirement": 50,
     "passed": true
   },
   {
     "test": "multi-match-query-latency",
-    "p95": 4.5609170000007,
+    "p95": 4.593791999999667,
     "requirement": 120,
     "passed": true
   },
   {
     "test": "indexing-speed",
-    "docsPerSecond": 19.14075630895287,
+    "docsPerSecond": 14.3473708308446,
     "requirement": 15,
-    "passed": true
+    "passed": false
   },
   {
     "test": "bulk-indexing-speed",
-    "docsPerSecond": 79.52384834962444,
+    "docsPerSecond": 18.07241149923146,
     "requirement": 50,
-    "passed": true
+    "passed": false
   },
   {
     "test": "concurrent-searches",
-    "totalTime": 27.930209000000104,
+    "totalTime": 24.50958299999911,
     "requirement": 500,
     "passed": true
   },
   {
     "test": "mixed-operations",
-    "totalTime": 25.77862500000083,
+    "totalTime": 75.34891599999901,
     "requirement": 1000,
     "passed": true
   },
   {
     "test": "memory-usage-under-load",
-    "heapUsedMB": 261.81822967529297,
+    "heapUsedMB": 330.6156997680664,
     "requirement": 512,
     "passed": true
   }
