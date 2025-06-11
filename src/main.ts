@@ -3,10 +3,16 @@ import { AppModule } from './app.module';
 import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
 import { ValidationPipe } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import * as express from 'express';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
   const configService = app.get(ConfigService);
+
+  // Configure body parser with larger limits
+  const expressApp = app.getHttpAdapter().getInstance();
+  expressApp.use(express.json({ limit: '50mb' }));
+  expressApp.use(express.urlencoded({ limit: '50mb', extended: true }));
 
   // Enable CORS
   app.enableCors({
@@ -33,5 +39,6 @@ async function bootstrap() {
 
   await app.listen(port, host);
   console.log(`Application is running on: ${await app.getUrl()}`);
+  console.log('Body parser configured with 50MB limit for large payloads');
 }
 bootstrap();
