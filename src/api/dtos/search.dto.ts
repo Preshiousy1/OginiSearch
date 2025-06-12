@@ -54,6 +54,15 @@ export class WildcardQueryDto {
 
   @ApiProperty({
     description: 'Wildcard pattern (* for multiple chars, ? for single char)',
+    examples: {
+      prefix: 'smart*',
+      suffix: '*phone',
+      contains: '*wireless*',
+      single_char: 'activ?',
+      complex: '*smart?phone*',
+      sku_pattern: 'PROD-??-*-2024',
+      email_domain: '*@company.com',
+    },
     example: 'smart*',
   })
   @IsString()
@@ -91,10 +100,44 @@ export class SearchQueryDto {
           value: 'smart*',
         },
       },
-      string: 'smartphone',
+      wildcard_complex: {
+        wildcard: {
+          sku: {
+            value: 'PROD-??-*',
+            boost: 1.5,
+          },
+        },
+      },
+      wildcard_email: {
+        wildcard: {
+          field: 'email',
+          value: '*@company.com',
+        },
+      },
+      string_simple: 'smartphone',
+      string_wildcard_prefix: 'video*',
+      string_wildcard_suffix: '*phone',
+      string_wildcard_contains: '*wireless*',
+      string_wildcard_complex: '*smart?phone*',
+      string_match_all: '*',
+      auto_detect_wildcard: {
+        match: {
+          field: 'category',
+          value: 'elect*',
+        },
+      },
+      auto_detect_match_all: {
+        match: {
+          value: '*',
+        },
+      },
+      auto_detect_empty: {
+        match: {
+          value: '',
+        },
+      },
     },
   })
-  @IsObject()
   @IsNotEmpty()
   query:
     | {

@@ -78,8 +78,26 @@ export class SearchController {
           size: 10,
         },
       },
+      match_all_string: {
+        summary: 'Match all using string query',
+        value: {
+          query: '*',
+          size: 10,
+        },
+      },
+      match_all_empty: {
+        summary: 'Match all using empty string (auto-detected)',
+        value: {
+          query: {
+            match: {
+              value: '',
+            },
+          },
+          size: 10,
+        },
+      },
       wildcard: {
-        summary: 'Wildcard query',
+        summary: 'Wildcard query (object format)',
         value: {
           query: {
             wildcard: {
@@ -90,10 +108,36 @@ export class SearchController {
           size: 10,
         },
       },
-      wildcard_string: {
-        summary: 'Wildcard string query',
+      wildcard_string_prefix: {
+        summary: 'Wildcard string query (prefix pattern)',
         value: {
-          query: '*',
+          query: 'video*',
+          size: 10,
+        },
+      },
+      wildcard_string_contains: {
+        summary: 'Wildcard string query (contains pattern)',
+        value: {
+          query: '*wireless*',
+          size: 10,
+        },
+      },
+      wildcard_string_suffix: {
+        summary: 'Wildcard string query (suffix pattern)',
+        value: {
+          query: '*phone',
+          size: 10,
+        },
+      },
+      wildcard_auto_detect: {
+        summary: 'Auto-detected wildcard in match query',
+        value: {
+          query: {
+            match: {
+              field: 'category',
+              value: 'elect*',
+            },
+          },
           size: 10,
         },
       },
@@ -105,6 +149,44 @@ export class SearchController {
               title: {
                 value: 'smart*phone?',
                 boost: 1.5,
+              },
+            },
+          },
+          size: 10,
+        },
+      },
+      wildcard_multi_pattern: {
+        summary: 'Multiple wildcard characters',
+        value: {
+          query: {
+            wildcard: {
+              field: 'sku',
+              value: 'PROD-??-*-2024',
+            },
+          },
+          size: 10,
+        },
+      },
+      wildcard_question_mark: {
+        summary: 'Single character wildcard',
+        value: {
+          query: {
+            wildcard: {
+              field: 'status',
+              value: 'activ?',
+            },
+          },
+          size: 10,
+        },
+      },
+      wildcard_field_specific: {
+        summary: 'Field-specific wildcard object notation',
+        value: {
+          query: {
+            wildcard: {
+              email: {
+                value: '*@company.com',
+                boost: 2.0,
               },
             },
           },
@@ -139,6 +221,38 @@ export class SearchController {
           },
           fields: ['title', 'description'],
           size: 10,
+        },
+      },
+      multiField_wildcard: {
+        summary: 'Wildcard search across multiple fields',
+        value: {
+          query: {
+            match: {
+              value: 'smart*',
+            },
+          },
+          fields: ['title', 'description', 'tags'],
+          size: 10,
+        },
+      },
+      complex_filter: {
+        summary: 'Complex query with filter and sorting',
+        value: {
+          query: {
+            wildcard: {
+              field: 'title',
+              value: '*phone*',
+            },
+          },
+          filter: {
+            range: {
+              field: 'price',
+              gte: 100,
+              lte: 1000,
+            },
+          },
+          sort: 'price:asc',
+          size: 20,
         },
       },
     },

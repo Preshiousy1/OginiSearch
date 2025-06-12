@@ -79,14 +79,14 @@ export class QueryProcessorService implements QueryProcessor {
     const queryText = rawQuery.query as string;
     const fields = rawQuery.fields || ['_all'];
 
+    // Check for match-all pattern FIRST (before wildcard check)
+    if (queryText.trim() === '*' || queryText.trim() === '') {
+      return this.createMatchAllQuery({});
+    }
+
     // Check for wildcard patterns
     if (this.isWildcardQuery(queryText)) {
       return this.createWildcardQuery({ value: queryText }, fields);
-    }
-
-    // Check for match-all pattern
-    if (queryText.trim() === '*' || queryText.trim() === '') {
-      return this.createMatchAllQuery({});
     }
 
     // Regular string query processing

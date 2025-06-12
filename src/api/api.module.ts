@@ -7,9 +7,17 @@ import { DocumentModule } from '../document/document.module';
 import { SearchModule } from '../search/search.module';
 import { MongoDBModule } from '../storage/mongodb/mongodb.module';
 import { StorageModule } from '../storage/storage.module';
+import { IndexingModule } from '../indexing/indexing.module';
 
 @Module({
-  imports: [IndexModule, DocumentModule, SearchModule, MongoDBModule, StorageModule],
+  imports: [
+    IndexModule,
+    DocumentModule,
+    SearchModule,
+    MongoDBModule,
+    StorageModule,
+    IndexingModule,
+  ],
   controllers: [IndexController, DocumentController, SearchController],
 })
 export class ApiModule {}

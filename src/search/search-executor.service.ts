@@ -123,27 +123,71 @@ export class SearchExecutorService {
     return [];
   }
 
+  /**
+   * Reusable method to get postings for a term with fallback mechanism
+   * This ensures consistent behavior between regular and wildcard searches
+   */
+  private async getTermPostings(
+    term: string,
+    useExactMatch = true,
+  ): Promise<Array<{ term: string; postingList: PostingList }>> {
+    const results: Array<{ term: string; postingList: PostingList }> = [];
+
+    if (useExactMatch) {
+      // Try exact match first
+      const exactPostingList = await this.termDictionary.getPostingList(term);
+      if (exactPostingList && exactPostingList.size() > 0) {
+        this.logger.debug(
+          `Found exact posting list for term: ${term} with ${exactPostingList.size()} entries`,
+        );
+        results.push({ term, postingList: exactPostingList });
+        return results;
+      }
+    }
+
+    // Fallback to matching terms (includes exact match + prefix matches)
+    const allTerms = this.termDictionary.getTerms();
+    this.logger.debug(`Total terms available in dictionary: ${allTerms.length}`);
+
+    // Debug: check specifically for video-related terms
+    const videoTerms = allTerms.filter(t => t.includes('video'));
+    this.logger.debug(
+      `Video-related terms in dictionary: ${JSON.stringify(videoTerms.slice(0, 10))}`,
+    );
+
+    // Debug: check if the exact term exists
+    const exactTermExists = allTerms.includes(term);
+    this.logger.debug(`Exact term "${term}" exists in dictionary: ${exactTermExists}`);
+
+    const matchingTerms = allTerms.filter(t => t === term || t.startsWith(term));
+    this.logger.debug(`Found ${matchingTerms.length} matching terms for: ${term}`);
+
+    for (const matchingTerm of matchingTerms) {
+      const postingList = await this.termDictionary.getPostingList(matchingTerm);
+      if (postingList && postingList.size() > 0) {
+        this.logger.debug(
+          `Found posting list for matching term: ${matchingTerm} with ${postingList.size()} entries`,
+        );
+        results.push({ term: matchingTerm, postingList });
+      }
+    }
+
+    return results;
+  }
+
   private async executeTermStep(
     indexName: string,
     step: TermQueryStep,
   ): Promise<Array<{ id: string; score: number }>> {
-    const { term, field = '_all' } = step;
+    const { term } = step;
 
-    const exactPostingList = await this.termDictionary.getPostingList(term);
-    if (exactPostingList && exactPostingList.size() > 0) {
-      const scores = this.calculateScores(indexName, exactPostingList, term);
-      return scores;
-    }
-
-    const matchingTerms = this.getMatchingTerms(term);
+    // Use the reusable method with exact match preference
+    const termPostings = await this.getTermPostings(term, true);
 
     const allScores: Array<{ id: string; score: number }> = [];
-    for (const t of matchingTerms) {
-      const postingList = await this.termDictionary.getPostingList(t);
-      if (postingList && postingList.size() > 0) {
-        const scores = this.calculateScores(indexName, postingList, t);
-        allScores.push(...scores);
-      }
+    for (const { term: matchingTerm, postingList } of termPostings) {
+      const scores = this.calculateScores(indexName, postingList, matchingTerm);
+      allScores.push(...scores);
     }
 
     return allScores;
@@ -203,44 +247,159 @@ export class SearchExecutorService {
     const { pattern, field, compiledPattern } = step;
 
     this.logger.debug(`Executing wildcard query: ${pattern} on field: ${field}`);
+    this.logger.debug(`Compiled pattern: ${compiledPattern}`);
+
+    // Extract the base pattern without wildcards for prefix matching
+    const basePattern = pattern.replace(/[*?]/g, '');
+
+    // For simple prefix wildcards like "video*", use the fallback mechanism directly
+    // This works like regular search but filters results with the wildcard pattern
+    if (pattern.endsWith('*') && !pattern.includes('?') && basePattern.length > 0) {
+      this.logger.debug(`Using direct fallback approach for simple prefix wildcard: ${pattern}`);
+
+      const fallbackTerm =
+        field && field !== '_all' ? `${field}:${basePattern}` : `_all:${basePattern}`;
+      this.logger.debug(`Looking for fallback term: ${fallbackTerm}`);
+
+      // Use the same approach as regular term search with fallback
+      const termPostings = await this.getTermPostings(fallbackTerm, true);
+
+      if (termPostings.length > 0) {
+        this.logger.debug(
+          `Fallback found ${termPostings.length} term postings, filtering with pattern`,
+        );
+
+        // Filter the results with the wildcard pattern
+        const filteredPostings = termPostings.filter(({ term }) => {
+          const termParts = term.split(':');
+          if (termParts.length >= 2) {
+            const termValue = termParts.slice(1).join(':');
+            const matches = compiledPattern && compiledPattern.test(termValue);
+            this.logger.debug(`Term ${term} -> ${termValue} matches pattern: ${matches}`);
+            return matches;
+          }
+          return false;
+        });
+
+        this.logger.debug(
+          `After pattern filtering: ${filteredPostings.length} term postings remain`,
+        );
+
+        // Calculate scores from filtered results
+        const allScores: Array<{ id: string; score: number }> = [];
+        for (const { term, postingList } of filteredPostings) {
+          const scores = this.calculateScores(indexName, postingList, term);
+          allScores.push(...scores);
+        }
+
+        return this.mergeWildcardScores(allScores);
+      }
+    }
+
+    // Fallback to the original implementation for complex patterns
+    this.logger.debug(`Using original term dictionary approach for complex pattern: ${pattern}`);
 
     // Get all terms from the dictionary
     const allTerms = this.termDictionary.getTerms();
+    this.logger.debug(`Total terms in dictionary: ${allTerms.length}`);
+
+    // Debug: check specifically for video-related terms
+    const videoTerms = allTerms.filter(t => t.includes('video'));
+    this.logger.debug(
+      `Video-related terms in dictionary: ${JSON.stringify(videoTerms.slice(0, 10))}`,
+    );
+
+    // Determine if we can use efficient prefix matching
+    const canUsePrefixMatching = pattern.startsWith(basePattern) && basePattern.length > 0;
+
+    this.logger.debug(
+      `Pattern: ${pattern}, Base: ${basePattern}, Can use prefix: ${canUsePrefixMatching}`,
+    );
 
     // Filter terms that match the wildcard pattern
-    const matchingTerms: string[] = [];
+    const candidateTerms: string[] = [];
 
-    for (const term of allTerms) {
-      // Handle field-specific vs all-field matching
+    if (canUsePrefixMatching) {
+      // Use efficient prefix matching approach (like regular term search)
       if (field && field !== '_all') {
-        // For specific field, check if term starts with field:
-        if (term.startsWith(`${field}:`)) {
-          const termValue = term.substring(field.length + 1);
-          if (compiledPattern && compiledPattern.test(termValue)) {
-            matchingTerms.push(term);
+        // For specific field, look for terms starting with 'field:basePattern'
+        const fieldPrefix = `${field}:${basePattern}`;
+        this.logger.debug(`Looking for terms starting with: ${fieldPrefix}`);
+
+        for (const term of allTerms) {
+          if (term.startsWith(fieldPrefix)) {
+            const termValue = term.substring(field.length + 1);
+            if (compiledPattern && compiledPattern.test(termValue)) {
+              this.logger.debug(`Prefix field match: ${term} -> ${termValue} matches pattern`);
+              candidateTerms.push(term);
+            }
           }
         }
       } else {
-        // For all fields, check the term value part
-        const termParts = term.split(':');
-        if (termParts.length >= 2) {
-          const termValue = termParts.slice(1).join(':'); // Handle terms with colons
-          if (compiledPattern && compiledPattern.test(termValue)) {
-            matchingTerms.push(term);
+        // For _all field, look for terms starting with '_all:basePattern'
+        const allFieldPrefix = `_all:${basePattern}`;
+        this.logger.debug(`Looking for _all field terms starting with: ${allFieldPrefix}`);
+
+        for (const term of allTerms) {
+          if (term.startsWith(allFieldPrefix)) {
+            const termValue = term.substring(5); // Remove '_all:' prefix
+            if (compiledPattern && compiledPattern.test(termValue)) {
+              this.logger.debug(`Prefix _all match: ${term} -> ${termValue} matches pattern`);
+              candidateTerms.push(term);
+            }
+          }
+
+          // Also check other fields that might match the pattern
+          const termParts = term.split(':');
+          if (termParts.length >= 2 && termParts[0] !== '_all') {
+            const termValue = termParts.slice(1).join(':');
+            if (termValue.toLowerCase().startsWith(basePattern.toLowerCase())) {
+              if (compiledPattern && compiledPattern.test(termValue)) {
+                this.logger.debug(
+                  `Prefix other field match: ${term} -> ${termValue} matches pattern`,
+                );
+                candidateTerms.push(term);
+              }
+            }
+          }
+        }
+      }
+    } else {
+      // Use full pattern matching for complex wildcards (leading wildcards, multiple wildcards)
+      for (const term of allTerms) {
+        if (field && field !== '_all') {
+          // For specific field, check if term starts with field:
+          if (term.startsWith(`${field}:`)) {
+            const termValue = term.substring(field.length + 1);
+            if (compiledPattern && compiledPattern.test(termValue)) {
+              this.logger.debug(`Field match: ${term} -> ${termValue} matches pattern`);
+              candidateTerms.push(term);
+            }
+          }
+        } else {
+          // For all fields, check the term value part
+          const termParts = term.split(':');
+          if (termParts.length >= 2) {
+            const termValue = termParts.slice(1).join(':');
+            if (compiledPattern && compiledPattern.test(termValue)) {
+              this.logger.debug(`All-field match: ${term} -> ${termValue} matches pattern`);
+              candidateTerms.push(term);
+            }
           }
         }
       }
     }
 
-    this.logger.debug(`Found ${matchingTerms.length} terms matching wildcard pattern: ${pattern}`);
+    this.logger.debug(
+      `Found ${candidateTerms.length} candidate terms matching wildcard pattern: ${pattern}`,
+    );
 
-    // Get posting lists for all matching terms and calculate scores
+    // Process candidate terms using the reusable method
     const allScores: Array<{ id: string; score: number }> = [];
-
-    for (const term of matchingTerms) {
-      const postingList = await this.termDictionary.getPostingList(term);
-      if (postingList && postingList.size() > 0) {
-        const scores = this.calculateScores(indexName, postingList, term);
+    for (const term of candidateTerms) {
+      const termPostings = await this.getTermPostings(term, true);
+      for (const { term: matchingTerm, postingList } of termPostings) {
+        const scores = this.calculateScores(indexName, postingList, matchingTerm);
         allScores.push(...scores);
       }
     }

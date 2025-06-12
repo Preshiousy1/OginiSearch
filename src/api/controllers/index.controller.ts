@@ -30,6 +30,7 @@ import {
   ApiExtraModels,
 } from '@nestjs/swagger';
 import { IndexRepository } from '../../storage/mongodb/repositories/index.repository';
+import { IndexingService } from '../../indexing/indexing.service';
 
 @ApiTags('Indices')
 @ApiExtraModels(CreateIndexDto, UpdateIndexSettingsDto)
@@ -39,6 +40,7 @@ export class IndexController {
   constructor(
     private readonly indexService: IndexService,
     private readonly indexRepository: IndexRepository,
+    private readonly indexingService: IndexingService,
   ) {}
 
   @Post()
@@ -333,6 +335,43 @@ export class IndexController {
   })
   async rebuildDocumentCount(@Param('name') name: string): Promise<void> {
     await this.indexService.rebuildDocumentCount(name);
+  }
+
+  @Post(':name/_rebuild_all')
+  @ApiOperation({
+    summary: 'Rebuild entire index',
+    description:
+      'Completely rebuilds the index including all terms and posting lists. This operation re-indexes all documents to ensure proper term dictionary population and wildcard search functionality. Use this when wildcard searches return unexpected results or after bulk document operations.',
+  })
+  @ApiParam({
+    name: 'name',
+    description: 'Index name to rebuild',
+    example: 'products',
+  })
+  @ApiResponse({
+    status: HttpStatus.OK,
+    description: 'Index rebuilt successfully',
+    schema: {
+      type: 'object',
+      properties: {
+        message: { type: 'string', example: 'Index rebuilt successfully' },
+        indexName: { type: 'string', example: 'products' },
+        documentsProcessed: { type: 'number', example: 100 },
+        termsIndexed: { type: 'number', example: 1500 },
+        took: { type: 'number', example: 2500 },
+      },
+    },
+  })
+  @ApiResponse({
+    status: HttpStatus.NOT_FOUND,
+    description: 'Index with the specified name does not exist',
+  })
+  @ApiResponse({
+    status: HttpStatus.INTERNAL_SERVER_ERROR,
+    description: 'Error during index rebuild process',
+  })
+  async rebuildEntireIndex(@Param('name') name: string): Promise<void> {
+    await this.indexingService.updateAll(name);
   }
 
   @Get('debug/mongodb')
