@@ -5,6 +5,7 @@ import {
   BadRequestException,
   Inject,
   OnModuleInit,
+  forwardRef,
 } from '@nestjs/common';
 import { IndexService } from '../index/index.service';
 import { DocumentStorageService } from '../storage/document-storage/document-storage.service';
@@ -21,17 +22,23 @@ import { SearchService } from '../search/search.service';
 import { IndexingService } from '../indexing/indexing.service';
 import { InMemoryTermDictionary } from '../index/term-dictionary';
 import { SearchQueryDto } from '../api/dtos/search.dto';
+import {
+  BulkIndexingService,
+  BulkIndexingOptions,
+} from '../indexing/services/bulk-indexing.service';
 
 @Injectable()
 export class DocumentService implements OnModuleInit {
   private readonly logger = new Logger(DocumentService.name);
 
   constructor(
-    private readonly documentStorage: DocumentStorageService,
+    private readonly documentStorageService: DocumentStorageService,
     private readonly indexService: IndexService,
     private readonly indexingService: IndexingService,
     private readonly searchService: SearchService,
     @Inject('TERM_DICTIONARY') private readonly termDictionary: InMemoryTermDictionary,
+    @Inject(forwardRef(() => BulkIndexingService))
+    private readonly bulkIndexingService: BulkIndexingService,
   ) {}
 
   /**
@@ -60,7 +67,7 @@ export class DocumentService implements OnModuleInit {
         this.logger.log(`Rebuilding index: ${index.name}`);
 
         // Get all documents for this index
-        const documents = await this.documentStorage.getDocuments(index.name);
+        const documents = await this.documentStorageService.getDocuments(index.name);
         let processed = 0;
 
         for (const doc of documents.documents) {
@@ -101,7 +108,7 @@ export class DocumentService implements OnModuleInit {
     const documentId = documentDto.id || uuidv4();
 
     // Store document in storage
-    const storedDocument = await this.documentStorage.storeDocument(indexName, {
+    const storedDocument = await this.documentStorageService.storeDocument(indexName, {
       documentId,
       content: documentDto.document,
       metadata: {},
@@ -124,17 +131,128 @@ export class DocumentService implements OnModuleInit {
     documents: IndexDocumentDto[],
   ): Promise<BulkResponseDto> {
     this.logger.log(`Bulk indexing ${documents.length} documents in ${indexName}`);
-
-    // Check if index exists
-    await this.checkIndexExists(indexName);
-
-    // 🧠 Smart Auto-Detection: Use entire batch as sample for better detection
-    await this.ensureFieldMappings(
-      indexName,
-      documents.map(doc => doc.document),
-    );
-
     const startTime = Date.now();
+
+    try {
+      // Check if index exists
+      await this.checkIndexExists(indexName);
+
+      // Handle empty array
+      if (documents.length === 0) {
+        return {
+          took: Date.now() - startTime,
+          errors: false,
+          items: [],
+          successCount: 0,
+        };
+      }
+
+      // 🧠 Smart Auto-Detection: Use entire batch as sample for better detection
+      await this.ensureFieldMappings(
+        indexName,
+        documents.map(doc => doc.document),
+      );
+
+      // Generate IDs for documents that don't have them
+      const documentsWithIds = documents.map(doc => ({
+        id: doc.id || uuidv4(),
+        document: doc.document,
+      }));
+
+      // 🎯 Delegate All Batch Processing to BulkIndexingService
+      // This eliminates duplication and uses the optimized queue-based system
+
+      // For very small batches (< 5 documents), process synchronously for immediate response
+      if (documents.length < 5) {
+        this.logger.debug(`Processing ${documents.length} documents synchronously (small batch)`);
+        return await this.processBatchSynchronously(indexName, documentsWithIds, startTime);
+      }
+
+      // For all other batches, delegate to BulkIndexingService with smart options
+      const isRealTimeRequest = documents.length <= 20; // Threshold for real-time vs background
+
+      const options: BulkIndexingOptions = {
+        batchSize: isRealTimeRequest ? Math.min(documents.length, 10) : 50,
+        skipDuplicates: true,
+        enableProgress: !isRealTimeRequest,
+        priority: isRealTimeRequest ? 8 : 5, // Higher priority for real-time
+        retryAttempts: isRealTimeRequest ? 2 : 3,
+      };
+
+      this.logger.debug(
+        `Delegating ${documents.length} documents to BulkIndexingService (${
+          isRealTimeRequest ? 'real-time' : 'background'
+        } mode)`,
+      );
+
+      const batchId = await this.bulkIndexingService.queueBatchDocuments(
+        indexName,
+        documentsWithIds,
+        options,
+      );
+
+      if (!batchId) {
+        // All documents were duplicates
+        return {
+          took: Date.now() - startTime,
+          errors: false,
+          items: documentsWithIds.map(doc => ({
+            id: doc.id,
+            index: indexName,
+            success: true,
+            status: 200, // OK - duplicate
+          })),
+          successCount: 0,
+        };
+      }
+
+      // Return appropriate status based on processing mode
+      const statusCode = isRealTimeRequest ? 202 : 202; // Accepted for processing
+      const message = isRealTimeRequest
+        ? 'Documents queued for high-priority processing'
+        : 'Documents queued for background processing';
+
+      this.logger.log(`${message}: batch ${batchId} with ${documents.length} documents`);
+
+      return {
+        took: Date.now() - startTime,
+        errors: false,
+        items: documentsWithIds.map(doc => ({
+          id: doc.id,
+          index: indexName,
+          success: true,
+          status: statusCode,
+          batchId, // Include batch ID for tracking
+        })),
+        successCount: documents.length,
+      };
+    } catch (error) {
+      this.logger.error(`Bulk indexing failed: ${error.message}`);
+
+      // Return error response in expected format
+      return {
+        took: Date.now() - startTime,
+        errors: true,
+        items: documents.map(doc => ({
+          id: doc.id || 'unknown',
+          index: indexName,
+          success: false,
+          status: 500,
+          error: error.message,
+        })),
+        successCount: 0,
+      };
+    }
+  }
+
+  /**
+   * Process small batches synchronously for immediate response
+   */
+  private async processBatchSynchronously(
+    indexName: string,
+    documents: Array<{ id: string; document: any }>,
+    startTime: number,
+  ): Promise<BulkResponseDto> {
     const results = [];
     let hasErrors = false;
     let successCount = 0;
@@ -142,10 +260,10 @@ export class DocumentService implements OnModuleInit {
     // Process each document
     for (const doc of documents) {
       try {
-        const documentId = doc.id || uuidv4();
+        const documentId = doc.id;
 
         // Store document
-        await this.documentStorage.storeDocument(indexName, {
+        await this.documentStorageService.storeDocument(indexName, {
           documentId,
           content: doc.document,
           metadata: {},
@@ -155,7 +273,7 @@ export class DocumentService implements OnModuleInit {
         await this.indexingService.indexDocument(indexName, documentId, doc.document, true);
 
         results.push({
-          documentId,
+          id: documentId,
           index: indexName,
           success: true,
           status: 201,
@@ -165,7 +283,7 @@ export class DocumentService implements OnModuleInit {
       } catch (error) {
         hasErrors = true;
         results.push({
-          documentId: doc.id || 'unknown',
+          id: doc.id || 'unknown',
           index: indexName,
           success: false,
           status: 400,
@@ -191,7 +309,7 @@ export class DocumentService implements OnModuleInit {
     await this.checkIndexExists(indexName);
 
     // Retrieve document
-    const document = await this.documentStorage.getDocument(indexName, id);
+    const document = await this.documentStorageService.getDocument(indexName, id);
 
     if (!document) {
       throw new NotFoundException(`Document with id ${id} not found in index ${indexName}`);
@@ -217,13 +335,13 @@ export class DocumentService implements OnModuleInit {
     await this.checkIndexExists(indexName);
 
     // Check if document exists
-    const existingDoc = await this.documentStorage.getDocument(indexName, id);
+    const existingDoc = await this.documentStorageService.getDocument(indexName, id);
     if (!existingDoc) {
       throw new NotFoundException(`Document with id ${id} not found in index ${indexName}`);
     }
 
     // Update document
-    const updatedDoc = await this.documentStorage.updateDocument(indexName, id, document, {
+    const updatedDoc = await this.documentStorageService.updateDocument(indexName, id, document, {
       metadata: existingDoc.metadata,
     });
 
@@ -246,7 +364,7 @@ export class DocumentService implements OnModuleInit {
     await this.checkIndexExists(indexName);
 
     // Delete from storage
-    const deleted = await this.documentStorage.deleteDocument(indexName, id);
+    const deleted = await this.documentStorageService.deleteDocument(indexName, id);
 
     if (!deleted) {
       throw new NotFoundException(`Document with id ${id} not found in index ${indexName}`);
@@ -297,7 +415,7 @@ export class DocumentService implements OnModuleInit {
         this.logger.log(`Looking for documents with ${field} containing "${value}"`);
 
         // Get documentIds that match the filter from document storage
-        const result = await this.documentStorage.getDocuments(indexName, {
+        const result = await this.documentStorageService.getDocuments(indexName, {
           filter: { [field]: value },
         });
 
@@ -313,7 +431,10 @@ export class DocumentService implements OnModuleInit {
         const documentIds = result.documents.map(doc => doc.documentId);
 
         // Delete documents from storage
-        const deleted = await this.documentStorage.bulkDeleteDocuments(indexName, documentIds);
+        const deleted = await this.documentStorageService.bulkDeleteDocuments(
+          indexName,
+          documentIds,
+        );
 
         // Remove documents from index
         for (const id of documentIds) {
@@ -355,7 +476,7 @@ export class DocumentService implements OnModuleInit {
     const startTime = Date.now();
 
     // Get documents with pagination
-    const { documents, total } = await this.documentStorage.getDocuments(indexName, options);
+    const { documents, total } = await this.documentStorageService.getDocuments(indexName, options);
 
     // Convert to response format
     const response: ListDocumentsResponseDto = {
@@ -637,6 +758,58 @@ export class DocumentService implements OnModuleInit {
           type: 'text',
           analyzer: 'standard',
         };
+    }
+  }
+
+  /**
+   * Process documents directly without queue delegation
+   * This method is used by the queue processor to avoid infinite loops
+   */
+  async processBatchDirectly(
+    indexName: string,
+    documents: Array<{ id: string; document: any }>,
+  ): Promise<BulkResponseDto> {
+    this.logger.log(`Processing ${documents.length} documents directly in ${indexName}`);
+    const startTime = Date.now();
+
+    try {
+      // Check if index exists
+      await this.checkIndexExists(indexName);
+
+      // Handle empty array
+      if (documents.length === 0) {
+        return {
+          took: Date.now() - startTime,
+          errors: false,
+          items: [],
+          successCount: 0,
+        };
+      }
+
+      // Ensure field mappings
+      await this.ensureFieldMappings(
+        indexName,
+        documents.map(doc => doc.document),
+      );
+
+      // Process documents directly using the synchronous method
+      return await this.processBatchSynchronously(indexName, documents, startTime);
+    } catch (error) {
+      this.logger.error(`Direct batch processing failed: ${error.message}`);
+
+      // Return error response in expected format
+      return {
+        took: Date.now() - startTime,
+        errors: true,
+        items: documents.map(doc => ({
+          id: doc.id || 'unknown',
+          index: indexName,
+          success: false,
+          status: 500,
+          error: error.message,
+        })),
+        successCount: 0,
+      };
     }
   }
 }

@@ -107,7 +107,15 @@ export class DocumentResponseDto {
 export class BulkResponseDto {
   @ApiProperty({
     name: 'items',
-    example: [{ id: '123', index: 'my-index', success: true, status: 200 }],
+    example: [
+      {
+        id: '123',
+        index: 'my-index',
+        success: true,
+        status: 200,
+        batchId: 'batch:my-index:1234567890',
+      },
+    ],
     description: 'Array of document responses',
   })
   items: {
@@ -116,6 +124,7 @@ export class BulkResponseDto {
     success: boolean;
     status: number;
     error?: string;
+    batchId?: string;
   }[];
 
   @ApiProperty({

@@ -10,7 +10,7 @@ services:
     networks:
       - ogini-network
     ports:
-      - "3000:3000"
+      - '3000:3000'
     volumes:
       - .:/usr/src/app
       - /usr/src/app/node_modules
@@ -20,12 +20,17 @@ services:
       - PORT=3000
       - MONGODB_URI=mongodb://mongodb:27017/ogini
       - ROCKSDB_PATH=/usr/src/app/data/rocksdb
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_DB=0
     depends_on:
       mongodb:
         condition: service_healthy
+      redis:
+        condition: service_healthy
     command: npm run dev:start
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:3000/health"]
+      test: ['CMD', 'wget', '-qO-', 'http://localhost:3000/health']
       interval: 30s
       timeout: 5s
       retries: 3
@@ -36,7 +41,7 @@ services:
     networks:
       - ogini-network
     ports:
-      - "27017:27017"
+      - '27017:27017'
     volumes:
       - mongodb-data:/data/db
     environment:
@@ -48,9 +53,26 @@ services:
       retries: 5
       start_period: 10s
 
+  redis:
+    image: redis:7-alpine
+    networks:
+      - ogini-network
+    ports:
+      - '6379:6379'
+    volumes:
+      - redis-data:/data
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
 volumes:
   mongodb-data:
-  rocksdb-data: 
+  rocksdb-data:
+  redis-data:
 
 networks:
   ogini-network:

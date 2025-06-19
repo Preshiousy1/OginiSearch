@@ -32,6 +32,8 @@
     "coverage:verify": "./scripts/verify-coverage.sh"
   },
   "dependencies": {
+    "@liaoliaots/nestjs-redis": "^10.0.0",
+    "@nestjs/bull": "^11.0.2",
     "@nestjs/common": "^11.0.13",
     "@nestjs/config": "^4.0.2",
     "@nestjs/core": "^11.0.13",
@@ -39,12 +41,15 @@
     "@nestjs/platform-express": "^11.0.13",
     "@nestjs/schedule": "^6.0.0",
     "@nestjs/swagger": "^11.1.6",
+    "@nestjs/typeorm": "^11.0.0",
     "axios": "^1.9.0",
     "body-parser": "^2.2.0",
+    "bull": "^4.12.2",
     "class-transformer": "^0.5.1",
     "class-validator": "^0.14.1",
     "classic-level": "^3.0.0",
     "encoding-down": "^7.1.0",
+    "ioredis": "^5.3.2",
     "level-rocksdb": "^5.0.0",
     "levelup": "^5.1.1",
     "marked": "^15.0.11",
@@ -54,6 +59,7 @@
     "rocksdb": "^5.2.1",
     "rxjs": "^7.2.0",
     "swagger-ui-express": "^5.0.1",
+    "typeorm": "^0.3.17",
     "uuid": "^11.1.0"
   },
   "devDependencies": {
@@ -62,12 +68,13 @@
     "@nestjs/schematics": "^9.0.0",
     "@nestjs/testing": "^11.0.13",
     "@types/body-parser": "^1.19.6",
+    "@types/bull": "^4.10.0",
     "@types/encoding-down": "^5.0.5",
     "@types/express": "^4.17.13",
     "@types/jest": "29.5.0",
     "@types/levelup": "^5.1.5",
     "@types/mongoose": "^5.11.96",
-    "@types/node": "18.15.11",
+    "@types/node": "^20.5.0",
     "@types/supertest": "^2.0.11",
     "@typescript-eslint/eslint-plugin": "^5.0.0",
     "@typescript-eslint/parser": "^5.0.0",
@@ -84,7 +91,7 @@
     "ts-loader": "^9.2.3",
     "ts-node": "^10.0.0",
     "tsconfig-paths": "4.2.0",
-    "typescript": "^4.7.4"
+    "typescript": "^5.1.6"
   },
   "jest": {
     "moduleFileExtensions": [
