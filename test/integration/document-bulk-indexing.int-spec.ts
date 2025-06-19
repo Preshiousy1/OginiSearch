@@ -1,9 +1,7 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { INestApplication } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
-import { RedisModule } from '@liaoliaots/nestjs-redis';
 import { DocumentService } from '../../src/document/document.service';
-import { BulkIndexingService } from '../../src/indexing/services/bulk-indexing.service';
 import { IndexService } from '../../src/index/index.service';
 import { DocumentStorageService } from '../../src/storage/document-storage/document-storage.service';
 import { IndexStorageService } from '../../src/storage/index-storage/index-storage.service';
@@ -13,6 +11,7 @@ import { InMemoryTermDictionary } from '../../src/index/term-dictionary';
 import { DocumentProcessorService } from '../../src/document/document-processor.service';
 import { IndexStatsService } from '../../src/index/index-stats.service';
 import { IndexDocumentDto } from '../../src/api/dtos/document.dto';
+import { BulkIndexingService } from 'src/indexing/services/bulk-indexing.service';
 
 describe('DocumentService Bulk Indexing Integration', () => {
   let app: INestApplication;
@@ -29,12 +28,6 @@ describe('DocumentService Bulk Indexing Integration', () => {
         ConfigModule.forRoot({
           isGlobal: true,
           envFilePath: '.env.test',
-        }),
-        RedisModule.forRoot({
-          config: {
-            host: process.env.REDIS_HOST || 'localhost',
-            port: parseInt(process.env.REDIS_PORT) || 6379,
-          },
         }),
       ],
       providers: [

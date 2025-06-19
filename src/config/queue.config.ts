@@ -16,7 +16,7 @@ export default registerAs('queue', () => ({
     enableReadyCheck: false,
     lazyConnect: true,
     // Connection pool
-    family: 4,
+    family: 0,
     keepAlive: true,
     // Performance optimizations
     maxMemoryPolicy: 'allkeys-lru',

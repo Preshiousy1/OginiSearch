@@ -32,7 +32,6 @@
     "coverage:verify": "./scripts/verify-coverage.sh"
   },
   "dependencies": {
-    "@liaoliaots/nestjs-redis": "^10.0.0",
     "@nestjs/bull": "^11.0.2",
     "@nestjs/common": "^11.0.13",
     "@nestjs/config": "^4.0.2",
