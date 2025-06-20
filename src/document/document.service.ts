@@ -46,10 +46,13 @@ export class DocumentService implements OnModuleInit {
    */
   async onModuleInit() {
     if (this.termDictionary.size() === 0) {
-      this.logger.log(
-        'Term dictionary is empty. This may be because the application restarted. Will attempt to rebuild...',
-      );
-      await this.rebuildIndex();
+      this.logger.log('Term dictionary is empty. This is expected for fresh container starts.');
+      this.logger.log('Term dictionary will be populated as documents are indexed/searched.');
+      this.logger.log('SKIPPING auto-rebuild to prevent 1+ hour reindexing on container restart.');
+      // DO NOT trigger full rebuild on container restart
+      // The PersistentTermDictionaryService will restore what's needed
+      // Use manual rebuild endpoint if explicit rebuild is needed
+      // await this.rebuildIndex()
     }
   }
 
@@ -89,6 +92,53 @@ export class DocumentService implements OnModuleInit {
       }
     } catch (error) {
       this.logger.error(`Error rebuilding index: ${error.message}`);
+    }
+  }
+
+  /**
+   * Rebuild a specific index from existing documents in storage
+   */
+  async rebuildSpecificIndex(indexName: string): Promise<void> {
+    try {
+      this.logger.log(`Starting manual rebuild for index: ${indexName}`);
+
+      // Verify index exists
+      await this.checkIndexExists(indexName);
+
+      // Get all documents for this index
+      const documents = await this.documentStorageService.getDocuments(indexName);
+      let processed = 0;
+      const startTime = Date.now();
+
+      this.logger.log(`Found ${documents.documents.length} documents to reindex in ${indexName}`);
+
+      for (const doc of documents.documents) {
+        try {
+          await this.indexingService.indexDocument(indexName, doc.documentId, doc.content);
+          processed++;
+
+          if (processed % 100 === 0) {
+            const elapsed = Date.now() - startTime;
+            const rate = processed / (elapsed / 1000);
+            this.logger.log(
+              `Processed ${processed}/${documents.documents.length} documents for index ${indexName} (${rate.toFixed(1)} docs/sec)`,
+            );
+          }
+        } catch (error) {
+          this.logger.error(
+            `Failed to index document ${doc.documentId} in ${indexName}: ${error.message}`,
+          );
+        }
+      }
+
+      const elapsed = Date.now() - startTime;
+      const rate = processed / (elapsed / 1000);
+      this.logger.log(
+        `Completed manual rebuild for index ${indexName}: ${processed} documents processed in ${elapsed}ms (${rate.toFixed(1)} docs/sec)`,
+      );
+    } catch (error) {
+      this.logger.error(`Error rebuilding index ${indexName}: ${error.message}`);
+      throw error;
     }
   }
 

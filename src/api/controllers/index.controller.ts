@@ -31,6 +31,7 @@ import {
 } from '@nestjs/swagger';
 import { IndexRepository } from '../../storage/mongodb/repositories/index.repository';
 import { IndexingService } from '../../indexing/indexing.service';
+import { DocumentService } from '../../document/document.service';
 
 @ApiTags('Indices')
 @ApiExtraModels(CreateIndexDto, UpdateIndexSettingsDto)
@@ -41,6 +42,7 @@ export class IndexController {
     private readonly indexService: IndexService,
     private readonly indexRepository: IndexRepository,
     private readonly indexingService: IndexingService,
+    private readonly documentService: DocumentService,
   ) {}
 
   @Post()
@@ -335,6 +337,57 @@ export class IndexController {
   })
   async rebuildDocumentCount(@Param('name') name: string): Promise<void> {
     await this.indexService.rebuildDocumentCount(name);
+  }
+
+  @Post(':name/_rebuild_index')
+  @ApiOperation({
+    summary: 'Manually rebuild search index',
+    description:
+      'Manually rebuilds the search index by reprocessing all documents. Use only when necessary as this is a time-consuming operation.',
+  })
+  @ApiParam({
+    name: 'name',
+    description: 'Index name to rebuild',
+    example: 'businesses',
+  })
+  @ApiResponse({
+    status: HttpStatus.ACCEPTED,
+    description: 'Index rebuild started successfully',
+    schema: {
+      type: 'object',
+      properties: {
+        message: { type: 'string', example: 'Index rebuild started for businesses' },
+        warning: {
+          type: 'string',
+          example: 'This operation may take a long time for large indices',
+        },
+        indexName: { type: 'string', example: 'businesses' },
+      },
+    },
+  })
+  @ApiResponse({
+    status: HttpStatus.NOT_FOUND,
+    description: 'Index with the specified name does not exist',
+  })
+  async manualRebuildIndex(@Param('name') name: string): Promise<{
+    message: string;
+    warning: string;
+    indexName: string;
+  }> {
+    // Verify index exists first
+    await this.indexService.getIndex(name);
+
+    // Start the rebuild process in the background
+    // Note: We don't await this to return immediately
+    this.documentService.rebuildSpecificIndex(name).catch(error => {
+      console.error(`Manual rebuild failed for index ${name}:`, error);
+    });
+
+    return {
+      message: `Index rebuild started for ${name}`,
+      warning: 'This operation may take a long time for large indices',
+      indexName: name,
+    };
   }
 
   @Post(':name/_rebuild_all')
