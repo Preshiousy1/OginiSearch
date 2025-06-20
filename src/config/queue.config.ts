@@ -42,7 +42,7 @@ export default registerAs('queue', () => ({
         concurrency: parseInt(process.env.INDEXING_CONCURRENCY, 10) || 5,
         maxStalledCount: 1,
         stalledInterval: 30 * 1000, // 30 seconds
-        maxConcurrency: 10,
+        maxConcurrency: parseInt(process.env.INDEXING_CONCURRENCY, 10) || 10,
       },
 
       'bulk-indexing': {
@@ -50,7 +50,7 @@ export default registerAs('queue', () => ({
         concurrency: parseInt(process.env.BULK_INDEXING_CONCURRENCY, 10) || 1,
         maxStalledCount: 1,
         stalledInterval: 60 * 1000, // 1 minute
-        maxConcurrency: 2, // Limited for bulk operations
+        maxConcurrency: parseInt(process.env.BULK_INDEXING_CONCURRENCY, 10) || 2,
       },
 
       'document-processing': {
@@ -58,7 +58,7 @@ export default registerAs('queue', () => ({
         concurrency: parseInt(process.env.DOC_PROCESSING_CONCURRENCY, 10) || 8,
         maxStalledCount: 2,
         stalledInterval: 15 * 1000, // 15 seconds
-        maxConcurrency: 15,
+        maxConcurrency: parseInt(process.env.DOC_PROCESSING_CONCURRENCY, 10) || 15,
       },
     },
   },
