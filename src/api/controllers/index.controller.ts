@@ -526,6 +526,20 @@ export class IndexController {
     description:
       'Destroys ALL data: term dictionary, RocksDB, MongoDB. Requires RESET_KEY environment variable.',
   })
+  @ApiBody({
+    description: 'Reset key for authorization',
+    schema: {
+      type: 'object',
+      properties: {
+        resetKey: {
+          type: 'string',
+          description: 'Secret key required to authorize system reset',
+          example: 'test-reset-key-123',
+        },
+      },
+      required: ['resetKey'],
+    },
+  })
   @ApiResponse({
     status: 200,
     description: 'System reset completed successfully',
@@ -538,8 +552,28 @@ export class IndexController {
     },
   })
   @ApiResponse({
-    status: 403,
+    status: 400,
     description: 'Invalid or missing reset key',
+    schema: {
+      type: 'object',
+      properties: {
+        statusCode: { type: 'number', example: 400 },
+        message: { type: 'string', example: 'Invalid reset key' },
+        error: { type: 'string', example: 'Bad Request' },
+      },
+    },
+  })
+  @ApiResponse({
+    status: 500,
+    description: 'System reset failed due to internal error',
+    schema: {
+      type: 'object',
+      properties: {
+        statusCode: { type: 'number', example: 500 },
+        message: { type: 'string', example: 'System reset failed: Database connection error' },
+        error: { type: 'string', example: 'Internal Server Error' },
+      },
+    },
   })
   async completeSystemReset(@Body() body: { resetKey: string }) {
     // Temporary hardcoded key for testing

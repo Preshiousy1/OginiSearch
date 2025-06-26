@@ -4,8 +4,15 @@
 The Ogini Search Engine provides a comprehensive RESTful API for index management, document operations, and advanced search capabilities. This document covers all crucial endpoints with correct query structures and usage examples.
 
 ## Base URL
+
+**Development:**
 ```
 http://localhost:3000
+```
+
+**Production:**
+```
+https://oginisearch-production.up.railway.app
 ```
 
 ## Authentication
@@ -332,6 +339,92 @@ x-api-key: <api_key>
   "error": "Connection timeout"
 }
 ```
+
+### 2.10 Clear Index Cache
+**Endpoint:** `POST /api/indices/{index_name}/clear-cache`
+
+**Description:** Clears the term dictionary cache for a specific index to free up memory and resolve potential caching issues.
+
+**Request:** No body required
+
+**Response:**
+```json
+{
+  "message": "Cache cleared successfully for index products",
+  "clearedTerms": 1247
+}
+```
+
+### 2.11 Rebuild Entire Index
+**Endpoint:** `POST /api/indices/{index_name}/_rebuild_all`
+
+**Description:** Completely rebuilds the index including all terms and posting lists. This operation re-indexes all documents to ensure proper term dictionary population and wildcard search functionality. Use this when wildcard searches return unexpected results or after bulk document operations.
+
+**Response:**
+```json
+{
+  "message": "Index rebuilt successfully",
+  "indexName": "products",
+  "documentsProcessed": 100,
+  "termsIndexed": 1500,
+  "took": 2500
+}
+```
+
+### 2.12 Manual Rebuild Search Index
+**Endpoint:** `POST /api/indices/{index_name}/_rebuild_index`
+
+**Description:** Manually rebuilds the search index by reprocessing all documents. This is a background operation that returns immediately. Use only when necessary as this is a time-consuming operation.
+
+**Response:**
+```json
+{
+  "message": "Index rebuild started for businesses",
+  "warning": "This operation may take a long time for large indices",
+  "indexName": "businesses"
+}
+```
+
+### 2.13 Complete System Reset (DESTRUCTIVE)
+**Endpoint:** `POST /api/indices/system/reset`
+
+**⚠️ WARNING: This endpoint destroys ALL data in the system including term dictionary, RocksDB, and MongoDB indices.**
+
+**Request Body:**
+```json
+{
+  "resetKey": "test-reset-key-123"
+}
+```
+
+**Response (Success):**
+```json
+{
+  "message": "Complete system reset successful - ALL DATA DESTROYED",
+  "resetComponents": [
+    "Term Dictionary",
+    "RocksDB", 
+    "MongoDB Indices",
+    "Document Storage"
+  ],
+  "timestamp": "2023-06-15T10:00:00.000Z"
+}
+```
+
+**Response (Invalid Key):**
+```json
+{
+  "statusCode": 400,
+  "message": "Invalid reset key",
+  "error": "Bad Request"
+}
+```
+
+**Security Notes:**
+- Requires valid `resetKey` matching environment variable `RESET_KEY` or hardcoded test key
+- All data is permanently destroyed
+- Cannot be undone
+- Use only for testing or complete system reinitialization
 
 ---
 
@@ -832,11 +925,114 @@ You can also use a simple string for backward compatibility:
 }
 ```
 
+### 4.3 Clear Search Dictionary
+**Endpoint:** `DELETE /api/indices/{index_name}/_search/_clear_dictionary`
+
+**Description:** Clears the term dictionary for the specific index to resolve search issues or free up memory.
+
+**Response:**
+```json
+{
+  "message": "Term dictionary cleared successfully"
+}
+```
+
 ---
 
-## 5. Wildcard & Match-All Query Patterns
+## 5. Bulk Indexing Management
 
-### 5.1 Wildcard Pattern Reference
+### 5.1 Start Bulk Indexing Job
+**Endpoint:** `POST /bulk-indexing/start`
+
+**Request Body:**
+```json
+{
+  "indexName": "products",
+  "documents": [
+    {
+      "id": "prod-1",
+      "document": {
+        "title": "Product 1",
+        "description": "Product description",
+        "price": 99.99
+      }
+    }
+  ],
+  "options": {
+    "batchSize": 100,
+    "concurrency": 5
+  }
+}
+```
+
+**Response:**
+```json
+{
+  "batchId": "batch-123e4567-e89b-12d3-a456-426614174000",
+  "message": "Bulk indexing job started",
+  "totalDocuments": 1000,
+  "estimatedTime": "2 minutes"
+}
+```
+
+### 5.2 Get Bulk Indexing Status
+**Endpoint:** `GET /bulk-indexing/status/{batch_id}`
+
+**Response:**
+```json
+{
+  "batchId": "batch-123e4567-e89b-12d3-a456-426614174000",
+  "status": "processing",
+  "progress": {
+    "total": 1000,
+    "processed": 750,
+    "failed": 5,
+    "remaining": 245,
+    "percentage": 75.0
+  },
+  "performance": {
+    "documentsPerSecond": 45.2,
+    "estimatedTimeRemaining": "6 seconds"
+  },
+  "startedAt": "2023-06-15T10:00:00.000Z",
+  "lastUpdated": "2023-06-15T10:02:15.000Z"
+}
+```
+
+### 5.3 Get All Bulk Jobs Status
+**Endpoint:** `GET /bulk-indexing/status`
+
+**Response:**
+```json
+{
+  "jobs": [
+    {
+      "batchId": "batch-123",
+      "status": "completed",
+      "progress": {
+        "total": 1000,
+        "processed": 1000,
+        "failed": 0,
+        "percentage": 100.0
+      }
+    }
+  ],
+  "total": 1
+}
+```
+
+### 5.4 Clear Job Records
+**Endpoint:** `DELETE /bulk-indexing/progress/{batch_id}`
+
+**Description:** Clears job records for a specific batch to clean up completed or failed jobs.
+
+**Response:** `204 No Content`
+
+---
+
+## 6. Wildcard & Match-All Query Patterns
+
+### 6.1 Wildcard Pattern Reference
 
 | Pattern | Description | Example | Matches |
 |---------|-------------|---------|---------|
@@ -847,7 +1043,7 @@ You can also use a simple string for backward compatibility:
 | `*text` | Ends with text | `*ing` | running, walking, talking |
 | `*?ext*` | Complex patterns | `*a?e*` | camera, games, table |
 
-### 5.2 Match-All Query Options
+### 6.2 Match-All Query Options
 
 | Method | Use Case | Performance | Example |
 |--------|----------|-------------|---------|
@@ -856,7 +1052,7 @@ You can also use a simple string for backward compatibility:
 | `match` with `*` | Auto-detection | Fast | `{"match": {"value": "*"}}` |
 | `match` with empty | Auto-detection | Fast | `{"match": {"value": ""}}` |
 
-### 5.3 Performance Benchmarks
+### 6.3 Performance Benchmarks
 
 Based on testing with real data:
 
@@ -867,7 +1063,7 @@ Based on testing with real data:
 | Complex wildcard (`*farmer*`) | 5-10ms | Pattern-matched | Good performance for contains |
 | Mixed patterns (`p?n*`) | 4-8ms | Pattern-matched | Efficient regex compilation |
 
-### 5.4 Query Auto-Detection
+### 6.4 Query Auto-Detection
 
 The search engine automatically detects and optimizes queries:
 
@@ -884,7 +1080,7 @@ The search engine automatically detects and optimizes queries:
 
 ---
 
-## 6. HTTP Status Codes
+## 7. HTTP Status Codes
 
 The API returns appropriate HTTP status codes:
 
@@ -901,9 +1097,9 @@ The API returns appropriate HTTP status codes:
 
 ---
 
-## 7. Best Practices & Recommendations
+## 8. Best Practices & Recommendations
 
-### 7.1 Query Structure Best Practices
+### 8.1 Query Structure Best Practices
 
 1. **Use Specific Field Queries When Possible:**
 ```json
@@ -976,7 +1172,7 @@ The API returns appropriate HTTP status codes:
 }
 ```
 
-### 7.2 Performance Optimization
+### 8.2 Performance Optimization
 
 1. **Pagination for Large Result Sets:**
 ```json
@@ -1027,7 +1223,7 @@ The API returns appropriate HTTP status codes:
 
 ---
 
-## 8. Testing with cURL Examples
+## 9. Testing with cURL Examples
 
 ### Index Creation
 ```bash
@@ -1171,17 +1367,122 @@ curl -X POST "http://localhost:3000/api/indices/test_products/_search/_suggest" 
   }'
 ```
 
+### System Management
+
+#### Clear Index Cache
+```bash
+curl -X POST "http://localhost:3000/api/indices/test_products/clear-cache" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <api_key>"
+```
+
+#### Rebuild Entire Index
+```bash
+curl -X POST "http://localhost:3000/api/indices/test_products/_rebuild_all" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <api_key>"
+```
+
+#### Manual Rebuild Search Index
+```bash
+curl -X POST "http://localhost:3000/api/indices/test_products/_rebuild_index" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <api_key>"
+```
+
+#### Complete System Reset (DESTRUCTIVE)
+```bash
+curl -X POST "http://localhost:3000/api/indices/system/reset" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <api_key>" \
+  -d '{
+    "resetKey": "test-reset-key-123"
+  }'
+```
+
+#### Clear Search Dictionary
+```bash
+curl -X DELETE "http://localhost:3000/api/indices/test_products/_search/_clear_dictionary" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <api_key>"
+```
+
+### Bulk Indexing Management
+
+#### Start Bulk Indexing Job
+```bash
+curl -X POST "http://localhost:3000/bulk-indexing/start" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <api_key>" \
+  -d '{
+    "indexName": "test_products",
+    "documents": [
+      {
+        "id": "bulk-1",
+        "document": {
+          "title": "Bulk Product 1",
+          "price": 99.99
+        }
+      }
+    ],
+    "options": {
+      "batchSize": 100,
+      "concurrency": 5
+    }
+  }'
+```
+
+#### Get Bulk Job Status
+```bash
+curl -X GET "http://localhost:3000/bulk-indexing/status/{batch_id}" \
+  -H "Authorization: Bearer <api_key>"
+```
+
+#### Get All Bulk Jobs Status
+```bash
+curl -X GET "http://localhost:3000/bulk-indexing/status" \
+  -H "Authorization: Bearer <api_key>"
+```
+
+#### Clear Job Records
+```bash
+curl -X DELETE "http://localhost:3000/bulk-indexing/progress/{batch_id}" \
+  -H "Authorization: Bearer <api_key>"
+```
+
 ---
 
-## 9. Conclusion
+## 10. Conclusion
 
 The Ogini Search Engine provides a comprehensive and powerful API for full-text search operations. Key strengths include:
 
 ✅ **Complete Index Management** - Create, read, update, delete operations with auto-mapping detection  
 ✅ **Advanced Search Capabilities** - Match, wildcard, match-all queries with auto-detection  
 ✅ **Flexible Document Operations** - Individual and bulk operations with filtering  
+✅ **System Management & Recovery** - Cache clearing, index rebuilding, and complete system reset  
+✅ **Bulk Processing** - Scalable bulk indexing with job management and progress tracking  
 ✅ **Performance Optimized** - Sub-200ms response times with efficient query processing  
+✅ **Memory Management** - Built-in memory optimization and garbage collection endpoints  
+✅ **Index Isolation** - Proper term dictionary isolation preventing cross-index contamination  
 ✅ **Developer Friendly** - Comprehensive cURL examples and clear documentation  
 ✅ **Production Ready** - Health monitoring, memory management, and robust error handling
 
-The API is designed for high performance and ease of use, making it suitable for both development and production environments. 
+### New System Management Features
+
+**🔧 System Recovery & Maintenance:**
+- **Index Cache Clearing** - Free memory and resolve caching issues
+- **Complete Index Rebuilding** - Fix wildcard search issues and term dictionary problems  
+- **Background Index Rebuilding** - Non-blocking index maintenance
+- **Complete System Reset** - Nuclear option for testing and clean state recovery
+
+**📊 Bulk Operations:**
+- **Scalable Bulk Indexing** - Process thousands of documents efficiently
+- **Job Progress Tracking** - Monitor bulk operations with real-time status
+- **Job Management** - Clean up completed jobs and manage queue
+
+**🛡️ Index Isolation:**
+- **Proper Term Scoping** - Terms isolated per index preventing cross-contamination
+- **Wildcard Search Fix** - Wildcard queries now properly scoped to target index only
+- **Performance Preserved** - All optimizations maintain sub-20ms response times
+
+The API is designed for high performance, scalability, and ease of use, making it suitable for both development and production environments. With the new system management capabilities, administrators can maintain and troubleshoot search indices effectively while preserving data integrity and performance. 
