@@ -388,7 +388,7 @@ x-api-key: <api_key>
 ### 2.13 Complete System Reset (DESTRUCTIVE)
 **Endpoint:** `POST /api/indices/system/reset`
 
-**⚠️ WARNING: This endpoint destroys ALL data in the system including term dictionary, RocksDB, and MongoDB indices.**
+**⚠️ WARNING: This endpoint destroys ALL data in the system including term dictionary, RocksDB, MongoDB indices, MongoDB term postings, and document storage.**
 
 **Request Body:**
 ```json
@@ -405,6 +405,7 @@ x-api-key: <api_key>
     "Term Dictionary",
     "RocksDB", 
     "MongoDB Indices",
+    "MongoDB Term Postings (1247 deleted)",
     "Document Storage"
   ],
   "timestamp": "2023-06-15T10:00:00.000Z"
@@ -419,6 +420,14 @@ x-api-key: <api_key>
   "error": "Bad Request"
 }
 ```
+
+**What Gets Cleared:**
+- **Term Dictionary** - In-memory cache and LRU cache completely cleared
+- **RocksDB** - All local storage data wiped
+- **MongoDB Collections:**
+  - `indices` - All index definitions and metadata
+  - `documents` - All stored document content
+  - `term_postings` - All term-to-document mappings and search data
 
 **Security Notes:**
 - Requires valid `resetKey` matching environment variable `RESET_KEY` or hardcoded test key

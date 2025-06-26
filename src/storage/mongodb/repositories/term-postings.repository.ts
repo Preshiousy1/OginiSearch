@@ -91,4 +91,9 @@ export class TermPostingsRepository {
       await this.termPostingsModel.bulkWrite(bulkOps);
     }
   }
+
+  async deleteAll(): Promise<number> {
+    const result = await this.termPostingsModel.deleteMany({}).exec();
+    return result.deletedCount;
+  }
 }

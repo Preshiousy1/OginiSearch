@@ -31,6 +31,7 @@ import {
   ApiExtraModels,
 } from '@nestjs/swagger';
 import { IndexRepository } from '../../storage/mongodb/repositories/index.repository';
+import { TermPostingsRepository } from '../../storage/mongodb/repositories/term-postings.repository';
 import { IndexingService } from '../../indexing/indexing.service';
 import { DocumentService } from '../../document/document.service';
 import { Logger } from '@nestjs/common';
@@ -45,6 +46,7 @@ export class IndexController {
   constructor(
     private readonly indexService: IndexService,
     private readonly indexRepository: IndexRepository,
+    private readonly termPostingsRepository: TermPostingsRepository,
     private readonly indexingService: IndexingService,
     private readonly documentService: DocumentService,
   ) {}
@@ -600,11 +602,15 @@ export class IndexController {
       await rocksDBService.clear();
       resetComponents.push('RocksDB');
 
-      // 3. Clear MongoDB completely
+      // 3. Clear MongoDB indices
       await this.indexRepository.deleteAll();
       resetComponents.push('MongoDB Indices');
 
-      // 4. Clear document storage
+      // 4. Clear MongoDB term postings
+      const deletedTermPostings = await this.termPostingsRepository.deleteAll();
+      resetComponents.push(`MongoDB Term Postings (${deletedTermPostings} deleted)`);
+
+      // 5. Clear document storage
       await this.documentService.deleteAllDocuments();
       resetComponents.push('Document Storage');
 
