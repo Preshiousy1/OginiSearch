@@ -201,7 +201,7 @@ export class MemoryOptimizedIndexingService implements OnModuleDestroy {
           async term => {
             await this.indexTermSafely(indexName, field, term, processedDoc.id, fieldData);
           },
-          50, // Smaller chunk size for terms
+          100, // Smaller chunk size for terms
         );
       },
       10, // Process 10 fields at a time
@@ -267,7 +267,7 @@ export class MemoryOptimizedIndexingService implements OnModuleDestroy {
           async term => {
             await this.removeTermSafely(indexName, field, term, documentId);
           },
-          50,
+          100,
         );
       },
       10,

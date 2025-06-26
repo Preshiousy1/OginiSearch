@@ -404,7 +404,7 @@ describe('DocumentService Bulk Indexing Integration', () => {
           title: `Large Batch Document ${i}`,
           content: 'Lorem ipsum '.repeat(100), // Larger content per document
           metadata: {
-            batchNumber: Math.floor(i / 50),
+            batchNumber: Math.floor(i / 100),
             position: i,
             timestamp: new Date().toISOString(),
           },

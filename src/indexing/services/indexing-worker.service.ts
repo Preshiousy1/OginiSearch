@@ -83,7 +83,7 @@ export class IndexingWorkerService implements OnApplicationBootstrap, OnModuleDe
       },
     };
 
-    const CHUNK_SIZE = 50;
+    const CHUNK_SIZE = 100;
     const chunks = [];
 
     for (let i = 0; i < documents.length; i += CHUNK_SIZE) {

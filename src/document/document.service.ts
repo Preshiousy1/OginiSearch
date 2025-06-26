@@ -226,7 +226,7 @@ export class DocumentService implements OnModuleInit {
       const isRealTimeRequest = documents.length <= 20; // Threshold for real-time vs background
 
       const options: BulkIndexingOptions = {
-        batchSize: isRealTimeRequest ? Math.min(documents.length, 10) : 50,
+        batchSize: isRealTimeRequest ? Math.min(documents.length, 10) : 100,
         skipDuplicates: true,
         enableProgress: !isRealTimeRequest,
         priority: isRealTimeRequest ? 8 : 5, // Higher priority for real-time

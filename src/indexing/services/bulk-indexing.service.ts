@@ -170,7 +170,7 @@ export class BulkIndexingService {
     options: BulkIndexingOptions = {},
   ): Promise<BulkIndexingResponse> {
     const {
-      batchSize = 50,
+      batchSize = 100,
       skipDuplicates = true,
       enableProgress = true,
       priority = 5,
