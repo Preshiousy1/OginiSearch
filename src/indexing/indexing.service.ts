@@ -25,6 +25,7 @@ export class IndexingService {
     documentId: string,
     document: any,
     fromBulk = false,
+    persistToMongoDB = false,
   ): Promise<void> {
     if (!fromBulk) {
       this.logger.debug(`Processing and indexing document ${documentId} in index ${indexName}`);
@@ -71,6 +72,21 @@ export class IndexingService {
         // Use index-aware term dictionary
         await this.termDictionary.addPostingForIndex(indexName, fieldTerm, termEntry);
 
+        // Only persist to MongoDB periodically or when explicitly requested
+        if (persistToMongoDB) {
+          const fieldPostingList = await this.termDictionary.getPostingListForIndex(
+            indexName,
+            fieldTerm,
+          );
+          if (fieldPostingList) {
+            await this.persistentTermDictionary.saveTermPostings(
+              indexName,
+              fieldTerm,
+              fieldPostingList,
+            );
+          }
+        }
+
         // Also add to _all field for cross-field search using index-aware approach
         const allFieldTerm = `_all:${term}`;
         const allTermEntry = {
@@ -81,6 +97,21 @@ export class IndexingService {
         };
 
         await this.termDictionary.addPostingForIndex(indexName, allFieldTerm, allTermEntry);
+
+        // Only persist to MongoDB periodically or when explicitly requested
+        if (persistToMongoDB) {
+          const allPostingList = await this.termDictionary.getPostingListForIndex(
+            indexName,
+            allFieldTerm,
+          );
+          if (allPostingList) {
+            await this.persistentTermDictionary.saveTermPostings(
+              indexName,
+              allFieldTerm,
+              allPostingList,
+            );
+          }
+        }
       }
     }
 
@@ -318,6 +349,58 @@ export class IndexingService {
         // Recursively handle nested objects
         this.detectFieldsRecursive(value, fieldPath, fields);
       }
+    }
+  }
+
+  /**
+   * Persist all term postings for an index to MongoDB
+   * This should be called after bulk indexing operations to ensure data persistence
+   */
+  async persistTermPostingsToMongoDB(indexName: string): Promise<void> {
+    this.logger.log(`Persisting term postings to MongoDB for index: ${indexName}`);
+
+    try {
+      // Get all terms for this index from the term dictionary
+      const terms = this.termDictionary.getTermsForIndex(indexName);
+
+      if (terms.length === 0) {
+        this.logger.debug(`No terms found for index: ${indexName}`);
+        return;
+      }
+
+      let persistedCount = 0;
+      const batchSize = 100; // Process in batches to avoid memory issues
+
+      for (let i = 0; i < terms.length; i += batchSize) {
+        const termBatch = terms.slice(i, i + batchSize);
+
+        await Promise.all(
+          termBatch.map(async term => {
+            try {
+              const postingList = await this.termDictionary.getPostingListForIndex(indexName, term);
+              if (postingList && postingList.size() > 0) {
+                await this.persistentTermDictionary.saveTermPostings(indexName, term, postingList);
+                persistedCount++;
+              }
+            } catch (error) {
+              this.logger.warn(`Failed to persist term ${term}: ${error.message}`);
+            }
+          }),
+        );
+
+        // Log progress for large batches
+        if (terms.length > 1000) {
+          const progress = Math.min(i + batchSize, terms.length);
+          this.logger.debug(`Persisted ${progress}/${terms.length} terms to MongoDB`);
+        }
+      }
+
+      this.logger.log(
+        `Successfully persisted ${persistedCount} term postings to MongoDB for index: ${indexName}`,
+      );
+    } catch (error) {
+      this.logger.error(`Failed to persist term postings for index ${indexName}: ${error.message}`);
+      throw error;
     }
   }
 }

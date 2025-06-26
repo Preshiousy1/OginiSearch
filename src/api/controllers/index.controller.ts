@@ -626,4 +626,53 @@ export class IndexController {
       throw new BadRequestException(`System reset failed: ${error.message}`);
     }
   }
+
+  @Post(':name/migrate-term-postings')
+  @ApiOperation({
+    summary: 'Migrate term postings to MongoDB',
+    description: 'Migrates term postings from RocksDB to MongoDB for persistence',
+  })
+  @ApiParam({
+    name: 'name',
+    description: 'Index name to migrate',
+    example: 'products',
+  })
+  @ApiResponse({
+    status: HttpStatus.OK,
+    description: 'Term postings migration completed',
+    schema: {
+      type: 'object',
+      properties: {
+        message: { type: 'string', example: 'Term postings migration completed successfully' },
+        indexName: { type: 'string', example: 'products' },
+        migratedTerms: { type: 'number', example: 150 },
+      },
+    },
+  })
+  async migrateTermPostings(@Param('name') name: string): Promise<{
+    message: string;
+    indexName: string;
+    migratedTerms: number;
+  }> {
+    this.logger.log(`Starting term postings migration for index: ${name}`);
+
+    try {
+      // First, ensure all current term postings are persisted to MongoDB
+      await this.indexingService.persistTermPostingsToMongoDB(name);
+
+      this.logger.log(`Term postings migration completed for index: ${name}`);
+
+      // Get the count of migrated terms
+      const termCount = await this.termPostingsRepository.getTermCount(name);
+
+      return {
+        message: 'Term postings migration completed successfully',
+        indexName: name,
+        migratedTerms: termCount,
+      };
+    } catch (error) {
+      this.logger.error(`Term postings migration failed for index ${name}: ${error.message}`);
+      throw new BadRequestException(`Migration failed: ${error.message}`);
+    }
+  }
 }

@@ -348,6 +348,15 @@ export class DocumentService implements OnModuleInit {
 
     this.logger.log(`Successfully bulk indexed ${successCount} documents in ${indexName}`);
 
+    // Persist term postings to MongoDB after bulk indexing
+    try {
+      await this.indexingService.persistTermPostingsToMongoDB(indexName);
+      this.logger.debug(`Term postings persisted to MongoDB for index: ${indexName}`);
+    } catch (error) {
+      this.logger.warn(`Failed to persist term postings to MongoDB: ${error.message}`);
+      // Don't fail the entire operation if MongoDB persistence fails
+    }
+
     return {
       items: results,
       took: Date.now() - startTime,
