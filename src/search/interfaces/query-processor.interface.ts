@@ -1,18 +1,12 @@
 /**
- * Base query interface
+ * Base query types
  */
-export interface Query {
-  type: string;
-  operator?: 'and' | 'or' | 'not';
-  clauses?: Query[] | PhraseQuery[];
-  text?: string;
-  fields?: string[];
-}
+export type Query = TermQuery | PhraseQuery | BooleanQuery | WildcardQuery | MatchAllQuery;
 
 /**
  * Simple term query
  */
-export interface TermQuery extends Query {
+export interface TermQuery {
   type: 'term';
   field: string;
   value: string;
@@ -21,71 +15,75 @@ export interface TermQuery extends Query {
 /**
  * Phrase query (multiple consecutive terms)
  */
-export interface PhraseQuery extends Query {
+export interface PhraseQuery {
   type: 'phrase';
   field: string;
   terms: string[];
+  text?: string;
+  fields?: string[];
 }
 
 /**
  * Boolean query (combines multiple queries with operators)
  */
-export interface BooleanQuery extends Query {
+export interface BooleanQuery {
   type: 'boolean';
   operator: 'and' | 'or' | 'not';
   clauses: Query[];
+  text?: string;
+  fields?: string[];
 }
 
 /**
  * Wildcard query (supports * and ? patterns)
  */
-export interface WildcardQuery extends Query {
+export interface WildcardQuery {
   type: 'wildcard';
-  field?: string;
+  field: string;
+  pattern: string;
   value: string;
+  boost?: number;
+  text?: string;
+  fields?: string[];
 }
 
 /**
  * Match-all query (returns all documents)
  */
-export interface MatchAllQuery extends Query {
+export interface MatchAllQuery {
   type: 'match_all';
   boost?: number;
+  text?: string;
+  fields?: string[];
 }
 
 /**
  * Raw input query from user
  */
 export interface RawQuery {
-  query:
+  type?: string;
+  query?:
     | string
     | {
         match?: {
           field?: string;
           value: string;
         };
-        match_all?: {
-          boost?: number;
-        };
+        term?: Record<string, any>;
         wildcard?:
-          | {
-              [field: string]: {
-                value: string;
-                boost?: number;
-              };
-            }
+          | string
           | {
               field?: string;
               value: string;
               boost?: number;
             };
-        term?: Record<string, any>;
+        match_all?: {
+          boost?: number;
+        };
       };
   fields?: string[];
-  // Additional query parameters
-  offset?: number;
-  limit?: number;
-  filters?: Record<string, any>;
+  value?: string;
+  boost?: number;
 }
 
 /**
@@ -94,7 +92,7 @@ export interface RawQuery {
 export interface ProcessedQuery {
   original: RawQuery;
   parsedQuery: Query;
-  executionPlan?: QueryExecutionPlan;
+  executionPlan: QueryExecutionPlan;
 }
 
 /**
@@ -109,8 +107,8 @@ export interface QueryProcessor {
  */
 export interface QueryExecutionPlan {
   steps: QueryExecutionStep[];
-  totalCost: number;
-  estimatedResults: number;
+  cost: number;
+  estimatedResults?: number;
 }
 
 /**
@@ -119,7 +117,7 @@ export interface QueryExecutionPlan {
 export interface QueryExecutionStep {
   type: string;
   cost: number;
-  estimatedResults: number;
+  estimatedResults?: number;
 }
 
 /**
@@ -135,7 +133,7 @@ export interface TermQueryStep extends QueryExecutionStep {
  * Boolean execution step
  */
 export interface BooleanQueryStep extends QueryExecutionStep {
-  type: 'boolean' | 'phrase';
+  type: 'boolean';
   operator: 'and' | 'or' | 'not';
   steps: QueryExecutionStep[];
 }
@@ -147,8 +145,7 @@ export interface PhraseQueryStep extends QueryExecutionStep {
   type: 'phrase';
   field: string;
   terms: string[];
-  steps: QueryExecutionStep[];
-  positions?: number[]; // Relative positions of terms in the phrase
+  positions?: number[];
 }
 
 /**
@@ -156,9 +153,9 @@ export interface PhraseQueryStep extends QueryExecutionStep {
  */
 export interface WildcardQueryStep extends QueryExecutionStep {
   type: 'wildcard';
-  field?: string;
+  field: string;
   pattern: string;
-  compiledPattern?: RegExp;
+  compiledPattern: RegExp;
 }
 
 /**
@@ -166,5 +163,16 @@ export interface WildcardQueryStep extends QueryExecutionStep {
  */
 export interface MatchAllQueryStep extends QueryExecutionStep {
   type: 'match_all';
-  boost?: number;
+  boost: number;
 }
+
+export type SearchQuery = Query & {
+  type: 'term' | 'phrase' | 'boolean' | 'wildcard' | 'match_all';
+  field?: string;
+  value?: string;
+  pattern?: string;
+  boost?: number;
+  operator?: 'and' | 'or' | 'not';
+  clauses?: Query[];
+  terms?: string[];
+};

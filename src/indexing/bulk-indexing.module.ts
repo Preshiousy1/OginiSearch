@@ -7,6 +7,7 @@ import { IndexModule } from '../index/index.module';
 import { DocumentModule } from '../document/document.module';
 import { StorageModule } from '../storage/storage.module';
 import { BullModule } from '@nestjs/bull';
+import { DocumentProcessorPool } from './services/document-processor.pool';
 
 @Module({
   imports: [
@@ -18,7 +19,12 @@ import { BullModule } from '@nestjs/bull';
       name: 'indexing',
     }),
   ],
-  providers: [BulkIndexingService, IndexingWorkerService, IndexingQueueProcessor],
+  providers: [
+    BulkIndexingService,
+    IndexingWorkerService,
+    IndexingQueueProcessor,
+    DocumentProcessorPool,
+  ],
   exports: [BulkIndexingService],
 })
 export class BulkIndexingModule {}

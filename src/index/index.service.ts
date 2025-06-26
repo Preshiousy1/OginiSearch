@@ -7,6 +7,7 @@ import { IndexStatsService } from '../index/index-stats.service';
 import { InMemoryTermDictionary } from '../index/term-dictionary';
 import { Index, IndexSettings } from './interfaces/index.interface';
 import { PersistentTermDictionaryService } from '../storage/index-storage/persistent-term-dictionary.service';
+import { RocksDBService } from '../storage/rocksdb/rocksdb.service';
 
 @Injectable()
 export class IndexService {
@@ -19,6 +20,7 @@ export class IndexService {
     private readonly indexStats: IndexStatsService,
     @Inject('TERM_DICTIONARY') private readonly termDictionary: InMemoryTermDictionary,
     private readonly persistentTermDictionary: PersistentTermDictionaryService,
+    private readonly rocksDBService: RocksDBService,
   ) {}
 
   async createIndex(createIndexDto: CreateIndexDto): Promise<IndexResponseDto> {
@@ -329,5 +331,40 @@ export class IndexService {
       mappings: index.mappings,
       status: index.status || 'open',
     };
+  }
+
+  /**
+   * Get the term dictionary instance
+   */
+  getTermDictionary(): InMemoryTermDictionary {
+    return this.termDictionary;
+  }
+
+  /**
+   * Get the RocksDB service instance
+   */
+  getRocksDBService() {
+    return this.rocksDBService;
+  }
+
+  /**
+   * Update indexing to use index-aware term dictionary
+   */
+  async addTermForIndex(indexName: string, fieldTerm: string, posting: any): Promise<void> {
+    await this.termDictionary.addPostingForIndex(indexName, fieldTerm, posting);
+  }
+
+  /**
+   * Get terms for a specific index
+   */
+  getTermsForIndex(indexName: string): string[] {
+    return this.termDictionary.getTermsForIndex(indexName);
+  }
+
+  /**
+   * Clear terms for a specific index
+   */
+  async clearIndexTerms(indexName: string): Promise<void> {
+    await this.termDictionary.clearIndex(indexName);
   }
 }

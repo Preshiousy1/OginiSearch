@@ -1,5 +1,7 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Inject } from '@nestjs/common';
 import { IndexStats } from './interfaces/scoring.interface';
+import { TermDictionary } from './interfaces/term-dictionary.interface';
+import { IndexStorage } from './interfaces/index-storage.interface';
 
 @Injectable()
 export class IndexStatsService implements IndexStats {
@@ -12,12 +14,13 @@ export class IndexStatsService implements IndexStats {
   // Sum of field lengths for calculating averages
   private fieldLengthSums: Map<string, number> = new Map();
 
-  // Track total document count
   private _totalDocuments = 0;
+  private fieldStats = new Map<string, { totalLength: number; docCount: number }>();
 
-  constructor() {
-    // Initialize any necessary properties or perform setup tasks here
-  }
+  constructor(
+    @Inject('TermDictionary') private readonly termDictionary: TermDictionary,
+    @Inject('IndexStorage') private readonly indexStorage: IndexStorage,
+  ) {}
 
   get totalDocuments(): number {
     return this._totalDocuments;
@@ -27,15 +30,32 @@ export class IndexStatsService implements IndexStats {
    * Get document frequency for a term
    */
   getDocumentFrequency(term: string): number {
-    return this.documentFrequencies.get(term) || 0;
+    // For backward compatibility, we'll make this synchronous
+    // by returning a cached value or 0
+    return this.fieldStats.get(term)?.docCount || 0;
   }
 
   /**
    * Get average length of a specific field across all documents
    */
   getAverageFieldLength(field: string): number {
-    const sum = this.fieldLengthSums.get(field) || 0;
-    return this._totalDocuments > 0 ? sum / this._totalDocuments : 0;
+    // For backward compatibility, we'll make this synchronous
+    // by returning a cached value or 0
+    const stats = this.fieldStats.get(field);
+    if (!stats) return 0;
+    return stats.totalLength / Math.max(1, stats.docCount);
+  }
+
+  private async getFieldStats(
+    field: string,
+  ): Promise<{ totalLength: number; docCount: number } | null> {
+    const stats = await this.indexStorage.getFieldStats(field);
+    if (!stats) return null;
+
+    return {
+      totalLength: stats.totalLength || 0,
+      docCount: stats.docCount || 0,
+    };
   }
 
   /**
@@ -142,5 +162,21 @@ export class IndexStatsService implements IndexStats {
     }
 
     return stats;
+  }
+
+  async updateStats(indexName: string): Promise<void> {
+    // Update total documents
+    this._totalDocuments = await this.indexStorage.getDocumentCount(indexName);
+
+    // Update field statistics
+    const fields = await this.indexStorage.getFields(indexName);
+    await Promise.all(
+      fields.map(async field => {
+        const stats = await this.indexStorage.getFieldStats(field);
+        if (stats) {
+          this.fieldStats.set(field, stats);
+        }
+      }),
+    );
   }
 }

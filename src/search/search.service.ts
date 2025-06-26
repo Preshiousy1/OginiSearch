@@ -4,7 +4,14 @@ import { QueryProcessorService } from './query-processor.service';
 import { SearchQueryDto, SuggestQueryDto, SearchResponseDto } from '../api/dtos/search.dto';
 import { SearchExecutorService } from './search-executor.service';
 import { InMemoryTermDictionary } from '../index/term-dictionary';
-import { RawQuery } from './interfaces/query-processor.interface';
+import { QueryExecutionPlan, RawQuery } from './interfaces/query-processor.interface';
+import { SearchQuery } from './interfaces/query-processor.interface';
+import { SearchRequest, SearchResponse } from './interfaces/search.interface';
+
+interface WildcardConfig {
+  value: string;
+  boost?: number;
+}
 
 @Injectable()
 export class SearchService {
@@ -23,71 +30,123 @@ export class SearchService {
   ): Promise<Partial<SearchResponseDto>> {
     this.logger.log(`Searching in index ${indexName}: ${JSON.stringify(searchQuery.query)}`);
 
-    // Check if index exists
     try {
-      await this.indexService.getIndex(indexName);
-    } catch (error) {
-      throw new NotFoundException(`Index ${indexName} not found`);
-    }
+      // Get index
+      const index = await this.indexService.getIndex(indexName);
+      if (!index) {
+        throw new NotFoundException(`Index ${indexName} not found`);
+      }
 
-    try {
-      const startTime = Date.now();
+      // Convert search query to internal format
+      const { executionPlan, options, startTime } = this.convertToSearchRequest(searchQuery);
 
-      // Prepare raw query format for the query processor
-      const rawQuery: RawQuery = {
-        query: searchQuery.query,
-        fields: searchQuery.fields,
-        offset: searchQuery.from,
-        limit: searchQuery.size,
-        filters: searchQuery.filter,
-      };
-
-      // Process the query
-      const processedQuery = await this.queryProcessor.processQuery(rawQuery);
-
-      this.logger.debug(`Processed query: ${JSON.stringify(processedQuery)}`);
-
-      // Execute the search
-      const results = await this.searchExecutor.executeQuery(
+      // Execute search
+      const searchResult = await this.searchExecutor.executeQuery(
         indexName,
-        processedQuery.executionPlan,
-        {
-          from: searchQuery.from || 0,
-          size: searchQuery.size || 10,
-          sort: searchQuery.sort,
-          filter: searchQuery.filter,
-        },
+        executionPlan,
+        options,
       );
 
-      // Format results
-      const formattedResults = {
+      // Format response
+      const response = {
         data: {
-          total: results.totalHits,
-          maxScore: results.maxScore,
-          hits: results.hits.map(hit => ({
+          total: searchResult.totalHits,
+          maxScore: searchResult.maxScore,
+          hits: searchResult.hits.map(hit => ({
             id: hit.id,
             index: indexName,
             score: hit.score,
             source: hit.document,
-            highlight:
-              searchQuery.highlight && processedQuery.parsedQuery.text
-                ? this.getHighlights(hit, processedQuery.parsedQuery.text)
-                : undefined,
           })),
         },
-        took: Date.now() - startTime, // Add processing time in milliseconds
+        took: Date.now() - startTime,
       };
 
-      // Add facets if requested
-      if (searchQuery.facets && searchQuery.facets.length > 0) {
-        formattedResults['facets'] = this.getFacets(results, searchQuery.facets);
-      }
-
-      return formattedResults;
+      return response;
     } catch (error) {
-      this.logger.error(`Search error: ${error.message}`);
+      this.logger.error(`Search error: ${error.message}`, error.stack);
       throw new BadRequestException(`Search error: ${error.message}`);
     }
+  }
+
+  private convertToSearchRequest(dto: SearchQueryDto): {
+    executionPlan: QueryExecutionPlan;
+    options: any;
+    startTime: number;
+  } {
+    const startTime = Date.now();
+
+    // Handle wildcard query
+    const wildcardQuery =
+      typeof dto.query === 'object' && dto.query?.wildcard
+        ? typeof dto.query.wildcard === 'string'
+          ? dto.query.wildcard
+          : 'field' in dto.query.wildcard
+          ? {
+              field: dto.query.wildcard.field,
+              value: dto.query.wildcard.value,
+              boost: dto.query.wildcard.boost,
+            }
+          : {
+              field: Object.keys(dto.query.wildcard)[0],
+              ...Object.values(dto.query.wildcard)[0],
+            }
+        : undefined;
+
+    const rawQuery: RawQuery = {
+      type: typeof dto.query === 'string' ? 'term' : 'object',
+      value: typeof dto.query === 'string' ? dto.query : undefined,
+      query:
+        typeof dto.query === 'string'
+          ? undefined
+          : {
+              match: dto.query?.match && {
+                field: dto.query.match.field,
+                value: dto.query.match.value,
+              },
+              term: dto.query?.term,
+              wildcard: wildcardQuery,
+              match_all: dto.query?.match_all,
+            },
+      fields: dto.fields,
+    };
+
+    const processedQuery = this.queryProcessor.processQuery(rawQuery);
+
+    return {
+      executionPlan: processedQuery.executionPlan,
+      options: {
+        from: dto.from || 0,
+        size: dto.size || 10,
+        sort: dto.sort,
+        filter: dto.filter,
+      },
+      startTime,
+    };
+  }
+
+  private normalizeWildcardQuery(wildcard: any): { field?: string; value: string; boost?: number } {
+    if (typeof wildcard === 'string') {
+      return {
+        field: '_all',
+        value: wildcard,
+      };
+    }
+
+    if ('field' in wildcard && 'value' in wildcard) {
+      return {
+        field: wildcard.field,
+        value: wildcard.value,
+        boost: wildcard.boost,
+      };
+    }
+
+    const [field, config] = Object.entries(wildcard)[0] as [string, WildcardConfig];
+    return {
+      field,
+      value: config.value,
+      boost: config.boost,
+    };
   }
 
   async suggest(indexName: string, suggestQuery: SuggestQueryDto): Promise<any[]> {
@@ -237,31 +296,30 @@ export class SearchService {
   }
 
   private getHighlights(hit: any, queryText: string): Record<string, string[]> {
-    // Simple highlight implementation
     const highlights: Record<string, string[]> = {};
-    const queryTerms = queryText.toLowerCase().split(/\s+/);
 
-    for (const [field, value] of Object.entries(hit.document)) {
+    // Extract text from content fields
+    const content = hit.document?.content;
+    if (!content) return highlights;
+
+    // Create simple highlights by finding the query terms in the content
+    const terms = queryText.toLowerCase().split(/\s+/);
+
+    Object.entries(content).forEach(([field, value]) => {
       if (typeof value === 'string') {
-        const fieldValue = value.toString();
-        let hasMatch = false;
+        const matches = terms
+          .map(term => {
+            const regex = new RegExp(`(.{0,50})${term}(.{0,50})`, 'gi');
+            const match = regex.exec(value);
+            return match ? `...${match[1]}${match[0]}${match[2]}...` : null;
+          })
+          .filter(Boolean);
 
-        for (const term of queryTerms) {
-          if (fieldValue.toLowerCase().includes(term)) {
-            hasMatch = true;
-            const regex = new RegExp(`(${term})`, 'gi');
-            const highlighted = fieldValue.replace(regex, '<em>$1</em>');
-
-            if (!highlights[field]) {
-              highlights[field] = [];
-            }
-
-            highlights[field].push(highlighted);
-            break;
-          }
+        if (matches.length > 0) {
+          highlights[field] = matches;
         }
       }
-    }
+    });
 
     return highlights;
   }
@@ -307,5 +365,22 @@ export class SearchService {
       }),
     );
     return stats;
+  }
+
+  async clearDictionary(indexName: string): Promise<{ message: string }> {
+    this.logger.log(`Clearing term dictionary for index ${indexName}`);
+
+    try {
+      // Check if index exists
+      await this.indexService.getIndex(indexName);
+
+      // Call cleanup on the term dictionary
+      await this.termDictionary.cleanup();
+
+      return { message: 'Term dictionary cleared successfully' };
+    } catch (error) {
+      this.logger.error(`Error clearing term dictionary: ${error.message}`);
+      throw new BadRequestException(`Error clearing term dictionary: ${error.message}`);
+    }
   }
 }

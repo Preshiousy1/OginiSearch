@@ -12,17 +12,22 @@ import { PostingList } from '../index/interfaces/posting.interface';
 import { DocumentStorageService } from '../storage/document-storage/document-storage.service';
 import { IndexStatsService } from '../index/index-stats.service';
 import { InMemoryTermDictionary } from '../index/term-dictionary';
+import { AnalyzerRegistryService } from '../analysis/analyzer-registry.service';
+import { SimplePostingList } from 'src/index/posting-list';
+import { TermPostingsRepository } from 'src/storage/mongodb/repositories/term-postings.repository';
 
 interface SearchMatch {
   id: string;
   score: number;
-  index: string;
+  document?: any;
 }
 
 interface SearchOptions {
-  from?: number;
   size?: number;
+  from?: number;
   sort?: string;
+  fields?: string[];
+  highlight?: boolean;
   filter?: Record<string, any>;
 }
 
@@ -41,9 +46,12 @@ export class SearchExecutorService {
   private readonly logger = new Logger(SearchExecutorService.name);
 
   constructor(
-    @Inject('TERM_DICTIONARY') private readonly termDictionary: InMemoryTermDictionary,
+    @Inject('TERM_DICTIONARY')
+    private readonly termDictionary: InMemoryTermDictionary,
     private readonly documentStorage: DocumentStorageService,
     private readonly indexStats: IndexStatsService,
+    private readonly analyzerRegistry: AnalyzerRegistryService,
+    private readonly termPostingsRepository: TermPostingsRepository,
   ) {}
 
   async executeQuery(
@@ -60,10 +68,11 @@ export class SearchExecutorService {
     const matches = (await this.executeQueryPlan(indexName, executionPlan)).map(match => ({
       ...match,
       index: indexName,
+      score: match.score || 1.0, // Default score if not provided
     }));
 
     // Apply any filter conditions if provided
-    const filteredMatches = await this.applyFilters(matches, filter);
+    const filteredMatches = await this.applyFilters(matches, filter, indexName);
 
     // Sort results by score or specified sort field
     const sortedMatches = this.sortMatches(filteredMatches, sort);
@@ -83,7 +92,7 @@ export class SearchExecutorService {
     const hits = paginatedMatches.map(match => ({
       id: match.id,
       score: match.score,
-      document: documents[match.id] || {},
+      document: documents[match.id] || null,
     }));
 
     return {
@@ -97,78 +106,141 @@ export class SearchExecutorService {
     indexName: string,
     plan: QueryExecutionPlan,
   ): Promise<Array<{ id: string; score: number }>> {
-    // Get the root step of the plan
-    const rootStep = plan.steps[0];
+    // Execute each step in the plan
+    const results = await Promise.all(
+      plan.steps.map(step => this.executeQueryStep(indexName, step)),
+    );
 
-    // Execute the step recursively
-    return this.executeStep(indexName, rootStep);
+    // Combine results from all steps
+    return results.flat();
   }
 
-  private async executeStep(
+  private async executeQueryStep(
     indexName: string,
     step: QueryExecutionStep,
   ): Promise<Array<{ id: string; score: number }>> {
-    if (step.type === 'term') {
-      return this.executeTermStep(indexName, step as TermQueryStep);
-    } else if (step.type === 'boolean') {
-      return this.executeBooleanStep(indexName, step as BooleanQueryStep);
-    } else if (step.type === 'phrase') {
-      return this.executePhraseStep(indexName, step as PhraseQueryStep);
-    } else if (step.type === 'wildcard') {
-      return this.executeWildcardStep(indexName, step as WildcardQueryStep);
-    } else if (step.type === 'match_all') {
-      return this.executeMatchAllStep(indexName, step as MatchAllQueryStep);
+    switch (step.type) {
+      case 'term':
+        return this.executeTermStep(indexName, step as TermQueryStep);
+      case 'boolean':
+        return this.executeBooleanStep(indexName, step as BooleanQueryStep);
+      case 'phrase':
+        return this.executePhraseStep(indexName, step as PhraseQueryStep);
+      case 'wildcard':
+        return this.executeWildcardStep(indexName, step as WildcardQueryStep);
+      case 'match_all':
+        return this.executeMatchAllStep(indexName, step as MatchAllQueryStep);
+      default:
+        throw new Error(`Unsupported query step type: ${step.type}`);
     }
-
-    return [];
   }
 
   /**
-   * Reusable method to get postings for a term with fallback mechanism
-   * This ensures consistent behavior between regular and wildcard searches
+   * Get terms for a specific index from MongoDB storage
    */
-  private async getTermPostings(
+  private async getTermsByIndex(indexName: string): Promise<string[]> {
+    try {
+      // First try to get terms from in-memory cache (fast path)
+      const memoryTerms = this.termDictionary.getTermsForIndex(indexName);
+      this.logger.debug(`Found ${memoryTerms.length} terms in memory for index: ${indexName}`);
+
+      if (memoryTerms.length > 0) {
+        return memoryTerms;
+      }
+
+      // Fallback to MongoDB if no terms in memory
+      this.logger.debug(`Falling back to MongoDB for terms in index: ${indexName}`);
+      const termPostings = await this.termPostingsRepository.findByIndex(indexName);
+      const mongoTerms = termPostings.map(tp => tp.term);
+      this.logger.debug(`Found ${mongoTerms.length} terms in MongoDB for index: ${indexName}`);
+
+      return mongoTerms;
+    } catch (error) {
+      this.logger.error(`Failed to get terms for index ${indexName}: ${error.message}`);
+      return [];
+    }
+  }
+
+  /**
+   * Get posting list for a specific term and index from MongoDB storage
+   */
+  private async getPostingListByIndex(
+    indexName: string,
+    term: string,
+  ): Promise<PostingList | null> {
+    try {
+      const termPosting = await this.termPostingsRepository.findByIndexAndTerm(indexName, term);
+      if (!termPosting) {
+        return null;
+      }
+
+      const postingList = new SimplePostingList();
+      for (const [docId, posting] of Object.entries(termPosting.postings)) {
+        postingList.addEntry({
+          docId,
+          frequency: posting.frequency,
+          positions: posting.positions || [],
+          metadata: posting.metadata || {},
+        });
+      }
+
+      return postingList;
+    } catch (error) {
+      this.logger.error(
+        `Failed to get posting list for term ${term} in index ${indexName}: ${error.message}`,
+      );
+      return null;
+    }
+  }
+
+  /**
+   * Index-aware term lookup with fallback to MongoDB
+   */
+  private async getIndexAwareTermPostings(
+    indexName: string,
     term: string,
     useExactMatch = true,
   ): Promise<Array<{ term: string; postingList: PostingList }>> {
     const results: Array<{ term: string; postingList: PostingList }> = [];
 
-    if (useExactMatch) {
-      // Try exact match first
-      const exactPostingList = await this.termDictionary.getPostingList(term);
-      if (exactPostingList && exactPostingList.size() > 0) {
-        this.logger.debug(
-          `Found exact posting list for term: ${term} with ${exactPostingList.size()} entries`,
-        );
-        results.push({ term, postingList: exactPostingList });
-        return results;
-      }
+    // First try index-aware lookup
+    const postingList = await this.termDictionary.getPostingListForIndex(indexName, term);
+    if (postingList && postingList.size() > 0) {
+      this.logger.debug(
+        `Found index-aware posting list for term: ${term} in index: ${indexName} with ${postingList.size()} entries`,
+      );
+      results.push({ term, postingList });
+      return results;
     }
 
-    // Fallback to matching terms (includes exact match + prefix matches)
-    const allTerms = this.termDictionary.getTerms();
-    this.logger.debug(`Total terms available in dictionary: ${allTerms.length}`);
+    // Fallback to MongoDB-based term lookup
+    this.logger.debug(`Fallback to MongoDB for term: ${term} in index: ${indexName}`);
+    const mongoPostingList = await this.getPostingListByIndex(indexName, term);
+    if (mongoPostingList && mongoPostingList.size() > 0) {
+      this.logger.debug(
+        `Found MongoDB posting list for term: ${term} in index: ${indexName} with ${mongoPostingList.size()} entries`,
+      );
+      results.push({ term, postingList: mongoPostingList });
+      return results;
+    }
 
-    // Debug: check specifically for video-related terms
-    const videoTerms = allTerms.filter(t => t.includes('video'));
-    this.logger.debug(
-      `Video-related terms in dictionary: ${JSON.stringify(videoTerms.slice(0, 10))}`,
-    );
+    // If exact match didn't work and we allow pattern matching
+    if (!useExactMatch) {
+      const allTerms = await this.getTermsByIndex(indexName);
+      const matchingTerms = allTerms.filter(t => t === term || t.startsWith(term));
 
-    // Debug: check if the exact term exists
-    const exactTermExists = allTerms.includes(term);
-    this.logger.debug(`Exact term "${term}" exists in dictionary: ${exactTermExists}`);
+      this.logger.debug(
+        `Found ${matchingTerms.length} matching terms for pattern: ${term} in index: ${indexName}`,
+      );
 
-    const matchingTerms = allTerms.filter(t => t === term || t.startsWith(term));
-    this.logger.debug(`Found ${matchingTerms.length} matching terms for: ${term}`);
-
-    for (const matchingTerm of matchingTerms) {
-      const postingList = await this.termDictionary.getPostingList(matchingTerm);
-      if (postingList && postingList.size() > 0) {
-        this.logger.debug(
-          `Found posting list for matching term: ${matchingTerm} with ${postingList.size()} entries`,
-        );
-        results.push({ term: matchingTerm, postingList });
+      for (const matchingTerm of matchingTerms) {
+        const matchingPostingList = await this.getPostingListByIndex(indexName, matchingTerm);
+        if (matchingPostingList && matchingPostingList.size() > 0) {
+          this.logger.debug(
+            `Found posting list for matching term: ${matchingTerm} with ${matchingPostingList.size()} entries`,
+          );
+          results.push({ term: matchingTerm, postingList: matchingPostingList });
+        }
       }
     }
 
@@ -179,18 +251,43 @@ export class SearchExecutorService {
     indexName: string,
     step: TermQueryStep,
   ): Promise<Array<{ id: string; score: number }>> {
-    const { term } = step;
-
-    // Use the reusable method with exact match preference
-    const termPostings = await this.getTermPostings(term, true);
-
-    const allScores: Array<{ id: string; score: number }> = [];
-    for (const { term: matchingTerm, postingList } of termPostings) {
-      const scores = this.calculateScores(indexName, postingList, matchingTerm);
-      allScores.push(...scores);
+    // Get the analyzer for the field
+    const analyzer = this.analyzerRegistry.getAnalyzer('standard');
+    if (!analyzer) {
+      throw new Error('Standard analyzer not found');
     }
 
-    return allScores;
+    // Analyze the term to get normalized tokens
+    const analyzedTerms = analyzer.analyze(step.term);
+    if (!analyzedTerms || analyzedTerms.length === 0) {
+      this.logger.debug(`No terms found after analysis for: ${step.term}`);
+      return [];
+    }
+
+    const results: Array<{ id: string; score: number }> = [];
+
+    // Process each analyzed term using index-aware lookup
+    for (const analyzedTerm of analyzedTerms) {
+      const fieldTerm = `${step.field}:${analyzedTerm}`;
+      this.logger.debug(`Executing term step for field term: ${fieldTerm} in index: ${indexName}`);
+
+      // Use index-aware term dictionary lookup
+      const termResults = await this.getIndexAwareTermPostings(indexName, fieldTerm, true);
+
+      for (const { term, postingList } of termResults) {
+        if (postingList && postingList.size() > 0) {
+          this.logger.debug(
+            `Found posting list with ${postingList.size()} entries for field term: ${term} in index: ${indexName}`,
+          );
+          const scores = this.calculateScores(indexName, postingList, term);
+          results.push(...scores);
+        } else {
+          this.logger.debug(`No posting list found for field term: ${term} in index: ${indexName}`);
+        }
+      }
+    }
+
+    return results;
   }
 
   private async executeBooleanStep(
@@ -198,7 +295,9 @@ export class SearchExecutorService {
     step: BooleanQueryStep,
   ): Promise<Array<{ id: string; score: number }>> {
     // Execute each child step
-    const resultsPromises = step.steps.map(childStep => this.executeStep(indexName, childStep));
+    const resultsPromises = step.steps.map(childStep =>
+      this.executeQueryStep(indexName, childStep),
+    );
     const results = await Promise.all(resultsPromises);
 
     // Combine results based on the boolean operator
@@ -220,11 +319,14 @@ export class SearchExecutorService {
     indexName: string,
     step: PhraseQueryStep,
   ): Promise<Array<{ id: string; score: number }>> {
-    // Get postings for each term in the phrase
+    // Get postings for each term in the phrase using index-aware lookup
     const termPostings = await Promise.all(
       step.terms.map(async term => ({
         term,
-        postings: await this.termDictionary.getPostingList(`${step.field}:${term}`),
+        postings: await this.termDictionary.getPostingListForIndex(
+          indexName,
+          `${step.field}:${term}`,
+        ),
       })),
     );
 
@@ -234,7 +336,7 @@ export class SearchExecutorService {
     }
 
     // Find documents where the phrase occurs (terms in correct positions)
-    const matchingDocs = this.findPhraseMatches(termPostings, step.positions);
+    const matchingDocs = this.findPhraseMatches(termPostings, step.positions || []);
 
     // Calculate scores for matching documents
     return this.calculatePhaseScores(indexName, matchingDocs, termPostings);
@@ -253,159 +355,77 @@ export class SearchExecutorService {
     const basePattern = pattern.replace(/[*?]/g, '');
 
     // For simple prefix wildcards like "video*", use the fallback mechanism directly
-    // This works like regular search but filters results with the wildcard pattern
     if (pattern.endsWith('*') && !pattern.includes('?') && basePattern.length > 0) {
       this.logger.debug(`Using direct fallback approach for simple prefix wildcard: ${pattern}`);
 
-      const fallbackTerm =
-        field && field !== '_all' ? `${field}:${basePattern}` : `_all:${basePattern}`;
-      this.logger.debug(`Looking for fallback term: ${fallbackTerm}`);
+      // Get all terms from the index (index-aware)
+      const allTerms = await this.getTermsByIndex(indexName);
+      this.logger.debug(`Total terms available in index ${indexName}: ${allTerms.length}`);
 
-      // Use the same approach as regular term search with fallback
-      const termPostings = await this.getTermPostings(fallbackTerm, true);
-
-      if (termPostings.length > 0) {
-        this.logger.debug(
-          `Fallback found ${termPostings.length} term postings, filtering with pattern`,
-        );
-
-        // Filter the results with the wildcard pattern
-        const filteredPostings = termPostings.filter(({ term }) => {
-          const termParts = term.split(':');
-          if (termParts.length >= 2) {
-            const termValue = termParts.slice(1).join(':');
-            const matches = compiledPattern && compiledPattern.test(termValue);
-            this.logger.debug(`Term ${term} -> ${termValue} matches pattern: ${matches}`);
-            return matches;
-          }
+      // For field-specific searches, filter by field first using index-aware format
+      const fieldPrefix = field && field !== '_all' ? `${field}:` : '';
+      const matchingTerms = allTerms.filter(term => {
+        // Check if term matches the field (if specified)
+        if (fieldPrefix && !term.includes(`:${fieldPrefix}`)) {
           return false;
-        });
-
-        this.logger.debug(
-          `After pattern filtering: ${filteredPostings.length} term postings remain`,
-        );
-
-        // Calculate scores from filtered results
-        const allScores: Array<{ id: string; score: number }> = [];
-        for (const { term, postingList } of filteredPostings) {
-          const scores = this.calculateScores(indexName, postingList, term);
-          allScores.push(...scores);
         }
 
-        return this.mergeWildcardScores(allScores);
-      }
+        // Extract the term value (after index:field: prefix)
+        const parts = term.split(':');
+        if (parts.length < 3) return false; // Should be index:field:term format
+
+        const termValue = parts.slice(2).join(':'); // Handle terms with colons
+        const termField = parts[1];
+
+        // Check field match and pattern match
+        const fieldMatches = !fieldPrefix || termField === field;
+        const patternMatches = termValue && compiledPattern.test(termValue);
+
+        return fieldMatches && patternMatches;
+      });
+
+      this.logger.debug(
+        `Found ${matchingTerms.length} matching terms for pattern: ${pattern} in index: ${indexName}`,
+      );
+
+      // Get posting lists for all matching terms using index-aware lookup
+      const results = await Promise.all(
+        matchingTerms.map(async fullTerm => {
+          // Extract the field:term part from index:field:term
+          const parts = fullTerm.split(':');
+          const fieldTermPart = parts.slice(1).join(':'); // field:term
+          const postingList = await this.termDictionary.getPostingListForIndex(
+            indexName,
+            fieldTermPart,
+          );
+          if (!postingList) return [];
+          return this.calculateScores(indexName, postingList, fieldTermPart);
+        }),
+      );
+
+      // Merge and deduplicate results
+      return this.mergeWildcardScores(results.flat());
     }
 
-    // Fallback to the original implementation for complex patterns
-    this.logger.debug(`Using original term dictionary approach for complex pattern: ${pattern}`);
+    // Fallback to general wildcard processing
+    this.logger.debug(`Using general wildcard processing for pattern: ${pattern}`);
 
-    // Get all terms from the dictionary
-    const allTerms = this.termDictionary.getTerms();
-    this.logger.debug(`Total terms in dictionary: ${allTerms.length}`);
+    const fieldTerm = field && field !== '_all' ? `${field}:${basePattern}` : basePattern;
+    const termResults = await this.getIndexAwareTermPostings(indexName, fieldTerm, false);
 
-    // Debug: check specifically for video-related terms
-    const videoTerms = allTerms.filter(t => t.includes('video'));
-    this.logger.debug(
-      `Video-related terms in dictionary: ${JSON.stringify(videoTerms.slice(0, 10))}`,
-    );
-
-    // Determine if we can use efficient prefix matching
-    const canUsePrefixMatching = pattern.startsWith(basePattern) && basePattern.length > 0;
-
-    this.logger.debug(
-      `Pattern: ${pattern}, Base: ${basePattern}, Can use prefix: ${canUsePrefixMatching}`,
-    );
-
-    // Filter terms that match the wildcard pattern
-    const candidateTerms: string[] = [];
-
-    if (canUsePrefixMatching) {
-      // Use efficient prefix matching approach (like regular term search)
-      if (field && field !== '_all') {
-        // For specific field, look for terms starting with 'field:basePattern'
-        const fieldPrefix = `${field}:${basePattern}`;
-        this.logger.debug(`Looking for terms starting with: ${fieldPrefix}`);
-
-        for (const term of allTerms) {
-          if (term.startsWith(fieldPrefix)) {
-            const termValue = term.substring(field.length + 1);
-            if (compiledPattern && compiledPattern.test(termValue)) {
-              this.logger.debug(`Prefix field match: ${term} -> ${termValue} matches pattern`);
-              candidateTerms.push(term);
-            }
-          }
-        }
-      } else {
-        // For _all field, look for terms starting with '_all:basePattern'
-        const allFieldPrefix = `_all:${basePattern}`;
-        this.logger.debug(`Looking for _all field terms starting with: ${allFieldPrefix}`);
-
-        for (const term of allTerms) {
-          if (term.startsWith(allFieldPrefix)) {
-            const termValue = term.substring(5); // Remove '_all:' prefix
-            if (compiledPattern && compiledPattern.test(termValue)) {
-              this.logger.debug(`Prefix _all match: ${term} -> ${termValue} matches pattern`);
-              candidateTerms.push(term);
-            }
-          }
-
-          // Also check other fields that might match the pattern
-          const termParts = term.split(':');
-          if (termParts.length >= 2 && termParts[0] !== '_all') {
-            const termValue = termParts.slice(1).join(':');
-            if (termValue.toLowerCase().startsWith(basePattern.toLowerCase())) {
-              if (compiledPattern && compiledPattern.test(termValue)) {
-                this.logger.debug(
-                  `Prefix other field match: ${term} -> ${termValue} matches pattern`,
-                );
-                candidateTerms.push(term);
-              }
-            }
-          }
-        }
-      }
-    } else {
-      // Use full pattern matching for complex wildcards (leading wildcards, multiple wildcards)
-      for (const term of allTerms) {
-        if (field && field !== '_all') {
-          // For specific field, check if term starts with field:
-          if (term.startsWith(`${field}:`)) {
-            const termValue = term.substring(field.length + 1);
-            if (compiledPattern && compiledPattern.test(termValue)) {
-              this.logger.debug(`Field match: ${term} -> ${termValue} matches pattern`);
-              candidateTerms.push(term);
-            }
-          }
-        } else {
-          // For all fields, check the term value part
-          const termParts = term.split(':');
-          if (termParts.length >= 2) {
-            const termValue = termParts.slice(1).join(':');
-            if (compiledPattern && compiledPattern.test(termValue)) {
-              this.logger.debug(`All-field match: ${term} -> ${termValue} matches pattern`);
-              candidateTerms.push(term);
-            }
-          }
-        }
-      }
+    if (termResults.length === 0) {
+      this.logger.debug(`No wildcard matches found for pattern: ${pattern} in index: ${indexName}`);
+      return [];
     }
 
-    this.logger.debug(
-      `Found ${candidateTerms.length} candidate terms matching wildcard pattern: ${pattern}`,
-    );
-
-    // Process candidate terms using the reusable method
-    const allScores: Array<{ id: string; score: number }> = [];
-    for (const term of candidateTerms) {
-      const termPostings = await this.getTermPostings(term, true);
-      for (const { term: matchingTerm, postingList } of termPostings) {
-        const scores = this.calculateScores(indexName, postingList, matchingTerm);
-        allScores.push(...scores);
-      }
+    // Calculate scores for all matched terms
+    const allResults: Array<{ id: string; score: number }> = [];
+    for (const { term, postingList } of termResults) {
+      const scores = this.calculateScores(indexName, postingList, term);
+      allResults.push(...scores);
     }
 
-    // Merge scores for documents that match multiple terms
-    return this.mergeWildcardScores(allScores);
+    return this.mergeWildcardScores(allResults);
   }
 
   private async executeMatchAllStep(
@@ -621,23 +641,22 @@ export class SearchExecutorService {
     if (results.length === 0) return [];
     if (results.length === 1) return results[0];
 
-    // Find common document IDs
-    const docSets = results.map(result => new Set(result.map(item => item.id)));
-    const commonDocIds = [...docSets[0]].filter(id => docSets.every(set => set.has(id)));
+    // Convert first result to map for O(1) lookup
+    const firstResultMap = new Map(results[0].map(r => [r.id, r.score]));
 
-    // Create a map of document scores from all result sets
-    const scoreMap = new Map<string, number>();
-    results.forEach(result => {
-      result.forEach(item => {
-        scoreMap.set(item.id, (scoreMap.get(item.id) || 0) + item.score);
-      });
-    });
+    // Find documents that exist in all results
+    const commonDocs = results.slice(1).reduce((common, current) => {
+      const currentMap = new Map(current.map(r => [r.id, r.score]));
+      return common
+        .filter(doc => currentMap.has(doc.id))
+        .map(doc => ({
+          id: doc.id,
+          // Combine scores - for AND we multiply normalized scores
+          score: doc.score * (currentMap.get(doc.id) || 0),
+        }));
+    }, results[0]);
 
-    // Return the intersected results with combined scores
-    return commonDocIds.map(id => ({
-      id,
-      score: scoreMap.get(id) || 0,
-    }));
+    return commonDocs;
   }
 
   private unionResults(
@@ -646,27 +665,25 @@ export class SearchExecutorService {
     if (results.length === 0) return [];
     if (results.length === 1) return results[0];
 
-    // Combine all document IDs
+    // Combine all results, summing scores for duplicate documents
     const scoreMap = new Map<string, number>();
-
-    results.forEach(result => {
-      result.forEach(item => {
-        scoreMap.set(item.id, Math.max(scoreMap.get(item.id) || 0, item.score));
-      });
+    results.flat().forEach(result => {
+      const currentScore = scoreMap.get(result.id) || 0;
+      scoreMap.set(result.id, currentScore + result.score);
     });
 
-    // Convert map back to array
     return Array.from(scoreMap.entries()).map(([id, score]) => ({ id, score }));
   }
 
   private subtractResults(
-    leftResults: Array<{ id: string; score: number }>,
-    rightResults: Array<{ id: string; score: number }>,
+    left: Array<{ id: string; score: number }>,
+    right: Array<{ id: string; score: number }>,
   ): Array<{ id: string; score: number }> {
-    const rightDocIds = new Set(rightResults.map(item => item.id));
+    // Convert right result to set for O(1) lookup
+    const rightIds = new Set(right.map(r => r.id));
 
-    // Return documents in left that are not in right
-    return leftResults.filter(item => !rightDocIds.has(item.id));
+    // Return documents from left that don't exist in right
+    return left.filter(doc => !rightIds.has(doc.id));
   }
 
   private sortMatches(
@@ -687,6 +704,7 @@ export class SearchExecutorService {
   private async applyFilters(
     matches: SearchMatch[],
     filter: Record<string, any>,
+    indexName: string,
   ): Promise<SearchMatch[]> {
     if (!filter || !matches.length) {
       return matches;
@@ -694,7 +712,7 @@ export class SearchExecutorService {
 
     // Get documents for filtering
     const documents = await this.fetchDocuments(
-      matches[0].index,
+      indexName,
       matches.map(m => m.id),
     );
 
@@ -724,11 +742,21 @@ export class SearchExecutorService {
   private async fetchDocuments(indexName: string, docIds: string[]): Promise<Record<string, any>> {
     const documents: Record<string, any> = {};
 
+    this.logger.debug(`Fetching documents for IDs: ${JSON.stringify(docIds)}`);
+
     // Fetch documents in batch for efficiency
-    const docs = await this.documentStorage.getDocuments(indexName, docIds);
+    const result = await this.documentStorage.getDocuments(indexName, {
+      filter: {
+        documentId: {
+          $in: docIds,
+        },
+      },
+    });
+
+    this.logger.debug(`Found ${result.documents.length} documents`);
 
     // Index by ID for easy lookup
-    docs.documents.forEach(doc => {
+    result.documents.forEach(doc => {
       documents[doc.documentId] = doc.content;
     });
 

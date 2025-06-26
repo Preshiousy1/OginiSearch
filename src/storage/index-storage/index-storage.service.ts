@@ -9,15 +9,52 @@ import {
 } from '../../index/interfaces/index.interface';
 import { ProcessedDocument } from '../../document/interfaces/document-processor.interface';
 import { IndexRepository } from '../mongodb/repositories/index.repository';
+import { IndexStorage } from '../../index/interfaces/index-storage.interface';
 
 @Injectable()
-export class IndexStorageService {
+export class IndexStorageService implements IndexStorage {
   private readonly logger = new Logger(IndexStorageService.name);
 
   constructor(
     private readonly rocksDBService: RocksDBService,
     private readonly indexRepository: IndexRepository,
   ) {}
+
+  async getDocumentCount(indexName: string): Promise<number> {
+    const index = await this.getIndex(indexName);
+    return index?.documentCount || 0;
+  }
+
+  async getFields(indexName: string): Promise<string[]> {
+    const index = await this.getIndex(indexName);
+    if (!index?.mappings) return [];
+    return Object.keys(index.mappings);
+  }
+
+  async getFieldStats(field: string): Promise<{ totalLength: number; docCount: number } | null> {
+    const key = SerializationUtils.createStatsKey(field, 'field_stats');
+    const data = await this.rocksDBService.get(key);
+    if (!data) return null;
+
+    const stats = SerializationUtils.deserializeIndexStats(data as Buffer);
+    if (!stats || typeof stats.totalLength !== 'number' || typeof stats.docCount !== 'number') {
+      return null;
+    }
+
+    return {
+      totalLength: stats.totalLength,
+      docCount: stats.docCount,
+    };
+  }
+
+  async updateFieldStats(
+    field: string,
+    stats: { totalLength: number; docCount: number },
+  ): Promise<void> {
+    const key = SerializationUtils.createStatsKey(field, 'field_stats');
+    const serialized = SerializationUtils.serializeIndexStats(stats);
+    await this.rocksDBService.put(key, serialized);
+  }
 
   async getIndex(name: string): Promise<Index | null> {
     try {

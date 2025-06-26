@@ -32,7 +32,7 @@ class LRUNode {
   ) {}
 }
 
-// Enhanced LRU Cache with memory pressure handling
+// Enhanced LRU Cache with memory pressure handling and index awareness
 class MemoryOptimizedLRUCache {
   private head: LRUNode | null = null;
   private tail: LRUNode | null = null;
@@ -109,17 +109,66 @@ class MemoryOptimizedLRUCache {
     }
   }
 
-  delete(key: string): boolean {
-    const node = this.cache.get(key);
-    if (!node) return false;
+  private moveToFront(node: LRUNode): void {
+    if (node === this.head) return;
 
-    this.removeNode(node);
+    // Remove from current position
+    if (node.prev) node.prev.next = node.next;
+    if (node.next) node.next.prev = node.prev;
+    if (node === this.tail) this.tail = node.prev;
+
+    // Add to front
+    node.prev = null;
+    node.next = this.head;
+    if (this.head) this.head.prev = node;
+    this.head = node;
+    if (!this.tail) this.tail = node;
+  }
+
+  private addToFront(node: LRUNode): void {
+    node.next = this.head;
+    if (this.head) this.head.prev = node;
+    this.head = node;
+    if (!this.tail) this.tail = node;
+  }
+
+  private removeLast(): string | null {
+    if (!this.tail) return null;
+
+    const key = this.tail.key;
     this.cache.delete(key);
-    return true;
+
+    if (this.tail.prev) {
+      this.tail.prev.next = null;
+      this.tail = this.tail.prev;
+    } else {
+      this.head = null;
+      this.tail = null;
+    }
+
+    return key;
   }
 
   has(key: string): boolean {
     return this.cache.has(key);
+  }
+
+  delete(key: string): boolean {
+    const node = this.cache.get(key);
+    if (!node) return false;
+
+    // Remove from linked list
+    if (node.prev) node.prev.next = node.next;
+    if (node.next) node.next.prev = node.prev;
+    if (node === this.head) this.head = node.next;
+    if (node === this.tail) this.tail = node.prev;
+
+    // Clear references
+    node.prev = null;
+    node.next = null;
+    node.value = null as any;
+
+    return this.cache.delete(key);
   }
 
   size(): number {
@@ -146,46 +195,22 @@ class MemoryOptimizedLRUCache {
     return result;
   }
 
-  private moveToFront(node: LRUNode): void {
-    this.removeNode(node);
-    this.addToFront(node);
+  /**
+   * Get all keys that match a specific index prefix
+   */
+  getKeysByIndex(indexName: string): string[] {
+    const prefix = `${indexName}:`;
+    return Array.from(this.cache.keys()).filter(key => key.startsWith(prefix));
   }
 
-  private addToFront(node: LRUNode): void {
-    node.next = this.head;
-    node.prev = null;
-
-    if (this.head) {
-      this.head.prev = node;
+  /**
+   * Clear all entries for a specific index
+   */
+  clearIndex(indexName: string): void {
+    const keysToDelete = this.getKeysByIndex(indexName);
+    for (const key of keysToDelete) {
+      this.delete(key);
     }
-    this.head = node;
-
-    if (!this.tail) {
-      this.tail = node;
-    }
-  }
-
-  private removeNode(node: LRUNode): void {
-    if (node.prev) {
-      node.prev.next = node.next;
-    } else {
-      this.head = node.next;
-    }
-
-    if (node.next) {
-      node.next.prev = node.prev;
-    } else {
-      this.tail = node.prev;
-    }
-  }
-
-  private removeLast(): string | null {
-    if (!this.tail) return null;
-
-    const key = this.tail.key;
-    this.removeNode(this.tail);
-    this.cache.delete(key);
-    return key;
   }
 }
 
@@ -341,127 +366,145 @@ export class InMemoryTermDictionary implements TermDictionary, OnModuleInit {
     }
   }
 
-  async addTerm(term: string): Promise<PostingList> {
-    this.ensureInitialized();
-    this.operationCount++;
+  /**
+   * Create an index-aware term key
+   */
+  private createIndexAwareTerm(indexName: string, term: string): string {
+    // If term already includes field (field:term), prepend index
+    if (term.includes(':')) {
+      return `${indexName}:${term}`;
+    }
+    // Otherwise create index:field:term format
+    return `${indexName}:_all:${term}`;
+  }
 
-    // Check LRU cache first
-    let postingList = this.lruCache.get(term);
-    if (postingList) {
-      this.memoryUsage.hits++;
-      return postingList;
+  /**
+   * Parse an index-aware term back to its components
+   */
+  private parseIndexAwareTerm(indexAwareTerm: string): { indexName: string; fieldTerm: string } {
+    const parts = indexAwareTerm.split(':');
+    if (parts.length >= 2) {
+      const indexName = parts[0];
+      const fieldTerm = parts.slice(1).join(':');
+      return { indexName, fieldTerm };
+    }
+    throw new Error(`Invalid index-aware term format: ${indexAwareTerm}`);
+  }
+
+  /**
+   * Add term with index context
+   */
+  async addTermForIndex(indexName: string, term: string): Promise<PostingList> {
+    this.ensureInitialized();
+
+    const indexAwareTerm = this.createIndexAwareTerm(indexName, term);
+    this.logger.debug(`Adding index-aware term: ${indexAwareTerm}`);
+
+    // Add to term list
+    this.termList.add(indexAwareTerm);
+
+    // Save term list if persistence is enabled
+    if (this.options.persistToDisk && this.rocksDBService) {
+      await this.saveTermList();
     }
 
-    this.memoryUsage.misses++;
-
-    // Try to load from disk if not in cache
-    postingList = await this.loadTermFromDisk(term);
-
+    // Get or create posting list
+    let postingList = this.lruCache.get(indexAwareTerm);
     if (!postingList) {
-      // Create new posting list
       postingList = this.options.useCompression
         ? new CompressedPostingList()
         : new SimplePostingList();
-    }
-
-    // Add to cache (may trigger eviction)
-    const evictedKeys = this.lruCache.put(term, postingList);
-
-    // Persist evicted terms to disk
-    for (const evictedKey of evictedKeys) {
-      this.memoryUsage.evictions++;
-      const evictedPostingList = this.lruCache.get(evictedKey);
-      if (evictedPostingList) {
-        await this.persistTermToDisk(evictedKey, evictedPostingList);
+      const evictedKeys = this.lruCache.put(indexAwareTerm, postingList);
+      // Handle evicted terms
+      for (const key of evictedKeys) {
+        if (this.options.persistToDisk && this.rocksDBService) {
+          await this.persistTermToDisk(key, postingList);
+        }
       }
-    }
-
-    // Limit term list size
-    this.termList.add(term);
-    if (this.termList.size > this.options.maxCacheSize! * 2) {
-      // Remove oldest terms from the set
-      const termsArray = Array.from(this.termList);
-      const toRemove = termsArray.slice(0, termsArray.length - this.options.maxCacheSize!);
-      toRemove.forEach(t => this.termList.delete(t));
-    }
-
-    if (this.options.persistToDisk && this.rocksDBService && this.operationCount % 100 === 0) {
-      await this.saveTermList();
     }
 
     return postingList;
   }
 
-  async getPostingList(term: string): Promise<PostingList | undefined> {
+  /**
+   * Get posting list with index context
+   */
+  async getPostingListForIndex(indexName: string, term: string): Promise<PostingList | undefined> {
     this.ensureInitialized();
 
+    const indexAwareTerm = this.createIndexAwareTerm(indexName, term);
+    this.logger.debug(`Getting posting list for index-aware term: ${indexAwareTerm}`);
+
     // Check cache first
-    let postingList = this.lruCache.get(term);
+    let postingList = this.lruCache.get(indexAwareTerm);
     if (postingList) {
+      this.logger.debug(`Cache hit for index-aware term: ${indexAwareTerm}`);
       this.memoryUsage.hits++;
       return postingList;
     }
 
     this.memoryUsage.misses++;
 
-    // Try to load from disk
-    postingList = await this.loadTermFromDisk(term);
-    if (postingList) {
-      // Add to cache
-      const evictedKeys = this.lruCache.put(term, postingList);
-
-      // Persist evicted terms
-      for (const evictedKey of evictedKeys) {
-        this.memoryUsage.evictions++;
-        const evictedPostingList = this.lruCache.get(evictedKey);
-        if (evictedPostingList) {
-          await this.persistTermToDisk(evictedKey, evictedPostingList);
+    // If not in cache and persistence is enabled, try loading from disk
+    if (this.options.persistToDisk && this.rocksDBService) {
+      this.logger.debug(`Loading index-aware term from disk: ${indexAwareTerm}`);
+      postingList = await this.loadTermFromDisk(indexAwareTerm);
+      if (postingList) {
+        // Add to cache
+        const evictedKeys = this.lruCache.put(indexAwareTerm, postingList);
+        // Handle evicted terms
+        for (const key of evictedKeys) {
+          if (this.options.persistToDisk && this.rocksDBService) {
+            await this.persistTermToDisk(key, postingList);
+          }
         }
+        return postingList;
       }
-
-      return postingList;
     }
 
+    // Not found
     return undefined;
   }
 
-  hasTerm(term: string): boolean {
-    return this.lruCache.has(term) || this.termList.has(term);
+  /**
+   * Get all terms for a specific index
+   */
+  getTermsForIndex(indexName: string): string[] {
+    const prefix = `${indexName}:`;
+    const indexTerms = Array.from(this.termList).filter(term => term.startsWith(prefix));
+
+    // Also check cache for recently accessed terms
+    const cacheKeys = this.lruCache.getKeysByIndex(indexName);
+
+    // Combine and deduplicate
+    const allTerms = new Set([...indexTerms, ...cacheKeys]);
+    return Array.from(allTerms);
+
+    // Return only the field:term part (without index prefix)
+    return Array.from(allTerms).map(term => {
+      const { fieldTerm } = this.parseIndexAwareTerm(term);
+      return fieldTerm;
+    });
   }
 
-  async removeTerm(term: string): Promise<boolean> {
-    this.ensureInitialized();
-
-    const wasInCache = this.lruCache.delete(term);
-    const wasInTermList = this.termList.delete(term);
-
-    if (wasInTermList && this.options.persistToDisk && this.rocksDBService) {
-      try {
-        await this.rocksDBService.delete(this.getTermKey(term));
-        await this.saveTermList();
-      } catch (error) {
-        this.logger.error(`Failed to remove term ${term} from storage: ${error.message}`);
-      }
-    }
-
-    return wasInCache || wasInTermList;
+  /**
+   * Check if term exists for a specific index
+   */
+  hasTermForIndex(indexName: string, term: string): boolean {
+    const indexAwareTerm = this.createIndexAwareTerm(indexName, term);
+    return this.lruCache.has(indexAwareTerm) || this.termList.has(indexAwareTerm);
   }
 
-  getTerms(): string[] {
-    return Array.from(this.termList).slice(0, 1000); // Limit returned terms
-  }
-
-  size(): number {
-    return Math.min(this.termList.size, this.options.maxCacheSize! * 2);
-  }
-
-  async addPosting(term: string, entry: PostingEntry): Promise<void> {
-    const postingList = await this.addTerm(term);
+  /**
+   * Add posting with index context
+   */
+  async addPostingForIndex(indexName: string, term: string, entry: PostingEntry): Promise<void> {
+    const postingList = await this.addTermForIndex(indexName, term);
 
     // Check posting list size limit
     if (postingList.size() >= this.options.maxPostingListSize!) {
       this.logger.warn(
-        `Posting list for term '${term}' has reached size limit (${this.options.maxPostingListSize})`,
+        `Posting list for term '${term}' in index '${indexName}' has reached size limit (${this.options.maxPostingListSize})`,
       );
       // Remove oldest entries to make room
       const entries = postingList.getEntries();
@@ -471,38 +514,56 @@ export class InMemoryTermDictionary implements TermDictionary, OnModuleInit {
 
     postingList.addEntry(entry);
 
+    // Persist periodically
     if (this.options.persistToDisk && this.rocksDBService && this.operationCount % 50 === 0) {
       try {
+        const indexAwareTerm = this.createIndexAwareTerm(indexName, term);
         const serialized = postingList.serialize();
-        await this.rocksDBService.put(this.getTermKey(term), serialized);
+        await this.rocksDBService.put(this.getTermKey(indexAwareTerm), serialized);
       } catch (error) {
-        this.logger.error(`Failed to persist postings for term ${term}: ${error.message}`);
+        this.logger.error(
+          `Failed to persist postings for term ${term} in index ${indexName}: ${error.message}`,
+        );
       }
     }
+
+    this.operationCount++;
   }
 
-  async removePosting(term: string, docId: number | string): Promise<boolean> {
-    const postingList = await this.getPostingList(term);
-    if (!postingList) {
-      return false;
-    }
+  /**
+   * Clear all data for a specific index
+   */
+  async clearIndex(indexName: string): Promise<void> {
+    this.logger.log(`Clearing term dictionary for index: ${indexName}`);
 
-    const removed = postingList.removeEntry(docId);
+    try {
+      // Clear from cache
+      this.lruCache.clearIndex(indexName);
 
-    if (removed && this.options.persistToDisk && this.rocksDBService) {
-      try {
-        if (postingList.size() === 0) {
-          await this.removeTerm(term);
-        } else {
-          const serialized = postingList.serialize();
-          await this.rocksDBService.put(this.getTermKey(term), serialized);
-        }
-      } catch (error) {
-        this.logger.error(`Failed to update postings for term ${term}: ${error.message}`);
+      // Clear from term list
+      const prefix = `${indexName}:`;
+      const termsToRemove = Array.from(this.termList).filter(term => term.startsWith(prefix));
+      for (const term of termsToRemove) {
+        this.termList.delete(term);
       }
-    }
 
-    return removed;
+      // Clear from disk storage
+      if (this.options.persistToDisk && this.rocksDBService) {
+        for (const term of termsToRemove) {
+          try {
+            await this.rocksDBService.delete(this.getTermKey(term));
+          } catch (error) {
+            this.logger.warn(`Failed to delete term ${term} from disk: ${error.message}`);
+          }
+        }
+        await this.saveTermList();
+      }
+
+      this.logger.log(`Cleared ${termsToRemove.length} terms for index ${indexName}`);
+    } catch (error) {
+      this.logger.error(`Failed to clear index ${indexName}: ${error.message}`);
+      throw error;
+    }
   }
 
   private ensureInitialized() {
@@ -631,6 +692,87 @@ export class InMemoryTermDictionary implements TermDictionary, OnModuleInit {
     } catch (error) {
       this.logger.error(`Failed to cleanup term dictionary: ${error.message}`);
     }
+  }
+
+  // Implement the required clear() method from TermDictionary interface
+  async clear(): Promise<void> {
+    await this.cleanup();
+  }
+
+  // Legacy interface methods (kept for backward compatibility)
+  async addTerm(term: string): Promise<PostingList> {
+    // Use a default index for backward compatibility
+    return this.addTermForIndex('_default', term);
+  }
+
+  async getPostingList(term: string): Promise<PostingList | undefined> {
+    // Use a default index for backward compatibility
+    return this.getPostingListForIndex('_default', term);
+  }
+
+  hasTerm(term: string): boolean {
+    // Check in default index for backward compatibility
+    return this.hasTermForIndex('_default', term);
+  }
+
+  async removeTerm(term: string): Promise<boolean> {
+    this.ensureInitialized();
+
+    const indexAwareTerm = this.createIndexAwareTerm('_default', term);
+    const wasInCache = this.lruCache.delete(indexAwareTerm);
+    const wasInTermList = this.termList.delete(indexAwareTerm);
+
+    if (wasInTermList && this.options.persistToDisk && this.rocksDBService) {
+      try {
+        await this.rocksDBService.delete(this.getTermKey(indexAwareTerm));
+        await this.saveTermList();
+      } catch (error) {
+        this.logger.error(`Failed to remove term ${term} from storage: ${error.message}`);
+      }
+    }
+
+    return wasInCache || wasInTermList;
+  }
+
+  getTerms(): string[] {
+    this.ensureInitialized();
+    return Array.from(this.termList).map(term => {
+      // Ensure all terms have a field prefix
+      return term.includes(':') ? term : `_all:${term}`;
+    });
+  }
+
+  size(): number {
+    return Math.min(this.termList.size, this.options.maxCacheSize! * 2);
+  }
+
+  async addPosting(term: string, entry: PostingEntry): Promise<void> {
+    return this.addPostingForIndex('_default', term, entry);
+  }
+
+  async removePosting(term: string, docId: number | string): Promise<boolean> {
+    const postingList = await this.getPostingList(term);
+    if (!postingList) {
+      return false;
+    }
+
+    const removed = postingList.removeEntry(docId);
+
+    if (removed && this.options.persistToDisk && this.rocksDBService) {
+      try {
+        if (postingList.size() === 0) {
+          await this.removeTerm(term);
+        } else {
+          const indexAwareTerm = this.createIndexAwareTerm('_default', term);
+          const serialized = postingList.serialize();
+          await this.rocksDBService.put(this.getTermKey(indexAwareTerm), serialized);
+        }
+      } catch (error) {
+        this.logger.error(`Failed to update postings for term ${term}: ${error.message}`);
+      }
+    }
+
+    return removed;
   }
 }
 

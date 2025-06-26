@@ -121,7 +121,9 @@ export class DocumentService implements OnModuleInit {
             const elapsed = Date.now() - startTime;
             const rate = processed / (elapsed / 1000);
             this.logger.log(
-              `Processed ${processed}/${documents.documents.length} documents for index ${indexName} (${rate.toFixed(1)} docs/sec)`,
+              `Processed ${processed}/${
+                documents.documents.length
+              } documents for index ${indexName} (${rate.toFixed(1)} docs/sec)`,
             );
           }
         } catch (error) {
@@ -134,7 +136,9 @@ export class DocumentService implements OnModuleInit {
       const elapsed = Date.now() - startTime;
       const rate = processed / (elapsed / 1000);
       this.logger.log(
-        `Completed manual rebuild for index ${indexName}: ${processed} documents processed in ${elapsed}ms (${rate.toFixed(1)} docs/sec)`,
+        `Completed manual rebuild for index ${indexName}: ${processed} documents processed in ${elapsed}ms (${rate.toFixed(
+          1,
+        )} docs/sec)`,
       );
     } catch (error) {
       this.logger.error(`Error rebuilding index ${indexName}: ${error.message}`);
@@ -160,8 +164,8 @@ export class DocumentService implements OnModuleInit {
     // Store document in storage
     const storedDocument = await this.documentStorageService.storeDocument(indexName, {
       documentId,
-      content: documentDto.document,
-      metadata: {},
+      content: documentDto.document, // Store document directly as content
+      metadata: documentDto.document.metadata || {}, // Extract metadata if present
     });
 
     // Index the document for search
@@ -235,7 +239,7 @@ export class DocumentService implements OnModuleInit {
         } mode)`,
       );
 
-      const batchId = await this.bulkIndexingService.queueBatchDocuments(
+      const { batchId, status } = await this.bulkIndexingService.queueBulkIndexing(
         indexName,
         documentsWithIds,
         options,
@@ -312,11 +316,11 @@ export class DocumentService implements OnModuleInit {
       try {
         const documentId = doc.id;
 
-        // Store document
+        // Store document - store the document object directly as content
         await this.documentStorageService.storeDocument(indexName, {
           documentId,
-          content: doc.document,
-          metadata: {},
+          content: doc.document, // Store document directly as content
+          metadata: doc.document.metadata || {}, // Extract metadata if present
         });
 
         // Index document
@@ -370,7 +374,7 @@ export class DocumentService implements OnModuleInit {
       index: indexName,
       version: 1,
       found: true,
-      source: document.content,
+      source: document.content, // Return content directly as source
     };
   }
 
@@ -413,6 +417,18 @@ export class DocumentService implements OnModuleInit {
     // Check if index exists
     await this.checkIndexExists(indexName);
 
+    // Get document terms before deletion
+    const processedDoc = await this.indexingService.getProcessedDocument(indexName, id);
+    if (processedDoc) {
+      // Remove document from all term posting lists
+      for (const [field, fieldData] of Object.entries(processedDoc.fields)) {
+        for (const term of fieldData.terms) {
+          const termKey = `${field}:${term}`;
+          await this.termDictionary.removePosting(termKey, id);
+        }
+      }
+    }
+
     // Delete from storage
     const deleted = await this.documentStorageService.deleteDocument(indexName, id);
 
@@ -433,16 +449,16 @@ export class DocumentService implements OnModuleInit {
       }),
     );
 
-    // Save changes to disk
-    await this.termDictionary.saveToDisk();
-
+    // Remove from index
     try {
-      // Remove from index - this will handle the case where the document might not exist in the processed store
       await this.indexingService.removeDocument(indexName, id);
     } catch (error) {
       this.logger.error(`Error removing document from index: ${error.message}`);
       // We've already deleted from storage, so we should continue and not throw
     }
+
+    // Save term dictionary changes to disk
+    await this.termDictionary.saveToDisk();
   }
 
   async deleteByQuery(
@@ -861,5 +877,41 @@ export class DocumentService implements OnModuleInit {
         successCount: 0,
       };
     }
+  }
+
+  async storeDocument(indexName: string, documentId: string, document: any): Promise<void> {
+    try {
+      await this.documentStorageService.storeDocument(indexName, {
+        documentId,
+        content: document,
+        metadata: {},
+      });
+    } catch (error) {
+      this.logger.error(`Error storing document ${documentId}: ${error.message}`);
+      throw error;
+    }
+  }
+
+  async updateTermDictionary(
+    indexName: string,
+    terms: Array<{ term: string; positions: number[] }>,
+  ): Promise<void> {
+    try {
+      for (const { term, positions } of terms) {
+        await this.termDictionary.addPosting(term, {
+          docId: indexName,
+          frequency: positions.length,
+          positions,
+        });
+      }
+    } catch (error) {
+      this.logger.error(`Error updating term dictionary: ${error.message}`);
+      throw error;
+    }
+  }
+
+  async deleteAllDocuments(): Promise<void> {
+    this.logger.warn('Deleting ALL documents from ALL indices');
+    await this.documentStorageService.deleteAllDocuments();
   }
 }

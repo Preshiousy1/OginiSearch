@@ -73,4 +73,8 @@ export class IndexRepository {
       .updateOne({ name }, { documentCount: count, updatedAt: new Date().toISOString() })
       .exec();
   }
+
+  async deleteAll(): Promise<void> {
+    await this.indexModel.deleteMany({});
+  }
 }

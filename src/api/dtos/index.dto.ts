@@ -1,13 +1,5 @@
-import {
-  IsString,
-  IsNotEmpty,
-  IsOptional,
-  IsObject,
-  ValidateNested,
-  IsIn,
-  IsBooleanString,
-} from 'class-validator';
-import { FieldMapping, IndexMappings, IndexSettings } from '../../index/interfaces/index.interface';
+import { IsString, IsNotEmpty, IsOptional, IsObject, ValidateNested, IsIn } from 'class-validator';
+import { FieldMapping, IndexMappings } from '../../index/interfaces/index.interface';
 import { ApiProperty } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 

@@ -6,8 +6,10 @@ import { SearchExecutorService } from './search-executor.service';
 import { IndexModule } from '../index/index.module';
 import { StorageModule } from '../storage/storage.module';
 import { AnalysisModule } from '../analysis/analysis.module';
+import { MongoDBModule } from '../storage/mongodb/mongodb.module';
+
 @Module({
-  imports: [IndexModule, StorageModule, AnalysisModule],
+  imports: [IndexModule, StorageModule, AnalysisModule, MongoDBModule],
   providers: [SearchService, QueryProcessorService, QueryPlannerService, SearchExecutorService],
   exports: [SearchService, QueryProcessorService],
 })

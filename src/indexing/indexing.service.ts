@@ -60,34 +60,29 @@ export class IndexingService {
         const positions = fieldData.positions?.[term] || [];
         const frequency = fieldData.termFrequencies[term] || 1;
 
-        // Add to in-memory term dictionary
-        const postingList = await this.termDictionary.addTerm(fieldTerm);
-        postingList.addEntry({
-          docId: documentId,
-          frequency,
-          positions,
-          metadata: { field },
-        });
+        // Create term entry
+        const termEntry = {
+          docId: documentId.toString(),
+          frequency: 1,
+          positions: [],
+          metadata: {},
+        };
 
-        // Save to both RocksDB and MongoDB via PersistentTermDictionaryService
-        await this.persistentTermDictionary.saveTermPostings(indexName, fieldTerm, postingList);
+        // Use index-aware term dictionary
+        await this.termDictionary.addPostingForIndex(indexName, fieldTerm, termEntry);
 
-        // Also add to _all field for cross-field search
+        this.logger.debug(`Added term to index-aware dictionary: ${indexName}:${fieldTerm}`);
+
+        // Also add to _all field for cross-field search using index-aware approach
         const allFieldTerm = `_all:${term}`;
-        const allPostingList = await this.termDictionary.addTerm(allFieldTerm);
-        allPostingList.addEntry({
-          docId: documentId,
-          frequency,
-          positions,
+        const allTermEntry = {
+          docId: documentId.toString(),
+          frequency: 1,
+          positions: [],
           metadata: { field },
-        });
+        };
 
-        // Save _all field term postings to both RocksDB and MongoDB
-        await this.persistentTermDictionary.saveTermPostings(
-          indexName,
-          allFieldTerm,
-          allPostingList,
-        );
+        await this.termDictionary.addPostingForIndex(indexName, allFieldTerm, allTermEntry);
       }
     }
 
@@ -174,7 +169,7 @@ export class IndexingService {
     }
 
     try {
-      // 3. Remove the processed document
+      // 3. Remove processed document from storage
       await this.indexStorage.deleteProcessedDocument(indexName, documentId);
     } catch (error) {
       this.logger.warn(`Error removing processed document ${documentId}: ${error.message}`);
@@ -197,6 +192,13 @@ export class IndexingService {
     } catch (error) {
       this.logger.warn(`Error updating index metadata for ${indexName}: ${error.message}`);
     }
+  }
+
+  async getProcessedDocument(
+    indexName: string,
+    documentId: string,
+  ): Promise<ProcessedDocument | null> {
+    return this.indexStorage.getProcessedDocument(indexName, documentId);
   }
 
   async updateAll(indexName: string): Promise<void> {

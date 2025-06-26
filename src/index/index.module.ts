@@ -10,6 +10,9 @@ import { CompressedPostingList } from './compressed-posting-list';
 import { RocksDBService } from '../storage/rocksdb/rocksdb.service';
 import { BM25Scorer } from './bm25-scorer';
 import { DocumentCountVerifierService } from './document-count-verifier.service';
+import { IndexStorageService } from '../storage/index-storage/index-storage.service';
+import { TermDictionary } from './interfaces/term-dictionary.interface';
+import { IndexStorage } from './interfaces/index-storage.interface';
 
 @Module({
   imports: [
@@ -18,11 +21,9 @@ import { DocumentCountVerifierService } from './document-count-verifier.service'
     forwardRef(() => AnalysisModule),
   ],
   providers: [
-    IndexService,
-    IndexStatsService,
     {
       provide: 'TERM_DICTIONARY',
-      useFactory: (rocksDBService: RocksDBService) =>
+      useFactory: (rocksDBService: RocksDBService): TermDictionary =>
         new InMemoryTermDictionary(
           {
             useCompression: false,
@@ -31,6 +32,17 @@ import { DocumentCountVerifierService } from './document-count-verifier.service'
           rocksDBService,
         ),
       inject: [RocksDBService],
+    },
+    {
+      provide: 'IndexStorage',
+      useExisting: IndexStorageService,
+    },
+    IndexService,
+    {
+      provide: IndexStatsService,
+      useFactory: (termDictionary: TermDictionary, indexStorage: IndexStorage) =>
+        new IndexStatsService(termDictionary, indexStorage),
+      inject: ['TERM_DICTIONARY', 'IndexStorage'],
     },
     {
       provide: 'BM25_SCORER',
@@ -48,6 +60,7 @@ import { DocumentCountVerifierService } from './document-count-verifier.service'
   ],
   exports: [
     'TERM_DICTIONARY',
+    'IndexStorage',
     IndexStatsService,
     'BM25_SCORER',
     SimplePostingList,

@@ -7,6 +7,7 @@ import {
   ProcessedField,
 } from './interfaces/document-processor.interface';
 import { AnalyzerRegistryService } from '../analysis/analyzer-registry.service';
+
 @Injectable()
 export class DocumentProcessorService implements DocumentProcessor, OnModuleInit {
   private mapping: DocumentMapping = { fields: {} };

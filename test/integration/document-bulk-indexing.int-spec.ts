@@ -395,9 +395,6 @@ describe('DocumentService Bulk Indexing Integration', () => {
       expect(result.successCount).toBe(100);
       expect(result.errors).toBe(false);
       expect(duration).toBeLessThan(15000); // Should complete within 15 seconds
-
-      console.log(`Bulk indexed 100 documents in ${duration}ms`);
-      console.log(`Average rate: ${(100 / (duration / 1000)).toFixed(2)} docs/second`);
     }, 20000);
 
     it('should handle large document batches efficiently', async () => {
@@ -426,9 +423,6 @@ describe('DocumentService Bulk Indexing Integration', () => {
       const sampledDoc = await documentService.getDocument(testIndexName, 'large-batch-250');
       expect(sampledDoc.found).toBe(true);
       expect(sampledDoc.source.metadata.position).toBe(250);
-
-      console.log(`Bulk indexed 500 documents in ${duration}ms`);
-      console.log(`Average rate: ${(500 / (duration / 1000)).toFixed(2)} docs/second`);
     }, 70000);
   });
 

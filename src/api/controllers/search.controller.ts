@@ -1,4 +1,14 @@
-import { Controller, Post, Body, Param, HttpStatus, ValidationPipe, Query } from '@nestjs/common';
+import {
+  Controller,
+  Post,
+  Body,
+  Param,
+  HttpStatus,
+  ValidationPipe,
+  Query,
+  BadRequestException,
+  Delete,
+} from '@nestjs/common';
 import {
   SearchQueryDto,
   SearchResponseDto,
@@ -302,6 +312,10 @@ export class SearchController {
     description: 'Index not found',
   })
   async search(@Param('index') index: string, @Body() searchDto: SearchQueryDto) {
+    if (!searchDto) {
+      throw new BadRequestException('Search query is required');
+    }
+
     // Convert to appropriate SearchQueryDto format if necessary
     // This handles both string and object formats for backward compatibility
     if (typeof searchDto.query === 'string') {
@@ -378,11 +392,20 @@ export class SearchController {
     description: 'Index not found',
   })
   async suggest(@Param('index') index: string, @Body() suggestDto: SuggestQueryDto) {
+    if (!suggestDto || !suggestDto.text) {
+      throw new BadRequestException('Suggest query text is required');
+    }
+
     const suggestions = await this.searchService.suggest(index, suggestDto);
 
     return {
       suggestions,
       took: Math.floor(Math.random() * 10) + 1, // Simulated processing time
     };
+  }
+
+  @Delete('_clear_dictionary')
+  async clearDictionary(@Param('index') index: string) {
+    return this.searchService.clearDictionary(index);
   }
 }

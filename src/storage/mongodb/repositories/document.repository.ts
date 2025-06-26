@@ -32,6 +32,14 @@ export class DocumentRepository {
           indexName,
           documentId,
         })
+        .select({
+          indexName: 1,
+          documentId: 1,
+          content: 1,
+          metadata: 1,
+          _id: 0,
+        })
+        .lean()
         .exec();
     } catch (error) {
       this.logger.error(`Error finding document: ${error.message}`, error.stack);
@@ -52,20 +60,42 @@ export class DocumentRepository {
       // Base query with index name
       const query: FilterQuery<DocumentEntity> = { indexName };
 
+      this.logger.debug(`Base query: ${JSON.stringify(query)}`);
+      this.logger.debug(`Filter: ${JSON.stringify(filter)}`);
+
       // Handle content field filtering properly
       if (filter && Object.keys(filter).length > 0) {
         // For each field in the filter, create the proper MongoDB query
         Object.entries(filter).forEach(([field, value]) => {
-          // Create a query that matches documents where the field in content matches the value
-          query[`content.${field}`] = value;
+          // Special handling for documentId which is a top-level field
+          if (field === 'documentId') {
+            query[field] = value;
+          } else {
+            // For other fields, assume they are in the content object
+            query[`content.${field}`] = value;
+          }
         });
       }
 
       const [documents, total] = await Promise.all([
-        this.documentModel.find(query).sort({ createdAt: -1 }).skip(offset).limit(limit).exec(),
+        this.documentModel
+          .find(query)
+          .select({
+            indexName: 1,
+            documentId: 1,
+            content: 1,
+            metadata: 1,
+            _id: 0,
+          })
+          .sort({ createdAt: -1 })
+          .skip(offset)
+          .limit(limit)
+          .lean()
+          .exec(),
         this.documentModel.countDocuments(query).exec(),
       ]);
 
+      this.logger.debug(`Found ${documents.length} documents`);
       return { documents, total };
     } catch (error) {
       this.logger.error(`Failed to find documents: ${error.message}`, error.stack);
@@ -132,5 +162,9 @@ export class DocumentRepository {
       this.logger.error(`Failed to perform bulk write: ${error.message}`, error.stack);
       throw error;
     }
+  }
+
+  async deleteAll(): Promise<void> {
+    await this.documentModel.deleteMany({});
   }
 }

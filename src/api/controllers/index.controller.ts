@@ -10,6 +10,7 @@ import {
   HttpStatus,
   HttpCode,
   ValidationPipe,
+  BadRequestException,
 } from '@nestjs/common';
 import {
   CreateIndexDto,
@@ -32,12 +33,15 @@ import {
 import { IndexRepository } from '../../storage/mongodb/repositories/index.repository';
 import { IndexingService } from '../../indexing/indexing.service';
 import { DocumentService } from '../../document/document.service';
+import { Logger } from '@nestjs/common';
 
 @ApiTags('Indices')
 @ApiExtraModels(CreateIndexDto, UpdateIndexSettingsDto)
 @ApiBearerAuth('JWT-auth')
 @Controller('api/indices')
 export class IndexController {
+  private readonly logger = new Logger(IndexController.name);
+
   constructor(
     private readonly indexService: IndexService,
     private readonly indexRepository: IndexRepository,
@@ -380,7 +384,7 @@ export class IndexController {
     // Start the rebuild process in the background
     // Note: We don't await this to return immediately
     this.documentService.rebuildSpecificIndex(name).catch(error => {
-      console.error(`Manual rebuild failed for index ${name}:`, error);
+      this.logger.error(`Manual rebuild failed for index ${name}: ${error.message}`, error.stack);
     });
 
     return {
@@ -478,5 +482,108 @@ export class IndexController {
   @ApiResponse({ status: 404, description: 'Index not found' })
   async autoDetectMappings(@Param('indexName') indexName: string): Promise<IndexResponseDto> {
     return this.indexService.autoDetectMappings(indexName);
+  }
+
+  @Post(':indexName/clear-cache')
+  @ApiOperation({ summary: 'Clear term dictionary cache for index' })
+  @ApiParam({ name: 'indexName', description: 'Name of the index' })
+  @ApiResponse({
+    status: 200,
+    description: 'Cache cleared successfully',
+    schema: {
+      properties: {
+        message: { type: 'string' },
+        clearedTerms: { type: 'number' },
+      },
+    },
+  })
+  async clearIndexCache(@Param('indexName') indexName: string) {
+    this.logger.log(`Clearing cache for index: ${indexName}`);
+
+    try {
+      // Get the term dictionary and clear cache for this index
+      const termDictionary = this.indexService.getTermDictionary();
+
+      // Count terms before clearing
+      const termsBefore = termDictionary.getTermsForIndex(indexName).length;
+
+      // Clear the index cache
+      await termDictionary.clearIndex(indexName);
+
+      return {
+        message: `Cache cleared successfully for index ${indexName}`,
+        clearedTerms: termsBefore,
+      };
+    } catch (error) {
+      this.logger.error(`Error clearing cache for index ${indexName}: ${error.message}`);
+      throw new BadRequestException(`Error clearing cache: ${error.message}`);
+    }
+  }
+
+  @Post('system/reset')
+  @ApiOperation({
+    summary: 'Complete system reset (DESTRUCTIVE)',
+    description:
+      'Destroys ALL data: term dictionary, RocksDB, MongoDB. Requires RESET_KEY environment variable.',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'System reset completed successfully',
+    schema: {
+      properties: {
+        message: { type: 'string' },
+        resetComponents: { type: 'array', items: { type: 'string' } },
+        timestamp: { type: 'string' },
+      },
+    },
+  })
+  @ApiResponse({
+    status: 403,
+    description: 'Invalid or missing reset key',
+  })
+  async completeSystemReset(@Body() body: { resetKey: string }) {
+    // Temporary hardcoded key for testing
+    const hardcodedResetKey = 'test-reset-key-123';
+    const requiredKey = process.env.RESET_KEY || hardcodedResetKey;
+
+    if (!requiredKey || body.resetKey !== requiredKey) {
+      this.logger.warn('Unauthorized system reset attempt');
+      throw new BadRequestException('Invalid reset key');
+    }
+
+    this.logger.warn('INITIATING COMPLETE SYSTEM RESET - ALL DATA WILL BE DESTROYED');
+
+    const resetComponents: string[] = [];
+
+    try {
+      // 1. Clear term dictionary completely
+      const termDictionary = this.indexService.getTermDictionary();
+      await termDictionary.cleanup();
+      resetComponents.push('Term Dictionary');
+
+      // 2. Clear RocksDB completely
+      const rocksDBService = this.indexService.getRocksDBService();
+      await rocksDBService.clear();
+      resetComponents.push('RocksDB');
+
+      // 3. Clear MongoDB completely
+      await this.indexRepository.deleteAll();
+      resetComponents.push('MongoDB Indices');
+
+      // 4. Clear document storage
+      await this.documentService.deleteAllDocuments();
+      resetComponents.push('Document Storage');
+
+      this.logger.warn(`System reset completed. Reset components: ${resetComponents.join(', ')}`);
+
+      return {
+        message: 'Complete system reset successful - ALL DATA DESTROYED',
+        resetComponents,
+        timestamp: new Date().toISOString(),
+      };
+    } catch (error) {
+      this.logger.error(`System reset failed: ${error.message}`);
+      throw new BadRequestException(`System reset failed: ${error.message}`);
+    }
   }
 }

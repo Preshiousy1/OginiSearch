@@ -10,6 +10,9 @@ import {
   WildcardQuery,
   MatchAllQuery,
   QueryExecutionPlan,
+  SearchQuery,
+  WildcardQueryStep,
+  MatchAllQueryStep,
 } from './interfaces/query-processor.interface';
 import { AnalyzerRegistryService } from '../analysis/analyzer-registry.service';
 import { QueryPlannerService } from './query-planner.service';
@@ -25,15 +28,12 @@ export class QueryProcessorService implements QueryProcessor {
    * Process a raw query into structured query objects
    */
   processQuery(rawQuery: RawQuery): ProcessedQuery {
-    // Parse and normalize query
     const parsedQuery = this.parseQuery(rawQuery);
-
-    // Create execution plan
-    const executionPlan = this.queryPlanner.createPlan(parsedQuery);
+    const executionPlan = this.queryPlanner.createPlan(parsedQuery as Query);
 
     return {
       original: rawQuery,
-      parsedQuery,
+      parsedQuery: parsedQuery as Query,
       executionPlan,
     };
   }
@@ -41,35 +41,47 @@ export class QueryProcessorService implements QueryProcessor {
   /**
    * Parse raw query string into structured query objects
    */
-  private parseQuery(rawQuery: RawQuery): Query {
-    // Handle string queries first
+  private parseQuery(rawQuery: RawQuery): SearchQuery {
+    // Handle string queries
     if (typeof rawQuery.query === 'string') {
       return this.parseStringQuery(rawQuery);
     }
 
     // Handle object queries
-    if (rawQuery.query.match_all) {
-      return this.createMatchAllQuery(rawQuery.query.match_all);
+    if (rawQuery.query) {
+      // Handle wildcard query
+      if (rawQuery.query.wildcard) {
+        if (typeof rawQuery.query.wildcard === 'string') {
+          return this.createWildcardQuery(
+            {
+              field: '_all',
+              value: rawQuery.query.wildcard,
+            },
+            rawQuery.fields || ['_all'],
+          );
+        } else {
+          return this.createWildcardQuery(rawQuery.query.wildcard, rawQuery.fields || ['_all']);
+        }
+      }
+
+      // Handle match query
+      if (rawQuery.query.match) {
+        return this.parseMatchQuery(rawQuery);
+      }
+
+      // Handle term query
+      if (rawQuery.query.term) {
+        return this.parseTermQuery(rawQuery);
+      }
+
+      // Handle match_all query
+      if (rawQuery.query.match_all !== undefined) {
+        return this.createMatchAllQuery(rawQuery);
+      }
     }
 
-    if (rawQuery.query.wildcard) {
-      return this.createWildcardQuery(rawQuery.query.wildcard, rawQuery.fields);
-    }
-
-    if (rawQuery.query.match) {
-      return this.parseMatchQuery(rawQuery);
-    }
-
-    if (rawQuery.query.term) {
-      return this.parseTermQuery(rawQuery);
-    }
-
-    // Default to empty boolean query
-    return {
-      type: 'boolean',
-      operator: 'or',
-      clauses: [],
-    };
+    // Default fallback
+    return this.createMatchAllQuery(rawQuery);
   }
 
   /**
@@ -115,15 +127,19 @@ export class QueryProcessorService implements QueryProcessor {
    * Create a wildcard query
    */
   private createWildcardQuery(
-    wildcardDto: { value: string; boost?: number; field?: string } | Record<string, any>,
+    wildcardDto: { field?: string; value: string; boost?: number } | Record<string, any>,
     fields?: string[],
   ): WildcardQuery {
     // Handle direct wildcard query format
     if ('value' in wildcardDto) {
+      const field = wildcardDto.field || (fields && fields[0]) || '_all';
       return {
         type: 'wildcard',
-        field: wildcardDto.field || (fields && fields[0]) || '_all',
+        field,
+        pattern: wildcardDto.value,
         value: wildcardDto.value,
+        boost: wildcardDto.boost,
+        fields: fields,
       };
     }
 
@@ -132,10 +148,14 @@ export class QueryProcessorService implements QueryProcessor {
     if (entries.length > 0) {
       const [field, config] = entries[0];
       const value = typeof config === 'string' ? config : config.value;
+      const boost = typeof config === 'object' ? config.boost : undefined;
       return {
         type: 'wildcard',
         field,
+        pattern: value,
         value,
+        boost,
+        fields: fields,
       };
     }
 
@@ -143,27 +163,59 @@ export class QueryProcessorService implements QueryProcessor {
     return {
       type: 'wildcard',
       field: '_all',
+      pattern: '*',
       value: '*',
+      fields: fields,
     };
   }
 
   /**
    * Parse match queries
    */
-  private parseMatchQuery(rawQuery: RawQuery): Query {
+  private parseMatchQuery(rawQuery: RawQuery): SearchQuery {
     const { text, fields } = this.extractQueryTextAndFields(rawQuery);
 
     // Check if the match query value is actually a wildcard pattern
     if (this.isWildcardQuery(text)) {
-      return this.createWildcardQuery({ value: text }, fields);
+      // Create proper wildcard query object
+      const wildcardField = (rawQuery.query as any)?.match?.field || fields[0] || '_all';
+
+      const wildcardQueryObj = {
+        field: wildcardField,
+        value: text,
+        boost: (rawQuery.query as any)?.match?.boost,
+      };
+
+      const result = this.createWildcardQuery(wildcardQueryObj, fields);
+      return result;
     }
 
     // Check for match-all pattern in match query
     if (text.trim() === '*' || text.trim() === '') {
-      return this.createMatchAllQuery({});
+      return this.createMatchAllQuery(rawQuery);
     }
 
-    return this.parseRegularStringQuery(text, fields);
+    // Split the text into terms
+    const analyzer = this.analyzerRegistryService.getAnalyzer('standard');
+    const terms = analyzer.analyze(text);
+
+    // If we have multiple terms, create a boolean query
+    if (terms.length > 1) {
+      const clauses: TermQuery[] = terms.map(term => ({
+        type: 'term',
+        field: fields[0],
+        value: term,
+      }));
+
+      return {
+        type: 'boolean',
+        operator: 'and',
+        clauses,
+      };
+    }
+
+    // Single term query
+    return this.createTermQuery(fields[0], terms[0] || text);
   }
 
   /**
@@ -237,23 +289,23 @@ export class QueryProcessorService implements QueryProcessor {
   /**
    * Extract query text and fields from raw query
    */
-  extractQueryTextAndFields(rawQuery: RawQuery): { text: string; fields: string[] } {
+  private extractQueryTextAndFields(rawQuery: RawQuery): { text: string; fields: string[] } {
     // Handle string queries
     if (typeof rawQuery.query === 'string') {
-      return { text: rawQuery.query, fields: rawQuery.fields || ['_all'] };
+      return { text: rawQuery.query, fields: rawQuery.fields || ['content'] };
     }
 
     // Handle object queries
-    if (rawQuery.query.match) {
+    if (rawQuery.query?.match) {
       const field = rawQuery.query.match.field;
       return {
         text: rawQuery.query.match.value,
-        fields: field ? [field] : rawQuery.fields || ['_all'],
+        fields: field ? [field] : rawQuery.fields || ['content'],
       };
     }
 
     // Handle term queries
-    if (rawQuery.query.term) {
+    if (rawQuery.query?.term) {
       const entries = Object.entries(rawQuery.query.term);
       if (entries.length > 0) {
         const [field, value] = entries[0];
@@ -261,8 +313,37 @@ export class QueryProcessorService implements QueryProcessor {
       }
     }
 
+    // Handle wildcard queries
+    if (rawQuery.query?.wildcard) {
+      const wildcardQuery = rawQuery.query.wildcard as { value: string; boost?: number } | string;
+      const wildcardValue = typeof wildcardQuery === 'string' ? wildcardQuery : wildcardQuery.value;
+      const wildcardBoost = typeof wildcardQuery === 'string' ? undefined : wildcardQuery.boost;
+
+      return {
+        text: wildcardValue,
+        fields: rawQuery.fields || ['content'],
+      };
+    }
+
+    // Handle match-all queries
+    if (rawQuery.query?.match_all) {
+      return { text: '*', fields: rawQuery.fields || ['content'] };
+    }
+
+    // Handle new format
+    if (rawQuery.value !== undefined) {
+      const text = typeof rawQuery.value === 'string' ? rawQuery.value : '';
+      const fields = Array.isArray(rawQuery.fields)
+        ? rawQuery.fields
+        : typeof rawQuery.fields === 'string'
+        ? [rawQuery.fields]
+        : rawQuery.fields || ['content'];
+
+      return { text, fields };
+    }
+
     // Default to empty query if none of the above formats match
-    return { text: '', fields: rawQuery.fields || ['_all'] };
+    return { text: '', fields: rawQuery.fields || ['content'] };
   }
 
   /**
@@ -295,18 +376,18 @@ export class QueryProcessorService implements QueryProcessor {
   /**
    * Create a term query with analyzer applied
    */
-  private createTermQuery(field: string, term: string): TermQuery {
+  private createTermQuery(field: string, value: string): TermQuery {
     // Apply analyzer to term
     const analyzer = this.analyzerRegistryService.getAnalyzer('standard');
-    const analyzedTerms = analyzer.analyze(term);
+    const analyzedTerms = analyzer.analyze(value);
 
     // Use first analyzed term or original if analysis yields nothing
-    const analyzedTerm = analyzedTerms.length > 0 ? analyzedTerms[0] : term;
+    const analyzedTerm = analyzedTerms.length > 0 ? analyzedTerms[0] : value;
 
     return {
       type: 'term',
       field,
-      value: analyzedTerm,
+      value: analyzedTerm.toLowerCase(), // Ensure term is lowercase for consistency
     };
   }
 
@@ -322,6 +403,90 @@ export class QueryProcessorService implements QueryProcessor {
       type: 'phrase',
       field,
       terms: analyzedTerms.length > 0 ? analyzedTerms : [phrase],
+    };
+  }
+
+  private processRawQuery(rawQuery: RawQuery): SearchQuery {
+    if (rawQuery.type === 'match_all') {
+      return this.createMatchAllQuery(rawQuery);
+    }
+
+    if (typeof rawQuery.query === 'string') {
+      // Handle simple text query
+      return {
+        type: 'term',
+        field: Array.isArray(rawQuery.fields) ? rawQuery.fields[0] : rawQuery.fields?.[0] || '_all',
+        value: rawQuery.query,
+      };
+    }
+
+    if (rawQuery.query?.match_all) {
+      return this.createMatchAllQuery(rawQuery.query.match_all);
+    }
+
+    if (rawQuery.query?.wildcard) {
+      const wildcardQuery = rawQuery.query.wildcard as { value: string; boost?: number } | string;
+      const wildcardValue = typeof wildcardQuery === 'string' ? wildcardQuery : wildcardQuery.value;
+      const wildcardBoost = typeof wildcardQuery === 'string' ? undefined : wildcardQuery.boost;
+
+      return {
+        type: 'wildcard',
+        field: '_all',
+        pattern: wildcardValue,
+        value: wildcardValue,
+        boost: wildcardBoost,
+      };
+    }
+
+    // Default to term query
+    return {
+      type: 'term',
+      field: Array.isArray(rawQuery.fields) ? rawQuery.fields[0] : rawQuery.fields?.[0] || '_all',
+      value: rawQuery.value || '',
+    };
+  }
+
+  private processMatchAllQuery(query: { boost?: number }): MatchAllQueryStep {
+    return {
+      type: 'match_all',
+      boost: query?.boost || 1.0,
+      cost: 1.0,
+    };
+  }
+
+  private processWildcardQuery(query: any): WildcardQueryStep {
+    let field = '_all';
+    let value = '';
+    let boost = 1.0;
+
+    if (typeof query === 'object') {
+      if ('field' in query) {
+        // Handle WildcardQueryDto format
+        field = query.field || '_all';
+        value = query.value;
+        boost = query.boost || 1.0;
+      } else {
+        // Handle Record<string, { value: string; boost?: number }> format
+        const [fieldName, config] = Object.entries(query)[0];
+        field = fieldName;
+        value = (config as { value: string }).value;
+        boost = (config as { boost?: number }).boost || 1.0;
+      }
+    }
+
+    // Create regex pattern for wildcard matching
+    const pattern = value
+      .replace(/[.+^${}()|[\]\\]/g, '\\$&') // Escape regex special chars
+      .replace(/\*/g, '.*')
+      .replace(/\?/g, '.');
+    const compiledPattern = new RegExp(`^${pattern}$`, 'i');
+
+    return {
+      type: 'wildcard',
+      field,
+      pattern: value,
+      compiledPattern,
+      cost: 2.0 * boost, // Wildcard queries are more expensive than exact matches
     };
   }
 }

@@ -137,7 +137,7 @@ export class BulkIndexingController {
     }
 
     try {
-      const batchId = await this.bulkIndexingService.queueBatchDocuments(
+      const { batchId, status } = await this.bulkIndexingService.queueBulkIndexing(
         dto.indexName,
         dto.documents,
         dto.options || {},
@@ -220,10 +220,10 @@ export class BulkIndexingController {
     try {
       // Get detailed queue information
       const stats = await this.bulkIndexingService.getQueueStats();
-      
+
       // Get the actual Bull queue to inspect job types
       const queueStats = await this.bulkIndexingService.getDetailedQueueStats();
-      
+
       return {
         singleJobs: queueStats.singleJobs || 0,
         batchJobs: queueStats.batchJobs || 0,
@@ -374,6 +374,52 @@ export class BulkIndexingController {
     } catch (error) {
       this.logger.error(`Failed to clean queue: ${error.message}`);
       throw new BadRequestException(`Failed to clean queue: ${error.message}`);
+    }
+  }
+
+  @Get('failed-jobs')
+  @ApiOperation({ summary: 'Get failed jobs with error details' })
+  @ApiResponse({
+    status: HttpStatus.OK,
+    description: 'List of failed jobs with error details',
+    schema: {
+      type: 'object',
+      properties: {
+        failedJobs: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              id: { type: 'string' },
+              type: { type: 'string' },
+              failedReason: { type: 'string' },
+              attemptsMade: { type: 'number' },
+              data: { type: 'object' },
+              timestamp: { type: 'string' },
+            },
+          },
+        },
+        total: { type: 'number' },
+      },
+    },
+  })
+  async getFailedJobs() {
+    try {
+      const failedJobs = await this.bulkIndexingService.getFailedJobs();
+      return {
+        failedJobs: failedJobs.map(job => ({
+          id: job.id,
+          type: job.name,
+          failedReason: job.failedReason,
+          attemptsMade: job.attemptsMade,
+          data: job.data,
+          timestamp: job.finishedOn,
+        })),
+        total: failedJobs.length,
+      };
+    } catch (error) {
+      this.logger.error(`Failed to get failed jobs: ${error.message}`);
+      throw new BadRequestException(`Failed to get failed jobs: ${error.message}`);
     }
   }
 }

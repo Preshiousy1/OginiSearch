@@ -209,9 +209,23 @@ export class DocumentStorageService {
     } = {},
   ): Promise<{ documents: SourceDocument[]; total: number }> {
     try {
-      return await this.documentRepository.findAll(indexName, options);
+      this.logger.debug(
+        `Getting documents from ${indexName} with options: ${JSON.stringify(options)}`,
+      );
+      const result = await this.documentRepository.findAll(indexName, options);
+      this.logger.debug(`Found ${result.documents.length} documents in document storage`);
+      return result;
     } catch (error) {
       this.logger.error(`Failed to get documents: ${error.message}`);
+      throw error;
+    }
+  }
+
+  async deleteAllDocuments(): Promise<void> {
+    try {
+      await this.documentRepository.deleteAll();
+    } catch (error) {
+      this.logger.error(`Failed to delete all documents: ${error.message}`);
       throw error;
     }
   }

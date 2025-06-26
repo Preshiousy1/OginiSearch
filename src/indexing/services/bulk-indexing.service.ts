@@ -3,7 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { DocumentService } from 'src/document/document.service';
 import { IndexService } from 'src/index/index.service';
 import { InjectQueue } from '@nestjs/bull';
-import { Queue } from 'bull';
+import Bull from 'bull';
 
 export interface BulkIndexingOptions {
   batchSize?: number;
@@ -12,6 +12,7 @@ export interface BulkIndexingOptions {
   enableProgress?: boolean;
   priority?: number;
   retryAttempts?: number;
+  retryDelay?: number;
 }
 
 export interface BulkIndexingProgress {
@@ -54,9 +55,17 @@ export interface BatchIndexingJob {
   metadata?: Record<string, any>;
 }
 
+export interface BulkIndexingResponse {
+  batchId: string;
+  totalBatches: number;
+  totalDocuments: number;
+  status: string;
+}
+
 @Injectable()
 export class BulkIndexingService {
   private readonly logger = new Logger(BulkIndexingService.name);
+  private readonly deadLetterQueue: Bull.Queue;
 
   // Configuration constants
   private readonly DEFAULT_BATCH_SIZE = 500;
@@ -67,9 +76,53 @@ export class BulkIndexingService {
     private readonly documentService: DocumentService,
     private readonly indexService: IndexService,
     private readonly configService: ConfigService,
-    @InjectQueue('indexing')
-    private indexingQueue: Queue,
-  ) {}
+    @InjectQueue('indexing') private readonly indexingQueue: Bull.Queue,
+  ) {
+    // Initialize dead letter queue
+    this.deadLetterQueue = new Bull('indexing-dlq', {
+      redis: {
+        host: this.configService.get('REDIS_HOST', 'localhost'),
+        port: this.configService.get('REDIS_PORT', 6379),
+      },
+      defaultJobOptions: {
+        removeOnComplete: false,
+        removeOnFail: false,
+      },
+    });
+
+    // Listen for failed jobs
+    this.indexingQueue.on('failed', async (job: Bull.Job, error: Error) => {
+      if (job.attemptsMade >= job.opts.attempts) {
+        await this.moveToDeadLetterQueue(job, error);
+      }
+    });
+  }
+
+  private async moveToDeadLetterQueue(job: Bull.Job, error: Error): Promise<void> {
+    try {
+      await this.deadLetterQueue.add(
+        'failed',
+        {
+          ...job.data,
+          error: {
+            message: error.message,
+            stack: error.stack,
+          },
+          failedAt: new Date().toISOString(),
+          attempts: job.attemptsMade,
+        },
+        {
+          jobId: `dlq:${job.id}`,
+        },
+      );
+
+      this.logger.warn(
+        `Moved failed job ${job.id} to dead letter queue after ${job.attemptsMade} attempts`,
+      );
+    } catch (dlqError) {
+      this.logger.error(`Failed to move job ${job.id} to dead letter queue: ${dlqError.message}`);
+    }
+  }
 
   /**
    * Queue a single document for indexing
@@ -111,53 +164,73 @@ export class BulkIndexingService {
   /**
    * Queue a batch of documents for indexing
    */
-  async queueBatchDocuments(
+  async queueBulkIndexing(
     indexName: string,
     documents: Array<{ id: string; document: any }>,
     options: BulkIndexingOptions = {},
-  ): Promise<string> {
-    const batchId = this.generateJobId('batch', indexName);
-    const batchSize = options.batchSize || this.DEFAULT_BATCH_SIZE;
+  ): Promise<BulkIndexingResponse> {
+    const {
+      batchSize = 50,
+      skipDuplicates = true,
+      enableProgress = true,
+      priority = 5,
+      retryAttempts = 3,
+      retryDelay = 5000,
+    } = options;
 
-    if (documents.length === 0) {
-      this.logger.warn(`No documents to process for batch ${batchId}`);
-      return null;
-    }
+    const batchId = `batch:${indexName}:${Date.now()}:${Math.random().toString(36).substr(2, 6)}`;
+    const batches = [];
 
-    // Split into smaller batches
-    const batches = this.chunkArray(documents, batchSize);
-    const totalBatches = batches.length;
+    // Split documents into batches
+    for (let i = 0; i < documents.length; i += batchSize) {
+      const batch = documents.slice(i, i + batchSize);
+      const batchNumber = Math.floor(i / batchSize) + 1;
+      const totalBatches = Math.ceil(documents.length / batchSize);
 
-    // Queue each batch
-    for (let i = 0; i < batches.length; i++) {
-      const batch = batches[i];
-      const batchJobId = `${batchId}:${i}`;
-
-      const job: BatchIndexingJob = {
-        indexName,
-        documents: batch,
-        batchId: batchJobId,
-        options,
-        metadata: {
-          queuedAt: new Date().toISOString(),
-          parentBatchId: batchId,
-          batchNumber: i + 1,
-          totalBatches,
-          source: 'bulk',
+      const job = await this.indexingQueue.add(
+        'batch',
+        {
+          indexName,
+          documents: batch,
+          batchId: `${batchId}:${batchNumber}`,
+          options: {
+            batchSize,
+            skipDuplicates,
+            enableProgress,
+            priority,
+            retryAttempts,
+          },
+          metadata: {
+            queuedAt: new Date().toISOString(),
+            parentBatchId: batchId,
+            batchNumber,
+            totalBatches,
+            source: 'bulk',
+          },
         },
-      };
+        {
+          priority,
+          attempts: retryAttempts,
+          backoff: {
+            type: 'exponential',
+            delay: retryDelay,
+          },
+          removeOnComplete: 100,
+          removeOnFail: 50,
+        },
+      );
 
-      await this.indexingQueue.add('batch', job, {
-        jobId: batchJobId,
-        removeOnComplete: 10,
-        removeOnFail: 5,
-        attempts: options.retryAttempts || 3,
-        priority: options.priority || 3,
-      });
+      batches.push(job);
     }
 
-    this.logger.log(`Queued ${totalBatches} batches for bulk indexing with batch ID ${batchId}`);
-    return batchId;
+    this.logger.log(`Queued ${batches.length} batches for bulk indexing`);
+
+    return {
+      batchId,
+      totalBatches: batches.length,
+      totalDocuments: documents.length,
+      status: 'queued',
+    };
   }
 
   /**
@@ -206,7 +279,9 @@ export class BulkIndexingService {
         }
       });
 
-      this.logger.debug(`Queue stats: ${singleJobs} single, ${batchJobs} batch, ${failedSingleJobs} failed single, ${failedBatchJobs} failed batch`);
+      this.logger.debug(
+        `Queue stats: ${singleJobs} single, ${batchJobs} batch, ${failedSingleJobs} failed single, ${failedBatchJobs} failed batch`,
+      );
 
       return {
         singleJobs,
@@ -298,28 +373,30 @@ export class BulkIndexingService {
    */
   async cleanQueue(): Promise<void> {
     this.logger.log('Starting comprehensive queue cleanup...');
-    
+
     try {
       // Get current stats before cleaning
       const statsBefore = await this.getDetailedQueueStats();
-      this.logger.log(`Before cleanup: ${statsBefore.singleJobs} single, ${statsBefore.batchJobs} batch, ${statsBefore.totalWaiting} waiting, ${statsBefore.totalActive} active, ${statsBefore.totalFailed} failed`);
+      this.logger.log(
+        `Before cleanup: ${statsBefore.singleJobs} single, ${statsBefore.batchJobs} batch, ${statsBefore.totalWaiting} waiting, ${statsBefore.totalActive} active, ${statsBefore.totalFailed} failed`,
+      );
 
       // Clean completed jobs (aggressive - older than 1 second)
       await this.indexingQueue.clean(1000, 'completed');
-      
-      // Clean failed jobs (aggressive - older than 1 second)  
+
+      // Clean failed jobs (aggressive - older than 1 second)
       await this.indexingQueue.clean(1000, 'failed');
-      
+
       // Clean active jobs (force clean stuck jobs)
       await this.indexingQueue.clean(0, 'active');
-      
+
       // Clean delayed jobs
       await this.indexingQueue.clean(0, 'delayed');
 
       // For waiting jobs, we need to manually remove them
       const waitingJobs = await this.indexingQueue.getWaiting();
       this.logger.log(`Manually removing ${waitingJobs.length} waiting jobs`);
-      
+
       for (const job of waitingJobs) {
         try {
           await job.remove();
@@ -333,8 +410,10 @@ export class BulkIndexingService {
 
       // Get stats after cleaning
       const statsAfter = await this.getDetailedQueueStats();
-      this.logger.log(`After cleanup: ${statsAfter.singleJobs} single, ${statsAfter.batchJobs} batch, ${statsAfter.totalWaiting} waiting, ${statsAfter.totalActive} active, ${statsAfter.totalFailed} failed`);
-      
+      this.logger.log(
+        `After cleanup: ${statsAfter.singleJobs} single, ${statsAfter.batchJobs} batch, ${statsAfter.totalWaiting} waiting, ${statsAfter.totalActive} active, ${statsAfter.totalFailed} failed`,
+      );
+
       this.logger.log('Queue cleanup completed successfully');
     } catch (error) {
       this.logger.error(`Queue cleanup failed: ${error.message}`);
@@ -356,6 +435,55 @@ export class BulkIndexingService {
   async resumeQueue(): Promise<void> {
     await this.indexingQueue.resume();
     this.logger.log('Indexing queue resumed');
+  }
+
+  /**
+   * Get failed jobs with details
+   */
+  async getFailedJobs(): Promise<Array<Bull.Job>> {
+    try {
+      // Get failed jobs from both queues
+      const [mainQueueFailedJobs, dlqFailedJobs] = await Promise.all([
+        this.indexingQueue.getFailed(),
+        this.deadLetterQueue.getJobs(['failed']),
+      ]);
+
+      // Combine and sort all failed jobs by timestamp
+      const allFailedJobs = [...mainQueueFailedJobs, ...dlqFailedJobs];
+      return allFailedJobs.sort(
+        (a, b) => (b.finishedOn || b.timestamp) - (a.finishedOn || a.timestamp),
+      );
+    } catch (error) {
+      this.logger.error(`Failed to get failed jobs: ${error.message}`);
+      throw error;
+    }
+  }
+
+  async retryFailedJob(jobId: string): Promise<void> {
+    try {
+      const job = await this.deadLetterQueue.getJob(jobId);
+      if (!job) {
+        throw new Error(`Job ${jobId} not found in dead letter queue`);
+      }
+
+      // Remove error information and retry in main queue
+      const { error, failedAt, attempts, ...jobData } = job.data;
+      await this.indexingQueue.add('batch', jobData, {
+        attempts: 3,
+        backoff: {
+          type: 'exponential',
+          delay: 5000,
+        },
+      });
+
+      // Remove from dead letter queue
+      await job.remove();
+
+      this.logger.log(`Retried failed job ${jobId}`);
+    } catch (error) {
+      this.logger.error(`Failed to retry job ${jobId}: ${error.message}`);
+      throw error;
+    }
   }
 
   // Helper methods

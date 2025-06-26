@@ -12,3 +12,17 @@ export interface IndexMetadata {
   updatedAt: string;
   documentCount: number;
 }
+
+export interface ProcessedField {
+  original: any;
+  terms: string[];
+  termFrequencies: Record<string, number>;
+  length: number;
+}
+
+export interface ProcessedDocument {
+  id: string;
+  fields: Record<string, ProcessedField>;
+  source: Record<string, any>;
+  fieldLengths: Record<string, number>;
+}

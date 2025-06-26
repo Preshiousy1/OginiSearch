@@ -12,6 +12,7 @@ import {
   BooleanQueryStep,
   WildcardQueryStep,
   MatchAllQueryStep,
+  PhraseQueryStep,
 } from './interfaces/query-processor.interface';
 import { IndexStatsService } from '../index/index-stats.service';
 
@@ -28,7 +29,7 @@ export class QueryPlannerService {
 
     return {
       steps: [step],
-      totalCost: step.cost,
+      cost: step.cost,
       estimatedResults: step.estimatedResults,
     };
   }
@@ -37,7 +38,8 @@ export class QueryPlannerService {
    * Create an execution step for a query
    */
   private createExecutionStep(query: Query): QueryExecutionStep {
-    switch (query.type) {
+    const queryType = query.type as 'term' | 'phrase' | 'boolean' | 'wildcard' | 'match_all';
+    switch (queryType) {
       case 'term':
         return this.createTermStep(query as TermQuery);
       case 'phrase':
@@ -49,7 +51,7 @@ export class QueryPlannerService {
       case 'match_all':
         return this.createMatchAllStep(query as MatchAllQuery);
       default:
-        throw new Error(`Unsupported query type: ${query.type}`);
+        throw new Error(`Unsupported query type: ${queryType}`);
     }
   }
 
@@ -57,6 +59,7 @@ export class QueryPlannerService {
    * Create an execution step for a term query
    */
   private createTermStep(query: TermQuery): TermQueryStep {
+    // Get document frequency for cost calculation
     const fieldTerm = `${query.field}:${query.value}`;
     const documentFrequency = this.indexStats.getDocumentFrequency(fieldTerm);
 
@@ -67,7 +70,7 @@ export class QueryPlannerService {
     return {
       type: 'term',
       field: query.field,
-      term: fieldTerm,
+      term: query.value,
       cost,
       estimatedResults: documentFrequency,
     };
@@ -77,36 +80,36 @@ export class QueryPlannerService {
    * Create an execution step for a wildcard query
    */
   private createWildcardStep(query: WildcardQuery): WildcardQueryStep {
-    // Wildcard queries are expensive as they require pattern matching
-    const totalDocs = this.indexStats.totalDocuments;
-
-    // Estimate cost based on wildcard pattern complexity
-    let cost = totalDocs * 2; // Base cost for scanning
-
-    // More wildcards = higher cost
-    const wildcardCount =
-      (query.value.match(/\*/g) || []).length + (query.value.match(/\?/g) || []).length;
-    cost = cost * (1 + wildcardCount * 0.5);
-
-    // Estimate results based on pattern specificity
-    let estimatedResults = totalDocs;
-
-    // More specific patterns should match fewer documents
-    const nonWildcardLength = query.value.replace(/[*?]/g, '').length;
-    if (nonWildcardLength > 0) {
-      estimatedResults = Math.max(1, Math.floor((totalDocs * 0.1) / nonWildcardLength));
+    // Check if pattern exists
+    if (!query.pattern) {
+      throw new Error(`Wildcard query missing pattern property. Query: ${JSON.stringify(query)}`);
     }
 
-    // Compile regex pattern for execution
-    const regexPattern = this.compileWildcardPattern(query.value);
+    // Calculate cost based on wildcard complexity
+    const wildcardCount =
+      (query.pattern.match(/\*/g) || []).length + (query.pattern.match(/\?/g) || []).length;
+
+    // Higher cost for leading wildcards
+    const hasLeadingWildcard = query.pattern.startsWith('*') || query.pattern.startsWith('?');
+    const leadingWildcardPenalty = hasLeadingWildcard ? 1000 : 0;
+
+    // Cost also increases with non-wildcard length
+    const nonWildcardLength = query.pattern.replace(/[*?]/g, '').length;
+    const lengthCost = Math.max(1, nonWildcardLength);
+
+    // Total cost combines all factors
+    const cost = wildcardCount * 2 + leadingWildcardPenalty + lengthCost;
+
+    // Compile wildcard pattern to regex
+    const regexPattern = this.compileWildcardPattern(query.pattern);
 
     return {
       type: 'wildcard',
       field: query.field,
-      pattern: query.value,
+      pattern: query.pattern,
       compiledPattern: regexPattern,
       cost,
-      estimatedResults,
+      estimatedResults: Math.ceil(this.indexStats.totalDocuments * 0.1), // Rough estimate: 10% of total docs
     };
   }
 
@@ -119,8 +122,8 @@ export class QueryPlannerService {
     return {
       type: 'match_all',
       boost: query.boost || 1.0,
-      cost: totalDocs, // Cost is proportional to total documents
-      estimatedResults: totalDocs, // Returns all documents
+      cost: totalDocs,
+      estimatedResults: totalDocs,
     };
   }
 
@@ -140,48 +143,28 @@ export class QueryPlannerService {
 
   /**
    * Create an execution step for a phrase query
-   * Phrases are more complex and costly than term queries
    */
-  private createPhraseStep(query: PhraseQuery): QueryExecutionStep {
-    // For phrase queries, we convert to a boolean AND of terms
-    // with position checking during actual execution
-
-    // Create a boolean step with all terms in the phrase
-    const clauses: TermQuery[] = query.terms.map(term => ({
-      type: 'term',
+  private createPhraseStep(query: PhraseQuery): PhraseQueryStep {
+    // Create a phrase step
+    const step: PhraseQueryStep = {
+      type: 'phrase',
       field: query.field,
-      value: term,
-    }));
-
-    const boolStep: BooleanQuery = {
-      type: 'boolean',
-      operator: 'and',
-      clauses,
+      terms: query.terms,
+      cost: query.terms.length * 2, // Base cost on number of terms
+      estimatedResults: Math.ceil(this.indexStats.totalDocuments * 0.01), // Rough estimate: 1% of total docs
     };
-
-    // Create a boolean execution step but mark as a phrase
-    const step = this.createBooleanStep(boolStep);
-    step.type = 'phrase'; // Override the type
-
-    // Phrase matching is more expensive than boolean AND
-    step.cost = step.cost * 1.5;
-
-    // Phrase matches will be fewer than just the terms overlapping
-    step.estimatedResults = Math.max(1, Math.floor(step.estimatedResults * 0.3));
 
     return step;
   }
 
   /**
    * Create an execution step for a boolean query
-   * Optimize by ordering clauses by selectivity
    */
   private createBooleanStep(query: BooleanQuery): BooleanQueryStep {
     // Create steps for all clauses
     const steps = query.clauses.map(clause => this.createExecutionStep(clause));
 
     // Order steps by cost for efficient execution
-    // Lowest cost (most selective) first for early termination
     steps.sort((a, b) => a.cost - b.cost);
 
     // Calculate total cost and estimated results
@@ -194,13 +177,13 @@ export class QueryPlannerService {
         // For AND, cost is sum of all steps, results is minimum
         totalCost = steps.reduce((sum, step) => sum + step.cost, 0);
         estimatedResults =
-          steps.length > 0 ? Math.min(...steps.map(step => step.estimatedResults)) : 0;
+          steps.length > 0 ? Math.min(...steps.map(step => step.estimatedResults || 0)) : 0;
         break;
 
       case 'or':
         // For OR, cost is sum, results is sum
         totalCost = steps.reduce((sum, step) => sum + step.cost, 0);
-        estimatedResults = steps.reduce((sum, step) => sum + step.estimatedResults, 0);
+        estimatedResults = steps.reduce((sum, step) => sum + (step.estimatedResults || 0), 0);
         break;
 
       case 'not':
@@ -210,7 +193,7 @@ export class QueryPlannerService {
         const totalDocs = this.indexStats.totalDocuments;
         estimatedResults = Math.max(
           0,
-          totalDocs - steps.reduce((sum, step) => sum + step.estimatedResults, 0),
+          totalDocs - steps.reduce((sum, step) => sum + (step.estimatedResults || 0), 0),
         );
         break;
     }
@@ -222,5 +205,25 @@ export class QueryPlannerService {
       cost: totalCost,
       estimatedResults,
     };
+  }
+
+  private isTermQuery(query: Query): query is TermQuery {
+    return query.type === 'term';
+  }
+
+  private isPhraseQuery(query: Query): query is PhraseQuery {
+    return query.type === 'phrase';
+  }
+
+  private isBooleanQuery(query: Query): query is BooleanQuery {
+    return query.type === 'boolean';
+  }
+
+  private isWildcardQuery(query: Query): query is WildcardQuery {
+    return query.type === 'wildcard';
+  }
+
+  private isMatchAllQuery(query: Query): query is MatchAllQuery {
+    return query.type === 'match_all';
   }
 }
