@@ -224,6 +224,9 @@ export class BulkIndexingController {
       // Get the actual Bull queue to inspect job types
       const queueStats = await this.bulkIndexingService.getDetailedQueueStats();
 
+      this.logger.debug(`Stats endpoint - Basic stats: ${JSON.stringify(stats)}`);
+      this.logger.debug(`Stats endpoint - Detailed stats: ${JSON.stringify(queueStats)}`);
+
       return {
         singleJobs: queueStats.singleJobs || 0,
         batchJobs: queueStats.batchJobs || 0,
@@ -280,15 +283,21 @@ export class BulkIndexingController {
       const health = await this.bulkIndexingService.getQueueHealth();
       const stats = health.stats;
 
+      // Get detailed stats to properly categorize job types
+      const detailedStats = await this.bulkIndexingService.getDetailedQueueStats();
+
+      this.logger.debug(`Health endpoint - Basic stats: ${JSON.stringify(stats)}`);
+      this.logger.debug(`Health endpoint - Detailed stats: ${JSON.stringify(detailedStats)}`);
+
       return {
         status: health.status,
         queues: {
-          singleJobs: stats?.waiting || 0,
-          batchJobs: stats?.active || 0,
-          failedSingleJobs: stats?.failed || 0,
-          failedBatchJobs: 0,
-          totalActive: (stats?.waiting || 0) + (stats?.active || 0),
-          totalFailed: stats?.failed || 0,
+          singleJobs: detailedStats.singleJobs || 0,
+          batchJobs: detailedStats.batchJobs || 0,
+          failedSingleJobs: detailedStats.failedSingleJobs || 0,
+          failedBatchJobs: detailedStats.failedBatchJobs || 0,
+          totalActive: detailedStats.singleJobs + detailedStats.batchJobs,
+          totalFailed: detailedStats.failedSingleJobs + detailedStats.failedBatchJobs,
         },
         timestamp: new Date().toISOString(),
       };

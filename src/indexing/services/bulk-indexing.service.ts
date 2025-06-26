@@ -255,6 +255,10 @@ export class BulkIndexingService {
         this.indexingQueue.getFailed(),
       ]);
 
+      this.logger.debug(
+        `Queue job counts: waiting=${waitingJobs.length}, active=${activeJobs.length}, completed=${completedJobs.length}, failed=${failedJobs.length}`,
+      );
+
       // Count jobs by type
       let singleJobs = 0;
       let batchJobs = 0;
@@ -262,7 +266,12 @@ export class BulkIndexingService {
       let failedBatchJobs = 0;
 
       // Count waiting and active jobs
-      [...waitingJobs, ...activeJobs].forEach(job => {
+      [...waitingJobs, ...activeJobs].forEach((job, index) => {
+        this.logger.debug(
+          `Job ${index}: name="${job.name}", id="${job.id}", data keys: ${Object.keys(
+            job.data || {},
+          ).join(',')}`,
+        );
         if (job.name === 'single') {
           singleJobs++;
         } else if (job.name === 'batch') {
@@ -271,7 +280,8 @@ export class BulkIndexingService {
       });
 
       // Count failed jobs by type
-      failedJobs.forEach(job => {
+      failedJobs.forEach((job, index) => {
+        this.logger.debug(`Failed job ${index}: name="${job.name}", id="${job.id}"`);
         if (job.name === 'single') {
           failedSingleJobs++;
         } else if (job.name === 'batch') {
@@ -280,7 +290,7 @@ export class BulkIndexingService {
       });
 
       this.logger.debug(
-        `Queue stats: ${singleJobs} single, ${batchJobs} batch, ${failedSingleJobs} failed single, ${failedBatchJobs} failed batch`,
+        `Final categorization: ${singleJobs} single, ${batchJobs} batch, ${failedSingleJobs} failed single, ${failedBatchJobs} failed batch`,
       );
 
       return {

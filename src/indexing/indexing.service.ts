@@ -71,8 +71,6 @@ export class IndexingService {
         // Use index-aware term dictionary
         await this.termDictionary.addPostingForIndex(indexName, fieldTerm, termEntry);
 
-        this.logger.debug(`Added term to index-aware dictionary: ${indexName}:${fieldTerm}`);
-
         // Also add to _all field for cross-field search using index-aware approach
         const allFieldTerm = `_all:${term}`;
         const allTermEntry = {

@@ -28,6 +28,7 @@ import { IndexStorage } from './interfaces/index-storage.interface';
           {
             useCompression: false,
             persistToDisk: true,
+            maxPostingListSize: 10000,
           },
           rocksDBService,
         ),

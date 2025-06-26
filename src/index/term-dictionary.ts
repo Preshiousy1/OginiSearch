@@ -9,7 +9,7 @@ const TERM_PREFIX = 'term:';
 const TERM_LIST_KEY = 'term_list';
 const DEFAULT_MAX_CACHE_SIZE = 1000; // Reduced from 10000
 const DEFAULT_EVICTION_THRESHOLD = 0.5; // More aggressive eviction
-const MAX_POSTING_LIST_SIZE = 1000; // Limit posting list size
+const MAX_POSTING_LIST_SIZE = 5000; // Increased from 1000 to accommodate larger datasets
 const MEMORY_CHECK_INTERVAL = 100; // Check memory every 100 operations
 
 export interface TermDictionaryOptions {
@@ -398,7 +398,6 @@ export class InMemoryTermDictionary implements TermDictionary, OnModuleInit {
     this.ensureInitialized();
 
     const indexAwareTerm = this.createIndexAwareTerm(indexName, term);
-    this.logger.debug(`Adding index-aware term: ${indexAwareTerm}`);
 
     // Add to term list
     this.termList.add(indexAwareTerm);
@@ -503,8 +502,8 @@ export class InMemoryTermDictionary implements TermDictionary, OnModuleInit {
 
     // Check posting list size limit
     if (postingList.size() >= this.options.maxPostingListSize!) {
-      this.logger.warn(
-        `Posting list for term '${term}' in index '${indexName}' has reached size limit (${this.options.maxPostingListSize})`,
+      this.logger.debug(
+        `Posting list for term '${term}' in index '${indexName}' has reached size limit (${this.options.maxPostingListSize}) - removing oldest entries`,
       );
       // Remove oldest entries to make room
       const entries = postingList.getEntries();
