@@ -438,11 +438,23 @@ export class IndexController {
     try {
       // Test MongoDB connection by trying to find all indices
       const indices = await this.indexRepository.findAll();
+
+      // Get term postings count for each index
+      const termPostingsInfo = [];
+      for (const index of indices) {
+        const termCount = await this.termPostingsRepository.getTermCount(index.name);
+        termPostingsInfo.push({
+          indexName: index.name,
+          termCount,
+        });
+      }
+
       return {
         status: 'success',
         message: 'MongoDB connection working',
         indicesCount: indices.length,
         indices: indices.map(idx => ({ name: idx.name, createdAt: idx.createdAt })),
+        termPostings: termPostingsInfo,
       };
     } catch (error) {
       return {

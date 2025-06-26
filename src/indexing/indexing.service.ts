@@ -360,38 +360,67 @@ export class IndexingService {
     this.logger.log(`Persisting term postings to MongoDB for index: ${indexName}`);
 
     try {
-      // Get all terms for this index from the term dictionary
-      const terms = this.termDictionary.getTermsForIndex(indexName);
+      // Get all index-aware terms for this index from the term dictionary
+      const indexAwareTerms = this.termDictionary.getTermsForIndex(indexName);
+      this.logger.debug(`Found ${indexAwareTerms.length} index-aware terms for index ${indexName}`);
 
-      if (terms.length === 0) {
+      if (indexAwareTerms.length === 0) {
         this.logger.debug(`No terms found for index: ${indexName}`);
         return;
+      }
+
+      // Log first few terms for debugging
+      if (indexAwareTerms.length > 0) {
+        const sampleTerms = indexAwareTerms.slice(0, 5);
+        this.logger.debug(`Sample index-aware terms: ${sampleTerms.join(', ')}`);
       }
 
       let persistedCount = 0;
       const batchSize = 100; // Process in batches to avoid memory issues
 
-      for (let i = 0; i < terms.length; i += batchSize) {
-        const termBatch = terms.slice(i, i + batchSize);
+      for (let i = 0; i < indexAwareTerms.length; i += batchSize) {
+        const termBatch = indexAwareTerms.slice(i, i + batchSize);
 
         await Promise.all(
-          termBatch.map(async term => {
+          termBatch.map(async indexAwareTerm => {
             try {
-              const postingList = await this.termDictionary.getPostingListForIndex(indexName, term);
+              // Get posting list using the index-aware term directly
+              const postingList = await this.termDictionary.getPostingListForIndex(
+                indexName,
+                indexAwareTerm,
+                true, // isIndexAware = true
+              );
+
               if (postingList && postingList.size() > 0) {
-                await this.persistentTermDictionary.saveTermPostings(indexName, term, postingList);
+                // Save to MongoDB using indexName + fieldTerm (maintaining current schema)
+                await this.persistentTermDictionary.saveTermPostings(
+                  indexName,
+                  indexAwareTerm,
+                  postingList,
+                );
                 persistedCount++;
+                if (persistedCount <= 5) {
+                  this.logger.debug(
+                    `Persisted term ${indexAwareTerm} with ${postingList.size()} documents`,
+                  );
+                }
+              } else {
+                if (persistedCount <= 5) {
+                  this.logger.debug(
+                    `No posting list found for index-aware term: ${indexAwareTerm}`,
+                  );
+                }
               }
             } catch (error) {
-              this.logger.warn(`Failed to persist term ${term}: ${error.message}`);
+              this.logger.warn(`Failed to persist term ${indexAwareTerm}: ${error.message}`);
             }
           }),
         );
 
         // Log progress for large batches
-        if (terms.length > 1000) {
-          const progress = Math.min(i + batchSize, terms.length);
-          this.logger.debug(`Persisted ${progress}/${terms.length} terms to MongoDB`);
+        if (indexAwareTerms.length > 1000) {
+          const progress = Math.min(i + batchSize, indexAwareTerms.length);
+          this.logger.debug(`Persisted ${progress}/${indexAwareTerms.length} terms to MongoDB`);
         }
       }
 

@@ -426,13 +426,20 @@ export class InMemoryTermDictionary implements TermDictionary, OnModuleInit {
   }
 
   /**
-   * Get posting list with index context
+   * Get posting list for a specific index and term
+   * @param indexName - The name of the index
+   * @param term - The term to search for
+   * @param isIndexAware - Whether the term parameter is already index-aware (indexName:field:term format)
    */
-  async getPostingListForIndex(indexName: string, term: string): Promise<PostingList | undefined> {
+  async getPostingListForIndex(
+    indexName: string,
+    term: string,
+    isIndexAware = false,
+  ): Promise<PostingList | undefined> {
     this.ensureInitialized();
 
-    const indexAwareTerm = this.createIndexAwareTerm(indexName, term);
-    this.logger.debug(`Getting posting list for index-aware term: ${indexAwareTerm}`);
+    // Use the term as-is if it's already index-aware, otherwise make it index-aware
+    const indexAwareTerm = isIndexAware ? term : this.createIndexAwareTerm(indexName, term);
 
     // Check cache first
     let postingList = this.lruCache.get(indexAwareTerm);
@@ -446,7 +453,6 @@ export class InMemoryTermDictionary implements TermDictionary, OnModuleInit {
 
     // If not in cache and persistence is enabled, try loading from disk
     if (this.options.persistToDisk && this.rocksDBService) {
-      this.logger.debug(`Loading index-aware term from disk: ${indexAwareTerm}`);
       postingList = await this.loadTermFromDisk(indexAwareTerm);
       if (postingList) {
         // Add to cache
@@ -477,13 +483,9 @@ export class InMemoryTermDictionary implements TermDictionary, OnModuleInit {
 
     // Combine and deduplicate
     const allTerms = new Set([...indexTerms, ...cacheKeys]);
-    return Array.from(allTerms);
 
-    // Return only the field:term part (without index prefix)
-    return Array.from(allTerms).map(term => {
-      const { fieldTerm } = this.parseIndexAwareTerm(term);
-      return fieldTerm;
-    });
+    // Return the full index-aware terms (indexName:field:term format)
+    return Array.from(allTerms);
   }
 
   /**
