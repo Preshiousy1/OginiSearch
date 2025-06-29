@@ -385,7 +385,26 @@ x-api-key: <api_key>
 }
 ```
 
-### 2.13 Complete System Reset (DESTRUCTIVE)
+### 2.13 Clear Index Term Postings
+**Endpoint:** `DELETE /api/indices/{index_name}/term-postings`
+
+**Description:** Deletes all term postings for a specific index from MongoDB. This is useful for cleaning up faulty migrations before re-migrating with the correct format. This only affects the MongoDB term postings storage and does not touch the in-memory term dictionary or documents.
+
+**Response:**
+```json
+{
+  "message": "Term postings cleared successfully for index bulk-test-10000",
+  "indexName": "bulk-test-10000",
+  "deletedCount": 338
+}
+```
+
+**Use Cases:**
+- Clean up after faulty term posting migrations
+- Reset term postings without affecting documents
+- Prepare for fresh term posting migration with corrected format
+
+### 2.14 Complete System Reset (DESTRUCTIVE)
 **Endpoint:** `POST /api/indices/system/reset`
 
 **⚠️ WARNING: This endpoint destroys ALL data in the system including term dictionary, RocksDB, MongoDB indices, MongoDB term postings, and document storage.**
@@ -1412,6 +1431,13 @@ curl -X POST "http://localhost:3000/api/indices/system/reset" \
 #### Clear Search Dictionary
 ```bash
 curl -X DELETE "http://localhost:3000/api/indices/test_products/_search/_clear_dictionary" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <api_key>"
+```
+
+#### Clear Index Term Postings
+```bash
+curl -X DELETE "http://localhost:3000/api/indices/bulk-test-10000/term-postings" \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer <api_key>"
 ```

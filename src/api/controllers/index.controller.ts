@@ -687,4 +687,67 @@ export class IndexController {
       throw new BadRequestException(`Migration failed: ${error.message}`);
     }
   }
+
+  @Delete(':name/term-postings')
+  @ApiOperation({
+    summary: 'Clear term postings for an index',
+    description:
+      'Deletes all term postings for a specific index from MongoDB. Useful for cleaning up faulty migrations before re-migrating with correct format.',
+  })
+  @ApiParam({
+    name: 'name',
+    description: 'Index name to clear term postings for',
+    example: 'bulk-test-10000',
+  })
+  @ApiResponse({
+    status: HttpStatus.OK,
+    description: 'Term postings cleared successfully',
+    schema: {
+      type: 'object',
+      properties: {
+        message: {
+          type: 'string',
+          example: 'Term postings cleared successfully for index bulk-test-10000',
+        },
+        indexName: {
+          type: 'string',
+          example: 'bulk-test-10000',
+        },
+        deletedCount: {
+          type: 'number',
+          example: 338,
+        },
+      },
+    },
+  })
+  @ApiResponse({
+    status: HttpStatus.NOT_FOUND,
+    description: 'Index with the specified name does not exist',
+  })
+  async clearIndexTermPostings(@Param('name') name: string): Promise<{
+    message: string;
+    indexName: string;
+    deletedCount: number;
+  }> {
+    this.logger.log(`Clearing term postings for index: ${name}`);
+
+    try {
+      // Verify index exists first
+      await this.indexService.getIndex(name);
+
+      // Delete all term postings for this index from MongoDB
+      const deletedCount = await this.termPostingsRepository.deleteByIndex(name);
+
+      this.logger.log(`Cleared ${deletedCount} term postings for index: ${name}`);
+
+      return {
+        message: `Term postings cleared successfully for index ${name}`,
+        indexName: name,
+        deletedCount,
+      };
+    } catch (error) {
+      this.logger.error(`Error clearing term postings for index ${name}: ${error.message}`);
+      throw new BadRequestException(`Error clearing term postings: ${error.message}`);
+    }
+  }
 }

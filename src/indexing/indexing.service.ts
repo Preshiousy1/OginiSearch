@@ -392,16 +392,18 @@ export class IndexingService {
               );
 
               if (postingList && postingList.size() > 0) {
+                // Extract the field:term part from the index-aware term for MongoDB storage
+                const { fieldTerm } = this.parseIndexAwareTerm(indexAwareTerm);
                 // Save to MongoDB using indexName + fieldTerm (maintaining current schema)
                 await this.persistentTermDictionary.saveTermPostings(
                   indexName,
-                  indexAwareTerm,
+                  fieldTerm, // Use extracted field:term instead of full index-aware term
                   postingList,
                 );
                 persistedCount++;
                 if (persistedCount <= 5) {
                   this.logger.debug(
-                    `Persisted term ${indexAwareTerm} with ${postingList.size()} documents`,
+                    `Persisted term ${fieldTerm} with ${postingList.size()} documents`,
                   );
                 }
               } else {
@@ -431,5 +433,17 @@ export class IndexingService {
       this.logger.error(`Failed to persist term postings for index ${indexName}: ${error.message}`);
       throw error;
     }
+  }
+
+  private parseIndexAwareTerm(indexAwareTerm: string): { fieldTerm: string } {
+    // Parse indexName:field:term format and return field:term
+    const parts = indexAwareTerm.split(':');
+    if (parts.length >= 3) {
+      // Skip the first part (indexName) and rejoin the rest as field:term
+      const fieldTerm = parts.slice(1).join(':');
+      return { fieldTerm };
+    }
+    // Fallback if format is unexpected
+    return { fieldTerm: indexAwareTerm };
   }
 }
