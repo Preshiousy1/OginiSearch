@@ -76,7 +76,7 @@ export class MappingsDto implements IndexMappings {
 export class CreateIndexDto {
   @ApiProperty({
     description: 'Unique name for the index',
-    example: 'products',
+    example: 'businesses',
   })
   @IsString()
   @IsNotEmpty()

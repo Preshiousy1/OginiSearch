@@ -229,4 +229,54 @@ export class DocumentStorageService {
       throw error;
     }
   }
+
+  async upsertDocument(
+    indexName: string,
+    {
+      documentId,
+      content,
+      metadata = {},
+    }: {
+      documentId: string;
+      content: Record<string, any>;
+      metadata?: Record<string, any>;
+    },
+    schemaName?: string,
+  ): Promise<SourceDocument> {
+    try {
+      // If schema is provided, validate the document before upsert
+      if (schemaName) {
+        const validationResult = await this.schemaVersionManager.validateDocument(
+          schemaName,
+          content,
+        );
+        if (!validationResult.valid) {
+          throw new BadRequestException({
+            message: 'Document validation failed',
+            errors: validationResult.errors,
+          });
+        }
+
+        // Add schema metadata to the document
+        const schema = await this.schemaVersionManager.getSchema(schemaName);
+        content._schema = {
+          name: schemaName,
+          version: schema.version,
+        };
+      }
+
+      const document = {
+        indexName,
+        documentId,
+        content,
+        metadata,
+      };
+
+      const result = await this.documentRepository.upsert(document);
+      return result;
+    } catch (error) {
+      this.logger.error(`Failed to upsert document: ${error.message}`);
+      throw error;
+    }
+  }
 }

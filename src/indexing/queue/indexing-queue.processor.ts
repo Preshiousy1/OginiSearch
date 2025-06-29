@@ -59,7 +59,7 @@ export class IndexingQueueProcessor {
 
   @Process('batch')
   async processBatchDocuments(job: Job<BatchIndexingJob>) {
-    const { indexName, documents, batchId, options } = job.data;
+    const { indexName, documents, batchId, options, metadata } = job.data;
     const startTime = Date.now();
 
     this.logger.log(
@@ -83,8 +83,18 @@ export class IndexingQueueProcessor {
 
       this.logger.debug(`📦 Processing ${documentsWithIds.length} documents in batch ${batchId}`);
 
+      // Detect if this is a rebuild operation from metadata
+      const isRebuild = metadata?.source === 'rebuild';
+      if (isRebuild) {
+        this.logger.debug(`🔄 Detected rebuild operation for batch ${batchId}`);
+      }
+
       // Use the direct processing method to avoid infinite queue loops
-      const result = await this.documentService.processBatchDirectly(indexName, documentsWithIds);
+      const result = await this.documentService.processBatchDirectly(
+        indexName,
+        documentsWithIds,
+        isRebuild,
+      );
 
       const duration = Date.now() - startTime;
       this.logger.log(

@@ -366,7 +366,7 @@ export class SearchExecutorService {
       const fieldPrefix = field && field !== '_all' ? `${field}:` : '';
       const matchingTerms = allTerms.filter(term => {
         // Check if term matches the field (if specified)
-        if (fieldPrefix && !term.includes(`:${fieldPrefix}`)) {
+        if (fieldPrefix && !term.includes(fieldPrefix)) {
           return false;
         }
 

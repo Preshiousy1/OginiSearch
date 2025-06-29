@@ -304,25 +304,55 @@ export class QueryProcessorService implements QueryProcessor {
       };
     }
 
-    // Handle term queries
+    // Handle term queries - support both formats
     if (rawQuery.query?.term) {
       const entries = Object.entries(rawQuery.query.term);
       if (entries.length > 0) {
         const [field, value] = entries[0];
-        return { text: String(value), fields: [field] };
+        // Handle both simple format: {"title": "client"} and object format: {"title": {"value": "client"}}
+        const termValue =
+          typeof value === 'object' && value !== null && 'value' in value
+            ? String((value as any).value)
+            : String(value);
+        return { text: termValue, fields: [field] };
       }
     }
 
-    // Handle wildcard queries
+    // Handle wildcard queries - support both formats
     if (rawQuery.query?.wildcard) {
-      const wildcardQuery = rawQuery.query.wildcard as { value: string; boost?: number } | string;
-      const wildcardValue = typeof wildcardQuery === 'string' ? wildcardQuery : wildcardQuery.value;
-      const wildcardBoost = typeof wildcardQuery === 'string' ? undefined : wildcardQuery.boost;
-
-      return {
-        text: wildcardValue,
-        fields: rawQuery.fields || ['content'],
-      };
+      // Handle object format: {"field": "title", "value": "client*"}
+      if (
+        typeof rawQuery.query.wildcard === 'object' &&
+        'field' in rawQuery.query.wildcard &&
+        'value' in rawQuery.query.wildcard
+      ) {
+        return {
+          text: rawQuery.query.wildcard.value,
+          fields: [rawQuery.query.wildcard.field],
+        };
+      }
+      // Handle field-specific format: {"title": {"value": "client*"}}
+      else if (
+        typeof rawQuery.query.wildcard === 'object' &&
+        !('field' in rawQuery.query.wildcard)
+      ) {
+        const entries = Object.entries(rawQuery.query.wildcard);
+        if (entries.length > 0) {
+          const [field, config] = entries[0];
+          const wildcardValue = typeof config === 'string' ? config : (config as any).value;
+          return {
+            text: wildcardValue,
+            fields: [field],
+          };
+        }
+      }
+      // Handle simple string format: "client*"
+      else if (typeof rawQuery.query.wildcard === 'string') {
+        return {
+          text: rawQuery.query.wildcard,
+          fields: rawQuery.fields || ['content'],
+        };
+      }
     }
 
     // Handle match-all queries

@@ -94,11 +94,10 @@ export class SearchService {
         : undefined;
 
     const rawQuery: RawQuery = {
-      type: typeof dto.query === 'string' ? 'term' : 'object',
-      value: typeof dto.query === 'string' ? dto.query : undefined,
+      type: typeof dto.query === 'string' ? 'string' : 'object',
       query:
         typeof dto.query === 'string'
-          ? undefined
+          ? dto.query // For string queries, put the string in query field
           : {
               match: dto.query?.match && {
                 field: dto.query.match.field,

@@ -96,52 +96,97 @@ export class DocumentService implements OnModuleInit {
   }
 
   /**
-   * Rebuild a specific index from existing documents in storage
+   * Rebuild a specific index using concurrent job processing
+   * More efficient for large datasets using job queue and workers
    */
-  async rebuildSpecificIndex(indexName: string): Promise<void> {
+  async rebuildSpecificIndexConcurrent(
+    indexName: string,
+    options: {
+      batchSize?: number;
+      concurrency?: number;
+      enableTermPostingsPersistence?: boolean;
+    } = {},
+  ): Promise<{
+    batchId: string;
+    totalBatches: number;
+    totalDocuments: number;
+    status: string;
+  }> {
+    const {
+      batchSize = 1000,
+      concurrency = parseInt(process.env.INDEXING_CONCURRENCY) || 8,
+      enableTermPostingsPersistence = true,
+    } = options;
+
     try {
-      this.logger.log(`Starting manual rebuild for index: ${indexName}`);
+      this.logger.log(`Starting concurrent rebuild for index: ${indexName}`);
+      this.logger.log(`Configuration: batchSize=${batchSize}, concurrency=${concurrency}`);
 
       // Verify index exists
       await this.checkIndexExists(indexName);
 
-      // Get all documents for this index
-      const documents = await this.documentStorageService.getDocuments(indexName);
-      let processed = 0;
-      const startTime = Date.now();
+      // Get total document count
+      const totalResult = await this.documentStorageService.getDocuments(indexName, {
+        limit: 1,
+      });
+      const totalDocuments = totalResult.total;
 
-      this.logger.log(`Found ${documents.documents.length} documents to reindex in ${indexName}`);
+      this.logger.log(`Total documents to rebuild: ${totalDocuments}`);
 
-      for (const doc of documents.documents) {
-        try {
-          await this.indexingService.indexDocument(indexName, doc.documentId, doc.content);
-          processed++;
-
-          if (processed % 100 === 0) {
-            const elapsed = Date.now() - startTime;
-            const rate = processed / (elapsed / 1000);
-            this.logger.log(
-              `Processed ${processed}/${
-                documents.documents.length
-              } documents for index ${indexName} (${rate.toFixed(1)} docs/sec)`,
-            );
-          }
-        } catch (error) {
-          this.logger.error(
-            `Failed to index document ${doc.documentId} in ${indexName}: ${error.message}`,
-          );
-        }
+      if (totalDocuments === 0) {
+        this.logger.warn(`No documents found to rebuild for index: ${indexName}`);
+        return {
+          batchId: 'empty',
+          totalBatches: 0,
+          totalDocuments: 0,
+          status: 'completed',
+        };
       }
 
-      const elapsed = Date.now() - startTime;
-      const rate = processed / (elapsed / 1000);
-      this.logger.log(
-        `Completed manual rebuild for index ${indexName}: ${processed} documents processed in ${elapsed}ms (${rate.toFixed(
-          1,
-        )} docs/sec)`,
+      // Get all documents to rebuild
+      const allDocumentsResult = await this.documentStorageService.getDocuments(indexName, {
+        limit: 0, // No limit - get all documents
+      });
+
+      // Convert to format expected by BulkIndexingService
+      const documentsForQueue = allDocumentsResult.documents.map(doc => ({
+        id: doc.documentId,
+        document: doc.content,
+      }));
+
+      this.logger.log(`Queueing ${documentsForQueue.length} documents for concurrent rebuild`);
+
+      // Use the existing BulkIndexingService for proper queue management and progress tracking
+      const queueResult = await this.bulkIndexingService.queueBulkIndexing(
+        indexName,
+        documentsForQueue,
+        {
+          batchSize,
+          skipDuplicates: false, // For rebuild, we want to reprocess everything
+          enableProgress: true,
+          priority: 10, // High priority for rebuild operations
+          retryAttempts: 2, // Fewer retries for rebuild to fail fast
+        },
+        { source: 'rebuild' }, // Add rebuild metadata
       );
+
+      this.logger.log(
+        `✅ Concurrent rebuild queued for index: ${indexName} - ${queueResult.totalBatches} batches, ${queueResult.totalDocuments} documents`,
+      );
+
+      // If term postings persistence is enabled, add a note
+      if (enableTermPostingsPersistence) {
+        this.logger.log(`📝 Term postings will be persisted to MongoDB after each batch`);
+      }
+
+      return {
+        batchId: queueResult.batchId,
+        totalBatches: queueResult.totalBatches,
+        totalDocuments: queueResult.totalDocuments,
+        status: queueResult.status,
+      };
     } catch (error) {
-      this.logger.error(`Error rebuilding index ${indexName}: ${error.message}`);
+      this.logger.error(`Error in concurrent rebuild for index ${indexName}: ${error.message}`);
       throw error;
     }
   }
@@ -306,6 +351,7 @@ export class DocumentService implements OnModuleInit {
     indexName: string,
     documents: Array<{ id: string; document: any }>,
     startTime: number,
+    isRebuild = false,
   ): Promise<BulkResponseDto> {
     const results = [];
     let hasErrors = false;
@@ -316,21 +362,43 @@ export class DocumentService implements OnModuleInit {
       try {
         const documentId = doc.id;
 
-        // Store document - store the document object directly as content
-        await this.documentStorageService.storeDocument(indexName, {
-          documentId,
-          content: doc.document, // Store document directly as content
-          metadata: doc.document.metadata || {}, // Extract metadata if present
-        });
+        if (isRebuild) {
+          // For rebuild operations, use upsert (update or insert) to avoid expensive existence checks
+          await this.documentStorageService.upsertDocument(indexName, {
+            documentId,
+            content: doc.document, // Store document directly as content
+            metadata: doc.document.metadata || {}, // Extract metadata if present
+          });
+        } else {
+          // For normal operations, check if document exists and handle accordingly
+          const existingDoc = await this.documentStorageService.getDocument(indexName, documentId);
 
-        // Index document
+          if (existingDoc) {
+            // Document exists, update it
+            await this.documentStorageService.updateDocument(
+              indexName,
+              documentId,
+              doc.document, // Store document directly as content
+              doc.document.metadata || {}, // Extract metadata if present
+            );
+          } else {
+            // Document doesn't exist, create it
+            await this.documentStorageService.storeDocument(indexName, {
+              documentId,
+              content: doc.document, // Store document directly as content
+              metadata: doc.document.metadata || {}, // Extract metadata if present
+            });
+          }
+        }
+
+        // Index document (this will re-index regardless of whether it's new or updated)
         await this.indexingService.indexDocument(indexName, documentId, doc.document, true);
 
         results.push({
           id: documentId,
           index: indexName,
           success: true,
-          status: 201,
+          status: isRebuild ? 200 : 201, // 200 for rebuild/upsert, 201 for create
         });
 
         successCount++;
@@ -843,6 +911,7 @@ export class DocumentService implements OnModuleInit {
   async processBatchDirectly(
     indexName: string,
     documents: Array<{ id: string; document: any }>,
+    isRebuild = false,
   ): Promise<BulkResponseDto> {
     this.logger.log(`Processing ${documents.length} documents directly in ${indexName}`);
     const startTime = Date.now();
@@ -868,7 +937,7 @@ export class DocumentService implements OnModuleInit {
       );
 
       // Process documents directly using the synchronous method
-      return await this.processBatchSynchronously(indexName, documents, startTime);
+      return await this.processBatchSynchronously(indexName, documents, startTime, isRebuild);
     } catch (error) {
       this.logger.error(`Direct batch processing failed: ${error.message}`);
 

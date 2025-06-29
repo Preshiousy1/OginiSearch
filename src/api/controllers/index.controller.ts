@@ -64,7 +64,7 @@ export class IndexController {
       simple: {
         summary: 'Simple index with default settings',
         value: {
-          name: 'products',
+          name: 'businesses',
           mappings: {
             properties: {
               title: { type: 'text', analyzer: 'standard' },
@@ -102,7 +102,7 @@ export class IndexController {
     schema: {
       type: 'object',
       properties: {
-        name: { type: 'string', example: 'products' },
+        name: { type: 'string', example: 'businesses' },
         status: { type: 'string', example: 'open' },
         createdAt: { type: 'string', format: 'date-time', example: '2023-06-15T10:00:00Z' },
         documentCount: { type: 'number', example: 0 },
@@ -157,7 +157,7 @@ export class IndexController {
           items: {
             type: 'object',
             properties: {
-              name: { type: 'string', example: 'products' },
+              name: { type: 'string', example: 'businesses' },
               status: { type: 'string', example: 'open' },
               documentCount: { type: 'number', example: 150 },
               createdAt: { type: 'string', format: 'date-time', example: '2023-06-15T10:00:00Z' },
@@ -185,7 +185,7 @@ export class IndexController {
   @ApiParam({
     name: 'name',
     description: 'Index name to retrieve',
-    example: 'products',
+    example: 'businesses',
   })
   @ApiResponse({
     status: HttpStatus.OK,
@@ -193,7 +193,7 @@ export class IndexController {
     schema: {
       type: 'object',
       properties: {
-        name: { type: 'string', example: 'products' },
+        name: { type: 'string', example: 'businesses' },
         status: { type: 'string', example: 'open' },
         documentCount: { type: 'number', example: 150 },
         createdAt: { type: 'string', format: 'date-time', example: '2023-06-15T10:00:00Z' },
@@ -232,7 +232,7 @@ export class IndexController {
   @ApiParam({
     name: 'name',
     description: 'Index name to update',
-    example: 'products',
+    example: 'businesses',
   })
   @ApiBody({
     type: UpdateIndexSettingsDto,
@@ -265,7 +265,7 @@ export class IndexController {
     schema: {
       type: 'object',
       properties: {
-        name: { type: 'string', example: 'products' },
+        name: { type: 'string', example: 'businesses' },
         status: { type: 'string', example: 'open' },
         documentCount: { type: 'number', example: 150 },
         settings: {
@@ -308,7 +308,7 @@ export class IndexController {
   @ApiParam({
     name: 'name',
     description: 'Index name to delete',
-    example: 'products',
+    example: 'businesses',
   })
   @HttpCode(HttpStatus.NO_CONTENT)
   @ApiResponse({
@@ -331,7 +331,7 @@ export class IndexController {
   @ApiParam({
     name: 'name',
     description: 'Index name to rebuild count for',
-    example: 'products',
+    example: 'businesses',
   })
   @ApiResponse({
     status: HttpStatus.OK,
@@ -347,27 +347,58 @@ export class IndexController {
 
   @Post(':name/_rebuild_index')
   @ApiOperation({
-    summary: 'Manually rebuild search index',
+    summary: 'Concurrent rebuild search index',
     description:
-      'Manually rebuilds the search index by reprocessing all documents. Use only when necessary as this is a time-consuming operation.',
+      'Rebuilds the search index using concurrent job processing for maximum performance. Processes documents in batches using multiple workers and automatically persists term postings to MongoDB.',
   })
   @ApiParam({
     name: 'name',
     description: 'Index name to rebuild',
     example: 'businesses',
   })
-  @ApiResponse({
-    status: HttpStatus.ACCEPTED,
-    description: 'Index rebuild started successfully',
+  @ApiBody({
+    required: false,
+    description: 'Optional rebuild configuration',
     schema: {
       type: 'object',
       properties: {
-        message: { type: 'string', example: 'Index rebuild started for businesses' },
-        warning: {
-          type: 'string',
-          example: 'This operation may take a long time for large indices',
+        batchSize: {
+          type: 'number',
+          example: 1000,
+          description: 'Number of documents per batch (default: 1000)',
         },
-        indexName: { type: 'string', example: 'businesses' },
+        concurrency: {
+          type: 'number',
+          example: 8,
+          description: 'Number of concurrent batches (default: 8)',
+        },
+        enableTermPostingsPersistence: {
+          type: 'boolean',
+          example: true,
+          description: 'Whether to persist term postings to MongoDB (default: true)',
+        },
+      },
+    },
+  })
+  @ApiResponse({
+    status: HttpStatus.OK,
+    description: 'Index rebuild started successfully with job details',
+    schema: {
+      type: 'object',
+      properties: {
+        message: { type: 'string', example: 'Concurrent rebuild started for businesses' },
+        batchId: { type: 'string', example: 'rebuild:businesses:1640995200000:abc123' },
+        totalBatches: { type: 'number', example: 120 },
+        totalDocuments: { type: 'number', example: 120000 },
+        status: { type: 'string', example: 'processing' },
+        configuration: {
+          type: 'object',
+          properties: {
+            batchSize: { type: 'number', example: 1000 },
+            concurrency: { type: 'number', example: 8 },
+            enableTermPostingsPersistence: { type: 'boolean', example: true },
+          },
+        },
       },
     },
   })
@@ -375,25 +406,59 @@ export class IndexController {
     status: HttpStatus.NOT_FOUND,
     description: 'Index with the specified name does not exist',
   })
-  async manualRebuildIndex(@Param('name') name: string): Promise<{
+  async manualRebuildIndex(
+    @Param('name') name: string,
+    @Body()
+    options: {
+      batchSize?: number;
+      concurrency?: number;
+      enableTermPostingsPersistence?: boolean;
+    } = {},
+  ): Promise<{
     message: string;
-    warning: string;
-    indexName: string;
-  }> {
-    // Verify index exists first
-    await this.indexService.getIndex(name);
-
-    // Start the rebuild process in the background
-    // Note: We don't await this to return immediately
-    this.documentService.rebuildSpecificIndex(name).catch(error => {
-      this.logger.error(`Manual rebuild failed for index ${name}: ${error.message}`, error.stack);
-    });
-
-    return {
-      message: `Index rebuild started for ${name}`,
-      warning: 'This operation may take a long time for large indices',
-      indexName: name,
+    batchId: string;
+    totalBatches: number;
+    totalDocuments: number;
+    status: string;
+    configuration: {
+      batchSize: number;
+      concurrency: number;
+      enableTermPostingsPersistence: boolean;
     };
+  }> {
+    this.logger.log(`Concurrent rebuild requested for index: ${name}`);
+    this.logger.log(`Options: ${JSON.stringify(options)}`);
+
+    try {
+      // Verify index exists first
+      await this.indexService.getIndex(name);
+
+      // Set defaults
+      const config = {
+        batchSize: options.batchSize || 1000,
+        concurrency: options.concurrency || 8,
+        enableTermPostingsPersistence: options.enableTermPostingsPersistence !== false,
+      };
+
+      // Start concurrent rebuild
+      const result = await this.documentService.rebuildSpecificIndexConcurrent(name, config);
+
+      this.logger.log(
+        `✅ Concurrent rebuild queued for index: ${name} - ${result.totalBatches} batches, ${result.totalDocuments} documents`,
+      );
+
+      return {
+        message: `Concurrent rebuild started for ${name}`,
+        batchId: result.batchId,
+        totalBatches: result.totalBatches,
+        totalDocuments: result.totalDocuments,
+        status: result.status,
+        configuration: config,
+      };
+    } catch (error) {
+      this.logger.error(`Error starting concurrent rebuild for index ${name}: ${error.message}`);
+      throw new BadRequestException(`Error starting rebuild: ${error.message}`);
+    }
   }
 
   @Post(':name/_rebuild_all')
@@ -405,7 +470,7 @@ export class IndexController {
   @ApiParam({
     name: 'name',
     description: 'Index name to rebuild',
-    example: 'products',
+    example: 'businesses',
   })
   @ApiResponse({
     status: HttpStatus.OK,
@@ -414,7 +479,7 @@ export class IndexController {
       type: 'object',
       properties: {
         message: { type: 'string', example: 'Index rebuilt successfully' },
-        indexName: { type: 'string', example: 'products' },
+        indexName: { type: 'string', example: 'businesses' },
         documentsProcessed: { type: 'number', example: 100 },
         termsIndexed: { type: 'number', example: 1500 },
         took: { type: 'number', example: 2500 },
@@ -647,7 +712,7 @@ export class IndexController {
   @ApiParam({
     name: 'name',
     description: 'Index name to migrate',
-    example: 'products',
+    example: 'businesses',
   })
   @ApiResponse({
     status: HttpStatus.OK,
@@ -656,7 +721,7 @@ export class IndexController {
       type: 'object',
       properties: {
         message: { type: 'string', example: 'Term postings migration completed successfully' },
-        indexName: { type: 'string', example: 'products' },
+        indexName: { type: 'string', example: 'businesses' },
         migratedTerms: { type: 'number', example: 150 },
       },
     },

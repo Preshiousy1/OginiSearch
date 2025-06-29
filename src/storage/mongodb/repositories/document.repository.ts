@@ -77,21 +77,26 @@ export class DocumentRepository {
         });
       }
 
+      // Build the query
+      let documentQuery = this.documentModel
+        .find(query)
+        .select({
+          indexName: 1,
+          documentId: 1,
+          content: 1,
+          metadata: 1,
+          _id: 0,
+        })
+        .sort({ createdAt: -1 })
+        .skip(offset);
+
+      // Only apply limit if it's greater than 0 (0 means no limit)
+      if (limit > 0) {
+        documentQuery = documentQuery.limit(limit);
+      }
+
       const [documents, total] = await Promise.all([
-        this.documentModel
-          .find(query)
-          .select({
-            indexName: 1,
-            documentId: 1,
-            content: 1,
-            metadata: 1,
-            _id: 0,
-          })
-          .sort({ createdAt: -1 })
-          .skip(offset)
-          .limit(limit)
-          .lean()
-          .exec(),
+        documentQuery.lean().exec(),
         this.documentModel.countDocuments(query).exec(),
       ]);
 
@@ -125,6 +130,29 @@ export class DocumentRepository {
         throw error;
       }
       this.logger.error(`Failed to update document: ${error.message}`, error.stack);
+      throw error;
+    }
+  }
+
+  async upsert(document: Omit<SourceDocument, '_id'>): Promise<DocumentEntity> {
+    try {
+      const { indexName, documentId, ...updateData } = document;
+
+      const upsertedDocument = await this.documentModel
+        .findOneAndUpdate(
+          { indexName, documentId },
+          { $set: updateData },
+          {
+            new: true,
+            upsert: true,
+            setDefaultsOnInsert: true,
+          },
+        )
+        .exec();
+
+      return upsertedDocument;
+    } catch (error) {
+      this.logger.error(`Failed to upsert document: ${error.message}`, error.stack);
       throw error;
     }
   }

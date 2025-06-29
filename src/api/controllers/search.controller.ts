@@ -46,7 +46,7 @@ export class SearchController {
   @ApiParam({
     name: 'index',
     description: 'Index name to search in',
-    example: 'products',
+    example: 'businesses',
   })
   @ApiQuery({
     name: 'size',
@@ -345,7 +345,7 @@ export class SearchController {
   @ApiParam({
     name: 'index',
     description: 'Index name',
-    example: 'products',
+    example: 'businesses',
   })
   @ApiBody({
     type: SuggestQueryDto,

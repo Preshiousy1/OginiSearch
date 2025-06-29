@@ -50,7 +50,7 @@ export class DocumentController {
   @ApiParam({
     name: 'index',
     description: 'Index name where the document will be stored',
-    example: 'products',
+    example: 'businesses',
   })
   @ApiBody({
     type: IndexDocumentDto,
@@ -88,7 +88,7 @@ export class DocumentController {
       type: 'object',
       properties: {
         id: { type: 'string', example: 'product-123' },
-        index: { type: 'string', example: 'products' },
+        index: { type: 'string', example: 'businesses' },
         version: { type: 'number', example: 1 },
         result: { type: 'string', example: 'created' },
       },
@@ -117,7 +117,7 @@ export class DocumentController {
   @ApiParam({
     name: 'index',
     description: 'Index name',
-    example: 'products',
+    example: 'businesses',
   })
   @ApiParam({
     name: 'id',
@@ -131,7 +131,7 @@ export class DocumentController {
       type: 'object',
       properties: {
         id: { type: 'string', example: 'product-123' },
-        index: { type: 'string', example: 'products' },
+        index: { type: 'string', example: 'businesses' },
         version: { type: 'number', example: 1 },
         source: {
           type: 'object',
@@ -164,7 +164,7 @@ export class DocumentController {
   @ApiParam({
     name: 'index',
     description: 'Index name',
-    example: 'products',
+    example: 'businesses',
   })
   @ApiParam({
     name: 'id',
@@ -193,7 +193,7 @@ export class DocumentController {
       type: 'object',
       properties: {
         id: { type: 'string', example: 'product-123' },
-        index: { type: 'string', example: 'products' },
+        index: { type: 'string', example: 'businesses' },
         version: { type: 'number', example: 2 },
         result: { type: 'string', example: 'updated' },
       },
@@ -223,7 +223,7 @@ export class DocumentController {
   @ApiParam({
     name: 'index',
     description: 'Index name',
-    example: 'products',
+    example: 'businesses',
   })
   @ApiParam({
     name: 'id',
@@ -251,7 +251,7 @@ export class DocumentController {
   @ApiParam({
     name: 'index',
     description: 'Index name',
-    example: 'products',
+    example: 'businesses',
   })
   @ApiBody({
     type: BulkIndexDocumentsDto,
@@ -296,7 +296,7 @@ export class DocumentController {
             type: 'object',
             properties: {
               id: { type: 'string', example: 'product-123' },
-              index: { type: 'string', example: 'products' },
+              index: { type: 'string', example: 'businesses' },
               version: { type: 'number', example: 1 },
               result: { type: 'string', example: 'created' },
             },
@@ -328,7 +328,7 @@ export class DocumentController {
   @ApiParam({
     name: 'index',
     description: 'Index name',
-    example: 'products',
+    example: 'businesses',
   })
   @ApiBody({
     type: DeleteByQueryDto,
@@ -397,7 +397,7 @@ export class DocumentController {
   @ApiParam({
     name: 'index',
     description: 'Index name',
-    example: 'products',
+    example: 'businesses',
   })
   @ApiQuery({
     name: 'limit',

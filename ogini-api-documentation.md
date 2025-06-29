@@ -371,19 +371,47 @@ x-api-key: <api_key>
 }
 ```
 
-### 2.12 Manual Rebuild Search Index
+### 2.12 Concurrent Rebuild Search Index
 **Endpoint:** `POST /api/indices/{index_name}/_rebuild_index`
 
-**Description:** Manually rebuilds the search index by reprocessing all documents. This is a background operation that returns immediately. Use only when necessary as this is a time-consuming operation.
+**Description:** Rebuilds the search index using concurrent job processing for maximum performance. Processes documents in batches using multiple workers and automatically persists term postings to MongoDB. Designed for large-scale datasets with millions of documents.
+
+**Request Body (Optional):**
+```json
+{
+  "batchSize": 1000,
+  "concurrency": 8,
+  "enableTermPostingsPersistence": true
+}
+```
+
+**Parameters:**
+- `batchSize` (optional): Number of documents per batch (default: 1000)
+- `concurrency` (optional): Number of concurrent batches (default: 8)  
+- `enableTermPostingsPersistence` (optional): Whether to persist term postings to MongoDB (default: true)
 
 **Response:**
 ```json
 {
-  "message": "Index rebuild started for businesses",
-  "warning": "This operation may take a long time for large indices",
-  "indexName": "businesses"
+  "message": "Concurrent rebuild started for businesses",
+  "batchId": "rebuild:businesses:1640995200000:abc123",
+  "totalBatches": 120,
+  "totalDocuments": 120000,
+  "status": "processing",
+  "configuration": {
+    "batchSize": 1000,
+    "concurrency": 8,
+    "enableTermPostingsPersistence": true
+  }
 }
 ```
+
+**Performance Benefits:**
+- **Concurrent Processing**: Uses multiple workers to process batches simultaneously
+- **Memory Efficient**: Processes documents in manageable chunks
+- **Auto-Persistence**: Automatically saves term postings to MongoDB after each batch
+- **Progress Tracking**: Returns batch ID for monitoring rebuild progress
+- **Scalable**: Handles millions of documents efficiently
 
 ### 2.13 Clear Index Term Postings
 **Endpoint:** `DELETE /api/indices/{index_name}/term-postings`
@@ -1411,11 +1439,32 @@ curl -X POST "http://localhost:3000/api/indices/test_products/_rebuild_all" \
   -H "Authorization: Bearer <api_key>"
 ```
 
-#### Manual Rebuild Search Index
+#### Concurrent Rebuild Search Index
 ```bash
-curl -X POST "http://localhost:3000/api/indices/test_products/_rebuild_index" \
+# Basic rebuild with default settings
+curl -X POST "http://localhost:3000/api/indices/businesses/_rebuild_index" \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer <api_key>"
+
+# Advanced rebuild with custom configuration
+curl -X POST "http://localhost:3000/api/indices/businesses/_rebuild_index" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <api_key>" \
+  -d '{
+    "batchSize": 2000,
+    "concurrency": 12,
+    "enableTermPostingsPersistence": true
+  }'
+
+# High-performance rebuild for large datasets
+curl -X POST "http://localhost:3000/api/indices/businesses/_rebuild_index" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <api_key>" \
+  -d '{
+    "batchSize": 5000,
+    "concurrency": 16,
+    "enableTermPostingsPersistence": true
+  }'
 ```
 
 #### Complete System Reset (DESTRUCTIVE)

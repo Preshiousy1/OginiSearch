@@ -444,7 +444,6 @@ export class InMemoryTermDictionary implements TermDictionary, OnModuleInit {
     // Check cache first
     let postingList = this.lruCache.get(indexAwareTerm);
     if (postingList) {
-      this.logger.debug(`Cache hit for index-aware term: ${indexAwareTerm}`);
       this.memoryUsage.hits++;
       return postingList;
     }

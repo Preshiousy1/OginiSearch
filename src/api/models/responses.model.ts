@@ -21,7 +21,7 @@ export class IndexMappingsModel {
 }
 
 export class IndexResponseModel {
-  @ApiProperty({ example: 'products' })
+  @ApiProperty({ example: 'businesses' })
   name: string;
 
   @ApiProperty({ example: 'open' })
@@ -105,7 +105,7 @@ export class DocumentResponseModel {
   @ApiProperty({ example: 'product-123' })
   id: string;
 
-  @ApiProperty({ example: 'products' })
+  @ApiProperty({ example: 'businesses' })
   index: string;
 
   @ApiProperty({ example: 1 })

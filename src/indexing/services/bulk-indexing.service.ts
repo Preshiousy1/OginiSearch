@@ -168,6 +168,7 @@ export class BulkIndexingService {
     indexName: string,
     documents: Array<{ id: string; document: any }>,
     options: BulkIndexingOptions = {},
+    customMetadata: Record<string, any> = {},
   ): Promise<BulkIndexingResponse> {
     const {
       batchSize = 100,
@@ -206,6 +207,7 @@ export class BulkIndexingService {
             batchNumber,
             totalBatches,
             source: 'bulk',
+            ...customMetadata,
           },
         },
         {
