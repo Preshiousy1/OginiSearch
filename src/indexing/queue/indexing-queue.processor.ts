@@ -57,6 +57,29 @@ export class IndexingQueueProcessor {
     }
   }
 
+  @Process('health-check')
+  async processHealthCheck(job: Job<any>) {
+    const startTime = Date.now();
+    this.logger.log(`🏥 Processing health check job ${job.id}`);
+
+    // Simple health check - just return success with timing
+    const duration = Date.now() - startTime;
+
+    return {
+      success: true,
+      message: 'Worker is responsive',
+      duration,
+      timestamp: new Date().toISOString(),
+      workerId: process.pid,
+    };
+  }
+
+  @Process('wakeup')
+  async processWakeup(job: Job<any>) {
+    this.logger.debug(`👋 Wakeup job ${job.id} processed - worker is active`);
+    return { success: true, message: 'Worker awake' };
+  }
+
   @Process('batch')
   async processBatchDocuments(job: Job<BatchIndexingJob>) {
     const { indexName, documents, batchId, options, metadata } = job.data;

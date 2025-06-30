@@ -31,6 +31,6 @@ import { StorageModule } from 'src/storage/storage.module';
     StorageModule,
   ],
   providers: [IndexingService, BulkIndexingService, IndexingWorkerService, DocumentProcessorPool],
-  exports: [IndexingService, BulkIndexingService, IndexingWorkerService],
+  exports: [IndexingService, BulkIndexingService, IndexingWorkerService, DocumentProcessorPool],
 })
 export class IndexingModule {}
