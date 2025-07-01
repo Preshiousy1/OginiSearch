@@ -74,14 +74,14 @@ export class IndexingService {
 
         // Only persist to MongoDB periodically or when explicitly requested
         if (persistToMongoDB) {
+          const indexAwareFieldTerm = `${indexName}:${fieldTerm}`;
           const fieldPostingList = await this.termDictionary.getPostingListForIndex(
             indexName,
             fieldTerm,
           );
           if (fieldPostingList) {
             await this.persistentTermDictionary.saveTermPostings(
-              indexName,
-              fieldTerm,
+              indexAwareFieldTerm,
               fieldPostingList,
             );
           }
@@ -100,14 +100,14 @@ export class IndexingService {
 
         // Only persist to MongoDB periodically or when explicitly requested
         if (persistToMongoDB) {
+          const indexAwareAllFieldTerm = `${indexName}:${allFieldTerm}`;
           const allPostingList = await this.termDictionary.getPostingListForIndex(
             indexName,
             allFieldTerm,
           );
           if (allPostingList) {
             await this.persistentTermDictionary.saveTermPostings(
-              indexName,
-              allFieldTerm,
+              indexAwareAllFieldTerm,
               allPostingList,
             );
           }
@@ -154,13 +154,14 @@ export class IndexingService {
               if (removed) {
                 if (postingList.size() === 0) {
                   // Remove term completely from both RocksDB and MongoDB
-                  await this.persistentTermDictionary.deleteTermPostings(indexName, fieldTerm);
+                  const indexAwareFieldTerm = `${indexName}:${fieldTerm}`;
+                  await this.persistentTermDictionary.deleteTermPostings(indexAwareFieldTerm);
                   await this.termDictionary.removeTerm(fieldTerm);
                 } else {
                   // Update the posting list in both RocksDB and MongoDB
+                  const indexAwareFieldTerm = `${indexName}:${fieldTerm}`;
                   await this.persistentTermDictionary.saveTermPostings(
-                    indexName,
-                    fieldTerm,
+                    indexAwareFieldTerm,
                     postingList,
                   );
                 }
@@ -175,13 +176,14 @@ export class IndexingService {
               if (removed) {
                 if (allPostingList.size() === 0) {
                   // Remove term completely from both RocksDB and MongoDB
-                  await this.persistentTermDictionary.deleteTermPostings(indexName, allFieldTerm);
+                  const indexAwareAllFieldTerm = `${indexName}:${allFieldTerm}`;
+                  await this.persistentTermDictionary.deleteTermPostings(indexAwareAllFieldTerm);
                   await this.termDictionary.removeTerm(allFieldTerm);
                 } else {
                   // Update the posting list in both RocksDB and MongoDB
+                  const indexAwareAllFieldTerm = `${indexName}:${allFieldTerm}`;
                   await this.persistentTermDictionary.saveTermPostings(
-                    indexName,
-                    allFieldTerm,
+                    indexAwareAllFieldTerm,
                     allPostingList,
                   );
                 }
@@ -392,18 +394,15 @@ export class IndexingService {
               );
 
               if (postingList && postingList.size() > 0) {
-                // Extract the field:term part from the index-aware term for MongoDB storage
-                const { fieldTerm } = this.parseIndexAwareTerm(indexAwareTerm);
-                // Save to MongoDB using indexName + fieldTerm (maintaining current schema)
+                // Use the index-aware term directly for MongoDB storage
                 await this.persistentTermDictionary.saveTermPostings(
-                  indexName,
-                  fieldTerm, // Use extracted field:term instead of full index-aware term
+                  indexAwareTerm, // Use full index-aware term
                   postingList,
                 );
                 persistedCount++;
                 if (persistedCount <= 5) {
                   this.logger.debug(
-                    `Persisted term ${fieldTerm} with ${postingList.size()} documents`,
+                    `Persisted term ${indexAwareTerm} with ${postingList.size()} documents`,
                   );
                 }
               } else {

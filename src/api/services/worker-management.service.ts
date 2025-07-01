@@ -5,7 +5,6 @@ import { ConfigService } from '@nestjs/config';
 import { BulkIndexingService } from '../../indexing/services/bulk-indexing.service';
 import { IndexingWorkerService } from '../../indexing/services/indexing-worker.service';
 import { DocumentProcessorPool } from '../../indexing/services/document-processor.pool';
-import Redis from 'ioredis';
 import * as os from 'os';
 
 export interface WorkerStatus {
@@ -60,7 +59,6 @@ export interface DiagnosticsReport {
 @Injectable()
 export class WorkerManagementService {
   private readonly logger = new Logger(WorkerManagementService.name);
-  private readonly redis: Redis;
   private performanceHistory: Array<{
     timestamp: Date;
     docsPerSecond: number;
@@ -76,13 +74,15 @@ export class WorkerManagementService {
     private readonly indexingWorkerService: IndexingWorkerService,
     private readonly documentProcessorPool: DocumentProcessorPool,
   ) {
-    this.redis = new Redis({
-      host: this.configService.get('REDIS_HOST', 'localhost'),
-      port: this.configService.get('REDIS_PORT', 6379),
-    });
-
     // Start performance monitoring
     this.startPerformanceTracking();
+  }
+
+  /**
+   * Get Redis client from Bull queue (follows same pattern as other services)
+   */
+  private getRedisClient() {
+    return (this.indexingQueue as any).client;
   }
 
   async getComprehensiveWorkerStatus() {
@@ -175,7 +175,8 @@ export class WorkerManagementService {
       }
 
       // Force job processing by pinging Redis
-      await this.redis.publish(
+      const redis = this.getRedisClient();
+      await redis.publish(
         'bull:indexing:events',
         JSON.stringify({
           event: 'global:stalled',
@@ -183,7 +184,7 @@ export class WorkerManagementService {
         }),
       );
 
-      await this.redis.publish(
+      await redis.publish(
         'bull:bulk-indexing:events',
         JSON.stringify({
           event: 'global:stalled',
@@ -258,7 +259,8 @@ export class WorkerManagementService {
 
   async forceJobPickup() {
     try {
-      const pipeline = this.redis.pipeline();
+      const redis = this.getRedisClient();
+      const pipeline = redis.pipeline();
 
       // Force Redis to notify workers about waiting jobs
       pipeline.publish(
@@ -349,7 +351,8 @@ export class WorkerManagementService {
       }
 
       // Clear Redis caches to free memory
-      await this.redis.flushdb();
+      const redis = this.getRedisClient();
+      await redis.flushdb();
 
       // Force all workers to wake up
       await this.activateAllDormantWorkers();
@@ -851,8 +854,9 @@ export class WorkerManagementService {
 
   private async checkRedisConnection(): Promise<DiagnosticResult> {
     try {
-      const pong = await this.redis.ping();
-      const info = await this.redis.info('memory');
+      const redis = this.getRedisClient();
+      const pong = await redis.ping();
+      const info = await redis.info('memory');
 
       return {
         status: 'pass',

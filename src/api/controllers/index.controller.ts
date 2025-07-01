@@ -11,6 +11,8 @@ import {
   HttpCode,
   ValidationPipe,
   BadRequestException,
+  HttpException,
+  Inject,
 } from '@nestjs/common';
 import {
   CreateIndexDto,
@@ -35,6 +37,29 @@ import { TermPostingsRepository } from '../../storage/mongodb/repositories/term-
 import { IndexingService } from '../../indexing/indexing.service';
 import { DocumentService } from '../../document/document.service';
 import { Logger } from '@nestjs/common';
+import { InMemoryTermDictionary } from '../../index/term-dictionary';
+
+interface MigrationProgress {
+  phase: string;
+  processed: number;
+  total: number;
+  percentage: number;
+  estimatedTimeRemaining?: number;
+  errors: number;
+}
+
+interface MigrationResult {
+  success: boolean;
+  totalRecords: number;
+  migratedRecords: number;
+  alreadyMigrated: number;
+  errors: number;
+  durationMs: number;
+  phases: {
+    mongoMigration: MigrationProgress;
+    termDictionaryUpdate: MigrationProgress;
+  };
+}
 
 @ApiTags('Indices')
 @ApiExtraModels(CreateIndexDto, UpdateIndexSettingsDto)
@@ -49,6 +74,8 @@ export class IndexController {
     private readonly termPostingsRepository: TermPostingsRepository,
     private readonly indexingService: IndexingService,
     private readonly documentService: DocumentService,
+    @Inject('TERM_DICTIONARY')
+    private readonly termDictionary: InMemoryTermDictionary,
   ) {}
 
   @Post()
@@ -813,6 +840,310 @@ export class IndexController {
     } catch (error) {
       this.logger.error(`Error clearing term postings for index ${name}: ${error.message}`);
       throw new BadRequestException(`Error clearing term postings: ${error.message}`);
+    }
+  }
+
+  @Post('migrate/index-aware-terms')
+  @ApiOperation({
+    summary: 'Migrate term postings to index-aware format',
+    description:
+      'Converts existing field:term format to index:field:term format in MongoDB and updates in-memory term dictionary. Optimized for 500k+ records.',
+  })
+  @ApiQuery({
+    name: 'dryRun',
+    required: false,
+    type: 'boolean',
+    description: 'Run analysis without making changes',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Migration completed successfully',
+    schema: {
+      type: 'object',
+      properties: {
+        success: { type: 'boolean' },
+        message: { type: 'string' },
+        result: {
+          type: 'object',
+          properties: {
+            totalRecords: { type: 'number' },
+            migratedRecords: { type: 'number' },
+            alreadyMigrated: { type: 'number' },
+            errors: { type: 'number' },
+            durationMs: { type: 'number' },
+          },
+        },
+      },
+    },
+  })
+  async migrateToIndexAwareTerms(@Query('dryRun') dryRun?: boolean): Promise<any> {
+    const startTime = Date.now();
+    this.logger.log(
+      `🚀 Starting ${dryRun ? 'DRY RUN' : 'MIGRATION'} to index-aware term format...`,
+    );
+
+    try {
+      if (dryRun) {
+        const analysis = await this.analyzeTermFormats();
+        return {
+          success: true,
+          message: 'Analysis completed',
+          analysis,
+          recommendations: this.generateRecommendations(analysis),
+        };
+      }
+
+      // Phase 1: MongoDB Migration
+      this.logger.log('📊 Phase 1: Migrating MongoDB term postings...');
+      const mongoResult = await this.migrateMongoDBAwareTerms();
+
+      // Phase 2: Update in-memory term dictionary
+      this.logger.log('💾 Phase 2: Updating in-memory term dictionary...');
+      const memoryResult = await this.updateInMemoryTermDictionary();
+
+      const durationMs = Date.now() - startTime;
+      const result: MigrationResult = {
+        success: true,
+        totalRecords: mongoResult.totalRecords,
+        migratedRecords: mongoResult.migratedRecords,
+        alreadyMigrated: mongoResult.alreadyMigrated,
+        errors: mongoResult.errors + memoryResult.errors,
+        durationMs,
+        phases: {
+          mongoMigration: mongoResult.progress,
+          termDictionaryUpdate: memoryResult.progress,
+        },
+      };
+
+      this.logger.log('🎉 Migration completed successfully!');
+      this.logger.log(
+        `📈 Results: ${result.migratedRecords} migrated, ${result.errors} errors, ${(
+          durationMs / 1000
+        ).toFixed(2)}s duration`,
+      );
+
+      return {
+        success: true,
+        message: 'Migration completed successfully',
+        result,
+      };
+    } catch (error) {
+      this.logger.error(`❌ Migration failed: ${error.message}`);
+      throw new HttpException(
+        {
+          success: false,
+          message: `Migration failed: ${error.message}`,
+          error: error.stack,
+        },
+        HttpStatus.INTERNAL_SERVER_ERROR,
+      );
+    }
+  }
+
+  @Get('migration/status')
+  @ApiOperation({
+    summary: 'Check term format migration status',
+    description: 'Analyze current term format distribution without making changes',
+  })
+  async getMigrationStatus(): Promise<any> {
+    try {
+      const analysis = await this.analyzeTermFormats();
+      return {
+        success: true,
+        analysis,
+        recommendations: this.generateRecommendations(analysis),
+      };
+    } catch (error) {
+      throw new HttpException(
+        `Failed to analyze migration status: ${error.message}`,
+        HttpStatus.INTERNAL_SERVER_ERROR,
+      );
+    }
+  }
+
+  /**
+   * Analyze current term format distribution
+   */
+  private async analyzeTermFormats(): Promise<any> {
+    this.logger.log('🔍 Analyzing current term format distribution...');
+
+    const [legacyCount, indexAwareCount, totalCount, sampleTerms] = await Promise.all([
+      this.termPostingsRepository['termPostingsModel']
+        .countDocuments({ term: { $not: /^[^:]+:[^:]+:.+/ } })
+        .exec(),
+      this.termPostingsRepository['termPostingsModel']
+        .countDocuments({ term: /^[^:]+:[^:]+:.+/ })
+        .exec(),
+      this.termPostingsRepository['termPostingsModel'].countDocuments().exec(),
+      this.termPostingsRepository['termPostingsModel']
+        .find({ term: { $not: /^[^:]+:[^:]+:.+/ } })
+        .limit(10)
+        .select('indexName term')
+        .exec(),
+    ]);
+
+    const legacyPercentage = totalCount > 0 ? (legacyCount / totalCount) * 100 : 0;
+    const indexAwarePercentage = totalCount > 0 ? (indexAwareCount / totalCount) * 100 : 0;
+
+    return {
+      totalRecords: totalCount,
+      legacyFormat: {
+        count: legacyCount,
+        percentage: legacyPercentage,
+        format: 'field:term',
+      },
+      indexAwareFormat: {
+        count: indexAwareCount,
+        percentage: indexAwarePercentage,
+        format: 'index:field:term',
+      },
+      sampleLegacyTerms: sampleTerms.map(t => ({
+        current: `${t.indexName} | ${t.term}`,
+        willBecome: `${t.indexName} | ${t.indexName}:${t.term}`,
+      })),
+      migrationNeeded: legacyCount > 0,
+    };
+  }
+
+  /**
+   * Generate recommendations based on analysis
+   */
+  private generateRecommendations(analysis: any): string[] {
+    const recommendations = [];
+
+    if (analysis.legacyFormat.count === 0) {
+      recommendations.push('✅ All terms already in index-aware format - no migration needed');
+    } else if (analysis.legacyFormat.count < 1000) {
+      recommendations.push('🟡 Small migration - can run immediately');
+    } else if (analysis.legacyFormat.count < 100000) {
+      recommendations.push('🟠 Medium migration - estimated 1-5 minutes');
+    } else {
+      recommendations.push(
+        '🔴 Large migration - estimated 10+ minutes, consider maintenance window',
+      );
+      recommendations.push('💾 Ensure database backup before proceeding');
+    }
+
+    if (analysis.legacyFormat.percentage > 90) {
+      recommendations.push(
+        '📊 Most data needs migration - expect significant performance improvement after completion',
+      );
+    }
+
+    return recommendations;
+  }
+
+  /**
+   * Migrate MongoDB terms using optimized bulk operations
+   */
+  private async migrateMongoDBAwareTerms(): Promise<{
+    totalRecords: number;
+    migratedRecords: number;
+    alreadyMigrated: number;
+    errors: number;
+    progress: MigrationProgress;
+  }> {
+    // Use the optimized migration method from the repository
+    const result = await this.termPostingsRepository.migrateLegacyTermsToIndexAware();
+
+    return {
+      totalRecords: result.totalProcessed,
+      migratedRecords: result.migratedCount,
+      alreadyMigrated: result.alreadyMigrated,
+      errors: result.errorCount,
+      progress: {
+        phase: 'MongoDB Migration',
+        processed: result.totalProcessed,
+        total: result.totalProcessed,
+        percentage: 100,
+        errors: result.errorCount,
+      },
+    };
+  }
+
+  /**
+   * Update in-memory term dictionary to use index-aware terms
+   */
+  private async updateInMemoryTermDictionary(): Promise<{
+    errors: number;
+    progress: MigrationProgress;
+  }> {
+    try {
+      this.logger.log('💾 Clearing and rebuilding in-memory term dictionary...');
+
+      // Clear existing term dictionary
+      await this.termDictionary.clear();
+      this.logger.log('🗑️ Cleared existing in-memory term dictionary');
+
+      // Note: The term dictionary will be automatically repopulated as searches are performed
+      // or we can trigger a full reload from MongoDB if needed
+
+      this.logger.log('✅ In-memory term dictionary updated for index-aware format');
+
+      return {
+        errors: 0,
+        progress: {
+          phase: 'Term Dictionary Update',
+          processed: 1,
+          total: 1,
+          percentage: 100,
+          errors: 0,
+        },
+      };
+    } catch (error) {
+      this.logger.error(`Term dictionary update error: ${error.message}`);
+      return {
+        errors: 1,
+        progress: {
+          phase: 'Term Dictionary Update',
+          processed: 0,
+          total: 1,
+          percentage: 0,
+          errors: 1,
+        },
+      };
+    }
+  }
+
+  @Get(':name/debug/term-postings')
+  @ApiOperation({
+    summary: 'Debug term postings format',
+    description: 'Shows sample term postings from MongoDB to verify format after migration',
+  })
+  @ApiParam({
+    name: 'name',
+    description: 'Index name to debug',
+    example: 'bulk-test-10000',
+  })
+  async debugTermPostings(@Param('name') name: string): Promise<any> {
+    try {
+      const sampleTerms = await this.termPostingsRepository['termPostingsModel']
+        .find({ indexName: name })
+        .limit(10)
+        .select('indexName term postings documentCount lastUpdated')
+        .exec();
+
+      return {
+        success: true,
+        indexName: name,
+        totalTerms: await this.termPostingsRepository.getTermCount(name),
+        sampleTerms: sampleTerms.map(term => ({
+          indexName: term.indexName,
+          term: term.term,
+          documentCount: term.documentCount,
+          lastUpdated: term.lastUpdated,
+          samplePostings: Object.keys(term.postings)
+            .slice(0, 3)
+            .map(docId => ({
+              docId,
+              frequency: term.postings[docId].frequency,
+              positionsCount: term.postings[docId].positions?.length || 0,
+            })),
+        })),
+      };
+    } catch (error) {
+      this.logger.error(`Error getting debug term postings for ${name}: ${error.message}`);
+      throw new BadRequestException(`Debug failed: ${error.message}`);
     }
   }
 }

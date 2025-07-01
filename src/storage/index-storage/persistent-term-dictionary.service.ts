@@ -88,7 +88,10 @@ export class PersistentTermDictionaryService {
         return 0;
       }
 
-      const termPostingsData: Array<{ term: string; postings: Record<string, PostingEntry> }> = [];
+      const termPostingsData: Array<{
+        indexAwareTerm: string;
+        postings: Record<string, PostingEntry>;
+      }> = [];
 
       for (const key of rocksDBKeys) {
         try {
@@ -121,14 +124,14 @@ export class PersistentTermDictionaryService {
             };
           }
 
-          termPostingsData.push({ term, postings });
+          termPostingsData.push({ indexAwareTerm: `${indexName}:${term}`, postings });
         } catch (error) {
           this.logger.warn(`Failed to migrate term postings for key ${key}: ${error.message}`);
         }
       }
 
       if (termPostingsData.length > 0) {
-        await this.termPostingsRepository.bulkUpsert(indexName, termPostingsData);
+        await this.termPostingsRepository.bulkUpsert(termPostingsData);
         this.logger.log(
           `Migrated ${termPostingsData.length} term postings from RocksDB to MongoDB for index: ${indexName}`,
         );
@@ -143,15 +146,16 @@ export class PersistentTermDictionaryService {
 
   /**
    * Save term postings to both RocksDB and MongoDB
+   * Uses index-aware terms (index:field:term format)
    */
-  async saveTermPostings(indexName: string, term: string, postingList: PostingList): Promise<void> {
+  async saveTermPostings(indexAwareTerm: string, postingList: PostingList): Promise<void> {
     try {
-      // Save to RocksDB for performance
-      const rocksDBKey = this.getTermKey(term);
+      // Save to RocksDB for performance using index-aware term
+      const rocksDBKey = this.getTermKey(indexAwareTerm);
       const serialized = postingList.serialize();
       await this.rocksDBService.put(rocksDBKey, serialized);
 
-      // Save to MongoDB for persistence
+      // Save to MongoDB for persistence using index-aware term
       const postings: Record<string, PostingEntry> = {};
       for (const entry of postingList.getEntries()) {
         postings[entry.docId.toString()] = {
@@ -162,26 +166,28 @@ export class PersistentTermDictionaryService {
         };
       }
 
-      await this.termPostingsRepository.update(indexName, term, postings);
+      // Use new index-aware update method
+      await this.termPostingsRepository.update(indexAwareTerm, postings);
     } catch (error) {
-      this.logger.error(`Failed to save term postings for ${term}: ${error.message}`);
+      this.logger.error(`Failed to save term postings for ${indexAwareTerm}: ${error.message}`);
       throw error;
     }
   }
 
   /**
    * Delete term postings from both RocksDB and MongoDB
+   * Uses index-aware terms (index:field:term format)
    */
-  async deleteTermPostings(indexName: string, term: string): Promise<void> {
+  async deleteTermPostings(indexAwareTerm: string): Promise<void> {
     try {
-      // Delete from RocksDB
-      const rocksDBKey = this.getTermKey(term);
+      // Delete from RocksDB using index-aware term
+      const rocksDBKey = this.getTermKey(indexAwareTerm);
       await this.rocksDBService.delete(rocksDBKey);
 
-      // Delete from MongoDB
-      await this.termPostingsRepository.deleteByIndexAndTerm(indexName, term);
+      // Delete from MongoDB using index-aware term
+      await this.termPostingsRepository.deleteByIndexAwareTerm(indexAwareTerm);
     } catch (error) {
-      this.logger.error(`Failed to delete term postings for ${term}: ${error.message}`);
+      this.logger.error(`Failed to delete term postings for ${indexAwareTerm}: ${error.message}`);
       throw error;
     }
   }

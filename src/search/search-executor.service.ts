@@ -137,22 +137,33 @@ export class SearchExecutorService {
 
   /**
    * Get terms for a specific index from MongoDB storage
+   * REDIS-RESILIENT: Falls back to MongoDB if Redis/memory fails
    */
   private async getTermsByIndex(indexName: string): Promise<string[]> {
     try {
       // First try to get terms from in-memory cache (fast path)
-      const memoryTerms = this.termDictionary.getTermsForIndex(indexName);
-      this.logger.debug(`Found ${memoryTerms.length} terms in memory for index: ${indexName}`);
+      // This will fail gracefully if Redis is down
+      let memoryTerms: string[] = [];
+      try {
+        memoryTerms = this.termDictionary.getTermsForIndex(indexName);
+        this.logger.debug(`Found ${memoryTerms.length} terms in memory for index: ${indexName}`);
+      } catch (error) {
+        this.logger.warn(`Memory term lookup failed for ${indexName}: ${error.message}`);
+      }
 
       if (memoryTerms.length > 0) {
         return memoryTerms;
       }
 
-      // Fallback to MongoDB if no terms in memory
+      // Fallback to MongoDB if no terms in memory (ALWAYS works even if Redis is down)
       this.logger.debug(`Falling back to MongoDB for terms in index: ${indexName}`);
       const termPostings = await this.termPostingsRepository.findByIndex(indexName);
+
+      // MongoDB now stores terms in index-aware format (index:field:term) - no conversion needed
       const mongoTerms = termPostings.map(tp => tp.term);
-      this.logger.debug(`Found ${mongoTerms.length} terms in MongoDB for index: ${indexName}`);
+      this.logger.debug(
+        `Found ${mongoTerms.length} index-aware terms in MongoDB for index: ${indexName}`,
+      );
 
       return mongoTerms;
     } catch (error) {
@@ -162,14 +173,13 @@ export class SearchExecutorService {
   }
 
   /**
-   * Get posting list for a specific term and index from MongoDB storage
+   * Get posting list for a specific index-aware term from MongoDB storage
    */
-  private async getPostingListByIndex(
-    indexName: string,
-    term: string,
+  private async getPostingListByIndexAwareTerm(
+    indexAwareTerm: string,
   ): Promise<PostingList | null> {
     try {
-      const termPosting = await this.termPostingsRepository.findByIndexAndTerm(indexName, term);
+      const termPosting = await this.termPostingsRepository.findByIndexAwareTerm(indexAwareTerm);
       if (!termPosting) {
         return null;
       }
@@ -187,7 +197,7 @@ export class SearchExecutorService {
       return postingList;
     } catch (error) {
       this.logger.error(
-        `Failed to get posting list for term ${term} in index ${indexName}: ${error.message}`,
+        `Failed to get posting list for index-aware term ${indexAwareTerm}: ${error.message}`,
       );
       return null;
     }
@@ -213,9 +223,10 @@ export class SearchExecutorService {
       return results;
     }
 
-    // Fallback to MongoDB-based term lookup
-    this.logger.debug(`Fallback to MongoDB for term: ${term} in index: ${indexName}`);
-    const mongoPostingList = await this.getPostingListByIndex(indexName, term);
+    // Fallback to MongoDB-based term lookup using index-aware term
+    const indexAwareTerm = `${indexName}:${term}`;
+    this.logger.debug(`Fallback to MongoDB for index-aware term: ${indexAwareTerm}`);
+    const mongoPostingList = await this.getPostingListByIndexAwareTerm(indexAwareTerm);
     if (mongoPostingList && mongoPostingList.size() > 0) {
       this.logger.debug(
         `Found MongoDB posting list for term: ${term} in index: ${indexName} with ${mongoPostingList.size()} entries`,
@@ -234,7 +245,8 @@ export class SearchExecutorService {
       );
 
       for (const matchingTerm of matchingTerms) {
-        const matchingPostingList = await this.getPostingListByIndex(indexName, matchingTerm);
+        // Use the index-aware term directly - no conversion needed
+        const matchingPostingList = await this.getPostingListByIndexAwareTerm(matchingTerm);
         if (matchingPostingList && matchingPostingList.size() > 0) {
           this.logger.debug(
             `Found posting list for matching term: ${matchingTerm} with ${matchingPostingList.size()} entries`,
@@ -362,44 +374,69 @@ export class SearchExecutorService {
       const allTerms = await this.getTermsByIndex(indexName);
       this.logger.debug(`Total terms available in index ${indexName}: ${allTerms.length}`);
 
-      // For field-specific searches, filter by field first using index-aware format
-      const fieldPrefix = field && field !== '_all' ? `${field}:` : '';
+      // Filter terms to match the field and pattern using index-aware format
       const matchingTerms = allTerms.filter(term => {
-        // Check if term matches the field (if specified)
-        if (fieldPrefix && !term.includes(fieldPrefix)) {
-          return false;
-        }
-
-        // Extract the term value (after index:field: prefix)
+        // Parse index-aware term: index:field:termValue
         const parts = term.split(':');
         if (parts.length < 3) return false; // Should be index:field:term format
 
-        const termValue = parts.slice(2).join(':'); // Handle terms with colons
+        const termIndexName = parts[0];
         const termField = parts[1];
+        const termValue = parts.slice(2).join(':'); // Handle terms with colons
 
-        // Check field match and pattern match
-        const fieldMatches = !fieldPrefix || termField === field;
+        // Check if it's for the correct index
+        if (termIndexName !== indexName) return false;
+
+        // Check field match (if field is specified and not _all)
+        const fieldMatches = !field || field === '_all' || termField === field;
+        if (!fieldMatches) return false;
+
+        // Check pattern match
         const patternMatches = termValue && compiledPattern.test(termValue);
 
-        return fieldMatches && patternMatches;
+        this.logger.debug(
+          `Term: ${term}, Field: ${termField}, Value: ${termValue}, FieldMatch: ${fieldMatches}, PatternMatch: ${patternMatches}`,
+        );
+
+        return patternMatches;
       });
 
       this.logger.debug(
-        `Found ${matchingTerms.length} matching terms for pattern: ${pattern} in index: ${indexName}`,
+        `Found ${matchingTerms.length} matching terms for pattern: ${pattern} on field: ${field} in index: ${indexName}`,
       );
+
+      if (matchingTerms.length === 0) {
+        this.logger.debug(
+          `No wildcard matches found for pattern: ${pattern} in index: ${indexName}`,
+        );
+        return [];
+      }
 
       // Get posting lists for all matching terms using index-aware lookup
       const results = await Promise.all(
         matchingTerms.map(async fullTerm => {
-          // Extract the field:term part from index:field:term
-          const parts = fullTerm.split(':');
-          const fieldTermPart = parts.slice(1).join(':'); // field:term
-          const postingList = await this.termDictionary.getPostingListForIndex(
+          // Use the index-aware term directly - no conversion needed
+          // Try index-aware lookup first, then MongoDB fallback
+          let postingList = await this.termDictionary.getPostingListForIndex(
             indexName,
-            fieldTermPart,
+            fullTerm,
+            true, // isIndexAware = true
           );
-          if (!postingList) return [];
-          return this.calculateScores(indexName, postingList, fieldTermPart);
+
+          // If not found in memory, try MongoDB directly using index-aware term
+          if (!postingList) {
+            postingList = await this.getPostingListByIndexAwareTerm(fullTerm);
+          }
+
+          if (!postingList) {
+            this.logger.debug(`No posting list found for term: ${fullTerm}`);
+            return [];
+          }
+
+          this.logger.debug(
+            `Found posting list for term: ${fullTerm} with ${postingList.size()} documents`,
+          );
+          return this.calculateScores(indexName, postingList, fullTerm);
         }),
       );
 
