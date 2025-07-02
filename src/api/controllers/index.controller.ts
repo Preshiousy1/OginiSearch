@@ -38,6 +38,7 @@ import { IndexingService } from '../../indexing/indexing.service';
 import { DocumentService } from '../../document/document.service';
 import { Logger } from '@nestjs/common';
 import { InMemoryTermDictionary } from '../../index/term-dictionary';
+import { SearchService } from '../../search/search.service';
 
 interface MigrationProgress {
   phase: string;
@@ -76,6 +77,7 @@ export class IndexController {
     private readonly documentService: DocumentService,
     @Inject('TERM_DICTIONARY')
     private readonly termDictionary: InMemoryTermDictionary,
+    private readonly searchService: SearchService,
   ) {}
 
   @Post()
@@ -1144,6 +1146,174 @@ export class IndexController {
     } catch (error) {
       this.logger.error(`Error getting debug term postings for ${name}: ${error.message}`);
       throw new BadRequestException(`Debug failed: ${error.message}`);
+    }
+  }
+
+  /**
+   * Debug: Test direct MongoDB repository lookup
+   */
+  @Get(':name/debug/mongo-lookup/:term')
+  @ApiOperation({
+    summary: 'Debug MongoDB repository lookup',
+    description: 'Directly test the MongoDB repository lookup for a specific term',
+  })
+  async debugMongoLookup(@Param('name') indexName: string, @Param('term') term: string) {
+    try {
+      const result = await this.termPostingsRepository.findByIndexAwareTerm(term);
+
+      return {
+        success: true,
+        indexName,
+        term,
+        found: !!result,
+        documentCount: result ? Object.keys(result.postings).length : 0,
+        samplePostings: result
+          ? Object.entries(result.postings)
+              .slice(0, 3)
+              .map(([docId, posting]) => ({
+                docId,
+                frequency: posting.frequency,
+                positionsCount: posting.positions?.length || 0,
+              }))
+          : [],
+      };
+    } catch (error) {
+      return {
+        success: false,
+        error: error.message,
+        indexName,
+        term,
+      };
+    }
+  }
+
+  /**
+   * Debug: Test search executor posting list lookup
+   */
+  @Get(':name/debug/search-executor/:term')
+  @ApiOperation({
+    summary: 'Debug search executor posting list lookup',
+    description: 'Test the search executor getPostingListByIndexAwareTerm method directly',
+  })
+  async debugSearchExecutor(@Param('name') indexName: string, @Param('term') term: string) {
+    try {
+      // Access the private method through reflection for debugging
+      const searchExecutor = this.searchService['searchExecutor'];
+      const postingList = await searchExecutor['getPostingListByIndexAwareTerm'](term);
+
+      return {
+        success: true,
+        indexName,
+        term,
+        found: !!postingList,
+        documentCount: postingList ? postingList.size() : 0,
+        postingListType: postingList ? postingList.constructor.name : 'null',
+      };
+    } catch (error) {
+      return {
+        success: false,
+        error: error.message,
+        indexName,
+        term,
+      };
+    }
+  }
+
+  /**
+   * Debug: Test in-memory term dictionary lookup
+   */
+  @Get(':name/debug/memory-lookup/:term')
+  @ApiOperation({
+    summary: 'Debug in-memory term dictionary lookup',
+    description: 'Test the in-memory term dictionary lookup for a specific term',
+  })
+  async debugMemoryLookup(@Param('name') indexName: string, @Param('term') term: string) {
+    try {
+      const postingList = await this.termDictionary.getPostingListForIndex(indexName, term);
+
+      return {
+        success: true,
+        indexName,
+        term,
+        found: !!postingList,
+        documentCount: postingList ? postingList.size() : 0,
+        postingListType: postingList ? postingList.constructor.name : 'null',
+      };
+    } catch (error) {
+      return {
+        success: false,
+        error: error.message,
+        indexName,
+        term,
+      };
+    }
+  }
+
+  /**
+   * Debug: Test posting list size method
+   */
+  @Get(':name/debug/memory-size/:term')
+  @ApiOperation({
+    summary: 'Debug posting list size method',
+    description: 'Test the exact size() value returned by in-memory posting list',
+  })
+  async debugMemorySize(@Param('name') indexName: string, @Param('term') term: string) {
+    try {
+      const postingList = await this.termDictionary.getPostingListForIndex(indexName, term);
+      
+      return {
+        success: true,
+        indexName,
+        term,
+        found: !!postingList,
+        size: postingList ? postingList.size() : null,
+        sizeType: postingList ? typeof postingList.size() : 'null',
+        sizeGreaterThanZero: postingList ? postingList.size() > 0 : false,
+        postingListType: postingList ? postingList.constructor.name : 'null',
+      };
+    } catch (error) {
+      return {
+        success: false,
+        error: error.message,
+        indexName,
+        term,
+      };
+    }
+  }
+
+  /**
+   * Debug: Trace complete search execution
+   */
+  @Post(':name/debug/search-trace')
+  @ApiOperation({
+    summary: 'Debug complete search execution',
+    description: 'Trace the complete search execution path with detailed logging',
+  })
+  async debugSearchTrace(@Param('name') indexName: string, @Body() searchQuery: any) {
+    try {
+      // Enable debug mode for this search
+      const originalLogLevel = process.env.LOG_LEVEL;
+      process.env.LOG_LEVEL = 'debug';
+      
+      const result = await this.searchService.search(indexName, searchQuery);
+      
+      // Restore original log level
+      process.env.LOG_LEVEL = originalLogLevel;
+      
+      return {
+        success: true,
+        indexName,
+        query: searchQuery,
+        result: result.data,
+        took: result.took,
+      };
+    } catch (error) {
+      return {
+        success: false,
+        error: error.message,
+        indexName,
+        query: searchQuery,
+      };
     }
   }
 }

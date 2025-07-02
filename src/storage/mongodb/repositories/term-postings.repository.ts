@@ -15,7 +15,20 @@ export class TermPostingsRepository {
    */
   async findByIndexAwareTerm(indexAwareTerm: string): Promise<TermPostings | null> {
     const indexName = this.extractIndexFromTerm(indexAwareTerm);
-    return this.termPostingsModel.findOne({ indexName, term: indexAwareTerm }).exec();
+    console.log(
+      `[TermPostingsRepository] Looking for term: ${indexAwareTerm} in index: ${indexName}`,
+    );
+    const result = await this.termPostingsModel.findOne({ indexName, term: indexAwareTerm }).exec();
+    if (result) {
+      console.log(
+        `[TermPostingsRepository] Found term posting for: ${indexAwareTerm} with ${
+          Object.keys(result.postings).length
+        } documents`,
+      );
+    } else {
+      console.log(`[TermPostingsRepository] No term posting found for: ${indexAwareTerm}`);
+    }
+    return result;
   }
 
   /**
