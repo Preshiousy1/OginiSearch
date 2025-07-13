@@ -628,11 +628,20 @@ export class IndexController {
     if (!index) {
       throw new NotFoundException(`Index ${indexName} not found`);
     }
+
+    // Get sample documents to use for field detection
     const sampleDocs = await this.documentService.listDocuments(indexName, { limit: 100 });
     if (sampleDocs.total === 0) {
       return { properties: {} };
     }
-    await this.documentService['ensureFieldMappings'](indexName, sampleDocs.documents);
+
+    // Use the same ensureFieldMappings logic as the document service
+    await this.documentService['ensureFieldMappings'](
+      indexName,
+      sampleDocs.documents.map(doc => doc.source),
+    );
+
+    // Get the updated index with new mappings
     const updatedIndex = await this.indexService.getIndex(indexName);
     return updatedIndex.mappings;
   }

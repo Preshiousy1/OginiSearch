@@ -104,6 +104,12 @@ export class IndexingQueueProcessor {
         throw new Error(`Index ${indexName} does not exist`);
       }
 
+      // Smart Auto-Detection: Check if we need to configure mappings first
+      await this.documentService['ensureFieldMappings'](
+        indexName,
+        documents.map(doc => doc.document),
+      );
+
       // Store documents in PostgreSQL
       const storageResult = await this.documentStorageService.bulkStoreDocuments(
         indexName,

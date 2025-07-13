@@ -178,7 +178,10 @@ export class QueryProcessorService implements QueryProcessor {
     // Check if the match query value is actually a wildcard pattern
     if (this.isWildcardQuery(text)) {
       // Create proper wildcard query object
-      const wildcardField = (rawQuery.query as any)?.match?.field || fields[0] || '_all';
+      // If no specific field is provided, use keyword fields from mappings instead of defaulting to 'content'
+      const wildcardField =
+        (rawQuery.query as any)?.match?.field ||
+        (fields[0] && fields[0] !== 'content' ? fields[0] : '_all');
 
       const wildcardQueryObj = {
         field: wildcardField,
@@ -292,7 +295,7 @@ export class QueryProcessorService implements QueryProcessor {
   private extractQueryTextAndFields(rawQuery: RawQuery): { text: string; fields: string[] } {
     // Handle string queries
     if (typeof rawQuery.query === 'string') {
-      return { text: rawQuery.query, fields: rawQuery.fields || ['content'] };
+      return { text: rawQuery.query, fields: rawQuery.fields || ['_all'] };
     }
 
     // Handle object queries
@@ -300,7 +303,7 @@ export class QueryProcessorService implements QueryProcessor {
       const field = rawQuery.query.match.field;
       return {
         text: rawQuery.query.match.value,
-        fields: field ? [field] : rawQuery.fields || ['content'],
+        fields: field ? [field] : rawQuery.fields || ['_all'],
       };
     }
 
@@ -350,14 +353,14 @@ export class QueryProcessorService implements QueryProcessor {
       else if (typeof rawQuery.query.wildcard === 'string') {
         return {
           text: rawQuery.query.wildcard,
-          fields: rawQuery.fields || ['content'],
+          fields: rawQuery.fields || ['_all'],
         };
       }
     }
 
     // Handle match-all queries
     if (rawQuery.query?.match_all) {
-      return { text: '*', fields: rawQuery.fields || ['content'] };
+      return { text: '*', fields: rawQuery.fields || ['_all'] };
     }
 
     // Handle new format
@@ -367,13 +370,13 @@ export class QueryProcessorService implements QueryProcessor {
         ? rawQuery.fields
         : typeof rawQuery.fields === 'string'
         ? [rawQuery.fields]
-        : rawQuery.fields || ['content'];
+        : rawQuery.fields || ['_all'];
 
       return { text, fields };
     }
 
     // Default to empty query if none of the above formats match
-    return { text: '', fields: rawQuery.fields || ['content'] };
+    return { text: '', fields: rawQuery.fields || ['_all'] };
   }
 
   /**

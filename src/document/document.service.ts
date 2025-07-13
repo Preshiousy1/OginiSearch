@@ -555,7 +555,12 @@ export class DocumentService implements OnModuleInit {
     }
 
     for (const [key, value] of Object.entries(obj)) {
-      const fieldPath = prefix ? `${prefix}.${key}` : key;
+      let fieldPath = prefix ? `${prefix}.${key}` : key;
+
+      // Remove 'source.' prefix from field paths to flatten the structure
+      if (fieldPath.startsWith('source.')) {
+        fieldPath = fieldPath.substring(7); // Remove 'source.' prefix
+      }
 
       if (value === null || value === undefined) {
         continue;
@@ -646,28 +651,43 @@ export class DocumentService implements OnModuleInit {
 
   /**
    * Create field mapping configuration based on detected type
-   * (Enhanced version with better mapping configurations)
+   * (Enhanced version with consistent mapping structure)
    */
-  private createFieldMapping(fieldType: string, examples?: Set<any>): any {
-    const mapping: any = { type: fieldType };
+  private createFieldMapping(fieldType: string, examples?: Set<any>, fieldPath?: string): any {
+    // Always treat 'name' and 'title' fields as having a .keyword subfield, regardless of type
+    const isNameOrTitle =
+      fieldPath &&
+      (fieldPath.endsWith('.name') ||
+        fieldPath.endsWith('.title') ||
+        fieldPath === 'name' ||
+        fieldPath === 'title');
+
+    const mapping: any = {
+      type: fieldType,
+      store: true,
+      index: true,
+    };
 
     switch (fieldType) {
       case 'text':
         mapping.analyzer = 'standard';
         break;
       case 'keyword':
-        mapping.index = true;
+        mapping.ignore_above = 256;
         break;
       case 'date':
         mapping.format = 'strict_date_optional_time||epoch_millis';
         break;
-      case 'integer':
-      case 'float':
-        mapping.index = true;
-        break;
-      case 'boolean':
-        mapping.index = true;
-        break;
+    }
+
+    // Always add .keyword subfield for name/title fields
+    if (isNameOrTitle) {
+      mapping.fields = {
+        keyword: {
+          type: 'keyword',
+          ignore_above: 256,
+        },
+      };
     }
 
     return mapping;

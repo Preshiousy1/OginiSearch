@@ -39,12 +39,12 @@ export class IndexService {
 
     return {
       name: createIndexDto.name,
+      documentCount: 0,
+      status: 'open',
       mappings: createIndexDto.mappings,
       settings: createIndexDto.settings || {},
-      documentCount: 0,
       createdAt: result[0].created_at,
       updatedAt: result[0].updated_at,
-      status: 'open',
     };
   }
 
@@ -68,14 +68,20 @@ export class IndexService {
       }
 
       const index = result[0];
+      const settings = { ...(index.settings || {}) };
+      // Remove mappings from settings if present
+      if ('mappings' in settings) {
+        delete settings.mappings;
+      }
+
       return {
         name: index.index_name,
-        mappings: index.mappings || { properties: {} },
-        settings: index.settings || {},
         documentCount: parseInt(index.document_count || '0', 10),
+        status: index.status || 'open',
+        mappings: (index.settings && index.settings.mappings) || { properties: {} },
+        settings: settings,
         createdAt: index.created_at,
         updatedAt: index.updated_at,
-        status: index.status || 'open',
       };
     } catch (error) {
       this.logger.error(`Error getting index ${indexName}: ${error.message}`);
@@ -162,14 +168,19 @@ export class IndexService {
   }
 
   private mapToIndexResponse(index: any): IndexResponseDto {
+    const settings = { ...(index.settings || {}) };
+    // Remove mappings from settings if present
+    if ('mappings' in settings) {
+      delete settings.mappings;
+    }
     return {
       name: index.index_name,
-      mappings: index.mappings,
-      settings: index.settings || {},
       documentCount: index.document_count || 0,
+      status: index.status || 'open',
+      mappings: (index.settings && index.settings.mappings) || { properties: {} },
+      settings: settings,
       createdAt: index.created_at,
       updatedAt: index.updated_at,
-      status: index.status || 'open',
     };
   }
 }

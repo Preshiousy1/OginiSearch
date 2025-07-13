@@ -23,8 +23,107 @@ export class SearchService {
     const startTime = Date.now();
     this.logger.debug(`Executing search query on index ${indexName}`);
 
+    // --- BEGIN: Keyword field extraction for wildcard match queries ---
+    // Fetch index mappings
+    const index = await this.postgresSearchEngine.getIndex(indexName);
+    const mappings = index.mappings?.properties || {};
+
+    // If match query with wildcard and no field, set fields to all keyword fields
+    if (
+      searchQuery.query &&
+      typeof searchQuery.query === 'object' &&
+      searchQuery.query.match &&
+      typeof searchQuery.query.match.value === 'string' &&
+      (searchQuery.fields === undefined || searchQuery.fields.length === 0) &&
+      (searchQuery.query.match.field === undefined || searchQuery.query.match.field === '_all') &&
+      (searchQuery.query.match.value.includes('*') || searchQuery.query.match.value.includes('?'))
+    ) {
+      // Collect all top-level keyword fields
+      const keywordFields: string[] = [];
+      for (const [field, mapping] of Object.entries(mappings)) {
+        const m = mapping as any;
+        if (m.type === 'keyword') {
+          keywordFields.push(field);
+        }
+        // Also add subfields like name.keyword, profile.keyword, etc.
+        if (m.fields && m.fields.keyword && m.fields.keyword.type === 'keyword') {
+          keywordFields.push(`${field}.keyword`);
+        }
+      }
+      if (keywordFields.length > 0) {
+        searchQuery.fields = keywordFields;
+      }
+    }
+    // --- END: Keyword field extraction ---
+
     try {
-      // Execute search using PostgreSQL engine
+      // Process query through QueryProcessorService to detect wildcard patterns
+      const processedQuery = this.queryProcessor.processQuery(searchQuery as any);
+
+      // Check if the processed query is a wildcard query that was converted from a match query
+      if (processedQuery.parsedQuery.type === 'wildcard') {
+        // If we set fields for wildcard search, use the first field as the target field
+        let targetField = processedQuery.parsedQuery.field;
+        if (searchQuery.fields && searchQuery.fields.length > 0 && targetField === '_all') {
+          targetField = searchQuery.fields[0];
+        }
+
+        // Convert the processed wildcard query back to the format expected by PostgreSQLSearchEngine
+        const wildcardQuery = {
+          ...searchQuery,
+          query: {
+            wildcard: {
+              field: targetField,
+              value: processedQuery.parsedQuery.pattern,
+              boost: processedQuery.parsedQuery.boost,
+            },
+          },
+        };
+
+        this.logger.debug(
+          `Converted match query with wildcard to wildcard query: ${JSON.stringify(
+            wildcardQuery.query,
+          )}`,
+        );
+
+        // Execute search using PostgreSQL engine with the converted wildcard query
+        const searchResult = await this.postgresSearchEngine.search(indexName, wildcardQuery);
+
+        // Format response with highlights and facets if requested
+        const hits = await Promise.all(
+          searchResult.data.hits.map(async hit => ({
+            id: hit.id,
+            index: indexName,
+            score: hit.score,
+            source: hit.document,
+            highlights: searchQuery.highlight
+              ? await this.getPostgresHighlights(
+                  hit,
+                  this.getQueryText(wildcardQuery.query),
+                  indexName,
+                )
+              : undefined,
+          })),
+        );
+
+        const response: SearchResponseDto = {
+          data: {
+            total: searchResult.data.total,
+            maxScore: hits.length > 0 ? Math.max(...hits.map(h => h.score)) : 0,
+            hits,
+          },
+          took: Date.now() - startTime,
+        };
+
+        // Add facets if requested
+        if (searchQuery.facets) {
+          response.data['facets'] = await this.getPostgresFacets(indexName, searchQuery.facets);
+        }
+
+        return response;
+      }
+
+      // Execute search using PostgreSQL engine for non-wildcard queries
       const searchResult = await this.postgresSearchEngine.search(indexName, searchQuery);
 
       // Format response with highlights and facets if requested

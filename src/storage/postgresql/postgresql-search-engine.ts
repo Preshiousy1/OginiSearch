@@ -416,13 +416,22 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
       throw new NotFoundException(`Index ${indexName} not found`);
     }
 
-    // Get document count
-    const countResult = await this.dataSource.query(
-      'SELECT COUNT(*) as count FROM search_documents WHERE index_name = $1',
+    // Get index data from database including settings and mappings
+    const indexResult = await this.dataSource.query(
+      'SELECT settings, document_count FROM indices WHERE index_name = $1',
       [indexName],
     );
 
-    const documentCount = parseInt(countResult[0]?.count || '0', 10);
+    if (indexResult.length === 0) {
+      throw new NotFoundException(`Index ${indexName} not found in database`);
+    }
+
+    const indexData = indexResult[0];
+    const settings = indexData.settings || {};
+    const documentCount = parseInt(indexData.document_count || '0', 10);
+
+    // Extract mappings from settings (mappings are stored in settings.mappings)
+    const mappings = settings.mappings || { properties: {} };
 
     return {
       name: indexName,
@@ -430,8 +439,8 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
       documentCount,
       createdAt: new Date(),
       updatedAt: new Date(),
-      settings: {},
-      mappings: { properties: {} },
+      settings,
+      mappings,
     };
   }
 
@@ -730,12 +739,25 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
 
         const likePattern = wildcardValue.replace(/\*/g, '%').replace(/\?/g, '_');
         params.push(likePattern);
-        sql += `
-        ${boost}::float as score
-      FROM search_documents sd
-      JOIN documents d ON d.document_id = sd.document_id AND d.index_name = sd.index_name
-      WHERE sd.index_name = $1
-        AND d.content->>'${field}' ILIKE $${paramIndex}::text`;
+
+        // Handle _all field by searching across all fields
+        if (field === '_all') {
+          sql += `
+          ${boost}::float as score
+        FROM search_documents sd
+        JOIN documents d ON d.document_id = sd.document_id AND d.index_name = sd.index_name
+        WHERE sd.index_name = $1
+          AND d.content::text ILIKE $${paramIndex}::text`;
+        } else {
+          // Handle .keyword subfields by extracting the base field name
+          const baseField = field.includes('.keyword') ? field.split('.')[0] : field;
+          sql += `
+          ${boost}::float as score
+        FROM search_documents sd
+        JOIN documents d ON d.document_id = sd.document_id AND d.index_name = sd.index_name
+        WHERE sd.index_name = $1
+          AND d.content->>'${baseField}' ILIKE $${paramIndex}::text`;
+        }
         paramIndex++;
       } else if (query.bool) {
         sql += `
