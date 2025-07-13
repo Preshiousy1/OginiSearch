@@ -201,10 +201,10 @@ export class BulkIndexingService {
     timestamp: string;
   }> {
     const stats = await this.getDetailedQueueStats();
-    
+
     const isHealthy = stats.failedSingleJobs === 0 && stats.failedBatchJobs === 0;
     const isDegraded = stats.failedSingleJobs > 0 || stats.failedBatchJobs > 0;
-    
+
     return {
       status: isHealthy ? 'healthy' : isDegraded ? 'degraded' : 'critical',
       queues: {

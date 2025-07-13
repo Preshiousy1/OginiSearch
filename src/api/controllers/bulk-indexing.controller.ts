@@ -213,7 +213,7 @@ export class BulkIndexingController {
   async getHealth() {
     try {
       const health = await this.bulkIndexingService.getQueueHealth();
-      const stats = health.stats;
+      const stats = health.queues;
 
       // Get detailed stats to properly categorize job types
       const detailedStats = await this.bulkIndexingService.getDetailedQueueStats();

@@ -192,7 +192,6 @@ export class IndexingQueueProcessor {
   @OnQueueCompleted()
   onCompleted(job: Job, result: any) {
     this.logger.log(`✅ Job ${job.id} of type '${job.name}' COMPLETED successfully`);
-    this.logger.debug(`Result:`, result);
   }
 
   @OnQueueFailed()
