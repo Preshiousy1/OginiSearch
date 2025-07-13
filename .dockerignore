@@ -11,5 +11,9 @@ dist
 coverage
 docs
 test
+scripts
+monitoring
+performance-results
+env-configs
 *.md
 !README.md 

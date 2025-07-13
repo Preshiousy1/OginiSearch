@@ -25,17 +25,14 @@ async function indexDocument(
       const fieldTerm = `${fieldName}:${term}`;
 
       // Get or create posting list for this term
-      let postingList = await termDictionary.getPostingList(fieldTerm);
-      if (!postingList) {
-        postingList = await termDictionary.addTerm(fieldTerm);
+      const postings = await termDictionary.getPostings(fieldTerm);
+      let postingList: SimplePostingList | undefined;
+      if (postings) {
+        postingList = new SimplePostingList();
+        for (const [docId, positions] of postings.entries()) {
+          postingList.addEntry({ docId, positions, frequency: positions.length });
+        }
       }
-
-      // Add document to posting list with term frequency
-      postingList.addEntry({
-        docId: processedDoc.id,
-        frequency: frequency,
-        positions: [], // If you're tracking positions
-      });
 
       // Update term statistics
       indexStatsService.updateTermStats(fieldTerm, processedDoc.id);

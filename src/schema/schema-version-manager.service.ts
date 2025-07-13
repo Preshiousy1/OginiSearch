@@ -1,14 +1,32 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
-import { RocksDBService } from '../storage/rocksdb/rocksdb.service';
+import { PostgreSQLService } from '../storage/postgresql/postgresql.service';
 import { Schema, ValidationResult } from './interfaces/schema.interface';
 import { SchemaValidator } from './utils/schema-validator';
 
 @Injectable()
 export class SchemaVersionManagerService {
   private readonly logger = new Logger(SchemaVersionManagerService.name);
-  private readonly schemaKeyPrefix = 'schema:';
 
-  constructor(private readonly rocksDBService: RocksDBService) {}
+  constructor(private readonly postgresqlService: PostgreSQLService) {
+    this.initializeSchemaTable();
+  }
+
+  private async initializeSchemaTable(): Promise<void> {
+    try {
+      await this.postgresqlService.query(`
+        CREATE TABLE IF NOT EXISTS schema_versions (
+          name VARCHAR(255) NOT NULL,
+          version INTEGER NOT NULL,
+          schema JSONB NOT NULL,
+          created TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          PRIMARY KEY (name, version)
+        );
+      `);
+    } catch (error) {
+      this.logger.error(`Failed to initialize schema table: ${error.message}`);
+      throw error;
+    }
+  }
 
   async registerSchema(schema: Omit<Schema, 'created' | 'version'>): Promise<Schema> {
     const existingVersions = await this.getSchemaVersions(schema.name);
@@ -21,8 +39,13 @@ export class SchemaVersionManagerService {
       created: new Date(),
     };
 
-    const key = this.formatSchemaKey(schema.name, newVersion);
-    await this.rocksDBService.put(key, newSchema);
+    await this.postgresqlService.query(
+      `
+      INSERT INTO schema_versions (name, version, schema, created)
+      VALUES ($1, $2, $3, $4)
+    `,
+      [schema.name, newVersion, newSchema, newSchema.created],
+    );
 
     this.logger.log(`Registered schema '${schema.name}' version ${newVersion}`);
     return newSchema;
@@ -30,26 +53,27 @@ export class SchemaVersionManagerService {
 
   async getSchema(name: string, version?: number): Promise<Schema | null> {
     if (version) {
-      const key = this.formatSchemaKey(name, version);
-      return this.rocksDBService.get(key) as Promise<Schema>;
+      const result = await this.postgresqlService.query(
+        'SELECT schema FROM schema_versions WHERE name = $1 AND version = $2',
+        [name, version],
+      );
+      return result.rows[0]?.schema || null;
     }
 
     // If no version specified, get the latest
-    const versions = await this.getSchemaVersions(name);
-    if (versions.length === 0) {
-      return null;
-    }
-
-    // Return the schema with the highest version
-    return versions.reduce((latest, current) =>
-      current.version > latest.version ? current : latest,
+    const result = await this.postgresqlService.query(
+      'SELECT schema FROM schema_versions WHERE name = $1 ORDER BY version DESC LIMIT 1',
+      [name],
     );
+    return result.rows[0]?.schema || null;
   }
 
   async getSchemaVersions(name: string): Promise<Schema[]> {
-    const prefix = `${this.schemaKeyPrefix}${name}:`;
-    const schemas = await this.rocksDBService.getByPrefix(prefix);
-    return schemas.map(item => item.value).sort((a, b) => b.version - a.version);
+    const result = await this.postgresqlService.query(
+      'SELECT schema FROM schema_versions WHERE name = $1 ORDER BY version DESC',
+      [name],
+    );
+    return result.rows.map(row => row.schema);
   }
 
   async validateDocument(
@@ -82,46 +106,29 @@ export class SchemaVersionManagerService {
 
   async deleteSchema(name: string, version?: number): Promise<boolean> {
     if (version) {
-      const key = this.formatSchemaKey(name, version);
-      await this.rocksDBService.delete(key);
+      const result = await this.postgresqlService.query(
+        'DELETE FROM schema_versions WHERE name = $1 AND version = $2',
+        [name, version],
+      );
       this.logger.log(`Deleted schema '${name}' version ${version}`);
-      return true;
+      return result.rowCount > 0;
     }
 
     // Delete all versions
-    const versions = await this.getSchemaVersions(name);
-    if (versions.length === 0) {
-      return false;
-    }
-
-    for (const schema of versions) {
-      const key = this.formatSchemaKey(name, schema.version);
-      await this.rocksDBService.delete(key);
-    }
-
+    const result = await this.postgresqlService.query(
+      'DELETE FROM schema_versions WHERE name = $1',
+      [name],
+    );
     this.logger.log(`Deleted all versions of schema '${name}'`);
-    return true;
-  }
-
-  private formatSchemaKey(name: string, version: number): string {
-    return `${this.schemaKeyPrefix}${name}:${version}`;
+    return result.rowCount > 0;
   }
 
   async getAllSchemas(): Promise<Schema[]> {
-    const allSchemas = [];
-    const results = await this.rocksDBService.getByPrefix(this.schemaKeyPrefix);
-
-    // Get the latest version of each schema
-    const schemasByName = new Map<string, Schema>();
-    for (const { value } of results) {
-      const schema = value as Schema;
-      const existing = schemasByName.get(schema.name);
-
-      if (!existing || existing.version < schema.version) {
-        schemasByName.set(schema.name, schema);
-      }
-    }
-
-    return Array.from(schemasByName.values());
+    const result = await this.postgresqlService.query(`
+      SELECT DISTINCT ON (name) name, schema
+      FROM schema_versions
+      ORDER BY name, version DESC
+    `);
+    return result.rows.map(row => row.schema);
   }
 }

@@ -76,6 +76,81 @@ export class WildcardQueryDto {
   boost?: number;
 }
 
+export class BoolQueryDto {
+  @ApiProperty({
+    description: 'Must match conditions (AND)',
+    required: false,
+    example: [{ match: { field: 'title', value: 'smartphone' } }],
+  })
+  @IsOptional()
+  @IsArray()
+  must?: Array<{ match?: MatchQueryDto; term?: Record<string, any> }>;
+
+  @ApiProperty({
+    description: 'Should match conditions (OR)',
+    required: false,
+    example: [{ match: { field: 'description', value: 'wireless' } }],
+  })
+  @IsOptional()
+  @IsArray()
+  should?: Array<{ match?: MatchQueryDto; term?: Record<string, any> }>;
+
+  @ApiProperty({
+    description: 'Must not match conditions (NOT)',
+    required: false,
+    example: [{ match: { field: 'status', value: 'discontinued' } }],
+  })
+  @IsOptional()
+  @IsArray()
+  must_not?: Array<{ match?: MatchQueryDto; term?: Record<string, any> }>;
+}
+
+export class RangeQueryDto {
+  @ApiProperty({
+    description: 'Field to apply range query on',
+    example: 'price',
+  })
+  @IsString()
+  @IsNotEmpty()
+  field: string;
+
+  @ApiProperty({
+    description: 'Greater than value',
+    required: false,
+    example: 100,
+  })
+  @IsOptional()
+  @IsNumber()
+  gt?: number;
+
+  @ApiProperty({
+    description: 'Greater than or equal to value',
+    required: false,
+    example: 100,
+  })
+  @IsOptional()
+  @IsNumber()
+  gte?: number;
+
+  @ApiProperty({
+    description: 'Less than value',
+    required: false,
+    example: 1000,
+  })
+  @IsOptional()
+  @IsNumber()
+  lt?: number;
+
+  @ApiProperty({
+    description: 'Less than or equal to value',
+    required: false,
+    example: 1000,
+  })
+  @IsOptional()
+  @IsNumber()
+  lte?: number;
+}
+
 export class SearchQueryDto {
   @ApiProperty({
     description: 'Search query definition',
@@ -97,42 +172,25 @@ export class SearchQueryDto {
           value: 'smart*',
         },
       },
-      wildcard_complex: {
-        wildcard: {
-          sku: {
-            value: 'PROD-??-*',
-            boost: 1.5,
-          },
+      term: {
+        term: {
+          categories: 'electronics',
         },
       },
-      wildcard_email: {
-        wildcard: {
-          field: 'email',
-          value: '*@company.com',
+      bool: {
+        bool: {
+          must: [{ match: { field: 'title', value: 'smartphone' } }, { term: { inStock: true } }],
+          should: [{ match: { field: 'description', value: 'wireless' } }],
+        },
+      },
+      range: {
+        range: {
+          field: 'price',
+          gte: 100,
+          lte: 1000,
         },
       },
       string_simple: 'smartphone',
-      string_wildcard_prefix: 'video*',
-      string_wildcard_suffix: '*phone',
-      string_wildcard_contains: '*wireless*',
-      string_wildcard_complex: '*smart?phone*',
-      string_match_all: '*',
-      auto_detect_wildcard: {
-        match: {
-          field: 'category',
-          value: 'elect*',
-        },
-      },
-      auto_detect_match_all: {
-        match: {
-          value: '*',
-        },
-      },
-      auto_detect_empty: {
-        match: {
-          value: '',
-        },
-      },
     },
   })
   @IsNotEmpty()
@@ -142,6 +200,8 @@ export class SearchQueryDto {
         match_all?: MatchAllQueryDto;
         wildcard?: WildcardQueryDto | Record<string, { value: string; boost?: number }>;
         term?: Record<string, any>;
+        bool?: BoolQueryDto;
+        range?: RangeQueryDto;
       }
     | string;
 

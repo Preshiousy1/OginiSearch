@@ -1,63 +1,53 @@
-import * as fs from 'fs';
-import * as path from 'path';
 import axios from 'axios';
+import { generateTestDocuments } from './generate-bulk-data';
 
-const API_URL = 'http://localhost:3000';
-const INDEX_NAME = 'bulk-test-10000'; // Use a new index name for 10000 docs
-const BATCH_SIZE = 50; // Process documents in batches of 50
+const API_URL = 'http://localhost:3000/api';
+const INDEX_NAME = 'third-index-10000';
+const BATCH_SIZE = 1000;
 
-async function sleep(ms: number) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
+async function waitForIndexing(startCount: number) {
+  let currentCount = startCount;
+  let attempts = 0;
+  const maxAttempts = 30;
 
-async function waitForQueueToEmpty() {
-  while (true) {
-    try {
-      const healthResponse = await axios.get(`${API_URL}/bulk-indexing/health`);
-      const queues = healthResponse.data.queues;
-      if (queues.totalActive === 0 && queues.totalFailed === 0) {
-        break;
-      }
-      console.log('Queue Status:', {
-        active: queues.totalActive,
-        failed: queues.totalFailed,
-        waiting: queues.totalWaiting,
-      });
-      await sleep(1000);
-    } catch (error) {
-      console.error('Error checking queue health:', error.message);
+  while (attempts < maxAttempts) {
+    const response = await axios.get(`${API_URL}/indices/${INDEX_NAME}`);
+    const newCount = response.data.documentCount || 0;
+
+    if (newCount > currentCount) {
+      const progress = ((newCount - startCount) / 10000) * 100;
+      console.log(`Indexing progress: ${progress.toFixed(2)}% (${newCount} documents)`);
+      currentCount = newCount;
+    }
+
+    if (currentCount >= startCount + 10000) {
       break;
     }
+
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    attempts++;
   }
+
+  return currentCount;
 }
 
-async function measureBulkIndexing() {
+async function main() {
   try {
-    // Load the test data
-    const dataPath = path.join(__dirname, '../../data/bulk-test-data.json');
-    if (!fs.existsSync(dataPath)) {
-      console.log('Generating test data first...');
-      require('./generate-bulk-data');
-    }
-
-    const testData = JSON.parse(fs.readFileSync(dataPath, 'utf-8'));
-    const documentCount = testData.documents.length;
-
-    console.log(`Starting bulk indexing of ${documentCount} documents...`);
+    console.log('Starting bulk indexing of 10000 documents...');
 
     // Delete existing index if it exists
     try {
-      await axios.delete(`${API_URL}/api/indices/${INDEX_NAME}`);
+      await axios.delete(`${API_URL}/indices/${INDEX_NAME}`);
       console.log('Deleted existing index');
     } catch (error) {
       // Ignore 404 errors
       if (error.response?.status !== 404) {
-        console.error('Error deleting index:', error.message);
+        throw error;
       }
     }
 
     // Create new index
-    await axios.post(`${API_URL}/api/indices`, {
+    await axios.post(`${API_URL}/indices`, {
       name: INDEX_NAME,
       mappings: {
         properties: {
@@ -78,55 +68,58 @@ async function measureBulkIndexing() {
     });
     console.log('Created new index');
 
-    // Initialize the term dictionary
-    await axios.post(`${API_URL}/api/indices/${INDEX_NAME}/_rebuild_all`);
-    console.log('Initialized term dictionary');
+    // Generate test documents
+    const documents = generateTestDocuments(10000);
+    console.log(`Generated ${documents.length} test documents`);
 
-    // Start timing
-    const startTime = Date.now();
-
-    // Submit documents in batches
-    const documents = testData.documents.map((doc: any) => ({
-      id: doc.id,
-      document: {
-        title: doc.document.title,
-        content: doc.document.content,
-        tags: doc.document.tags,
-        metadata: doc.document.metadata,
-      },
-    }));
-
-    // Submit all documents in a single batch request
-    const response = await axios.post(`${API_URL}/api/indices/${INDEX_NAME}/documents/_bulk`, {
-      documents,
-    });
-
-    console.log('Submitted bulk indexing request:', response.data);
-
-    // Wait for queue to empty
-    console.log('Waiting for indexing to complete...');
-    await waitForQueueToEmpty();
-
-    // Calculate time taken
-    const endTime = Date.now();
-    const timeTaken = (endTime - startTime) / 1000; // Convert to seconds
-
-    // Verify document count
-    const indexInfo = await axios.get(`${API_URL}/api/indices/${INDEX_NAME}`);
-    const indexedCount = indexInfo.data.documentCount;
-
-    console.log('\nBulk Indexing Results:');
-    console.log('------------------------');
-    console.log(`Total documents processed: ${documentCount}`);
-    console.log(`Documents in index: ${indexedCount}`);
-    console.log(`Time taken: ${timeTaken.toFixed(2)} seconds`);
-    console.log(`Indexing speed: ${(documentCount / timeTaken).toFixed(2)} documents/second`);
-  } catch (error) {
-    console.error('Error during bulk indexing:', error.message);
-    if (error.response?.data) {
-      console.error('Response data:', error.response.data);
+    // Split documents into batches
+    const batches = [];
+    for (let i = 0; i < documents.length; i += BATCH_SIZE) {
+      batches.push(documents.slice(i, i + BATCH_SIZE));
     }
+
+    // Index documents in batches
+    const startTime = Date.now();
+    let totalIndexed = 0;
+
+    for (const batch of batches) {
+      const batchStartTime = Date.now();
+
+      // Submit batch for indexing
+      const response = await axios.post(`${API_URL}/indices/${INDEX_NAME}/documents/_bulk`, {
+        documents: batch.map(doc => ({
+          id: doc.id,
+          document: {
+            title: doc.title,
+            content: doc.content,
+            tags: doc.tags,
+            metadata: doc.metadata,
+          },
+        })),
+      });
+
+      console.log('bulk indexing response.data', response.data);
+
+      const batchEndTime = Date.now();
+      const batchDuration = batchEndTime - batchStartTime;
+      totalIndexed += batch.length;
+
+      console.log(`Indexed batch of ${batch.length} documents in ${batchDuration}ms`);
+      console.log(`Progress: ${((totalIndexed / documents.length) * 100).toFixed(2)}%`);
+    }
+
+    const endTime = Date.now();
+    const totalDuration = endTime - startTime;
+    const docsPerSecond = (documents.length / totalDuration) * 1000;
+
+    console.log('\nBulk indexing completed:');
+    console.log(`Total documents indexed: ${documents.length}`);
+    console.log(`Total time: ${totalDuration}ms`);
+    console.log(`Average speed: ${docsPerSecond.toFixed(2)} documents/second`);
+  } catch (error) {
+    console.error('Error during bulk indexing:', error.response?.data || error.message);
+    process.exit(1);
   }
 }
 
-measureBulkIndexing().catch(console.error);
+main();

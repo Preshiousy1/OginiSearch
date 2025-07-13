@@ -4,10 +4,10 @@ import { ConfigModule } from '@nestjs/config';
 import { DocumentService } from '../../src/document/document.service';
 import { IndexService } from '../../src/index/index.service';
 import { DocumentStorageService } from '../../src/storage/document-storage/document-storage.service';
-import { IndexStorageService } from '../../src/storage/index-storage/index-storage.service';
+import { PostgreSQLIndexStorageService } from '../../src/storage/postgresql/postgresql-index-storage.service';
 import { IndexingService } from '../../src/indexing/indexing.service';
 import { SearchService } from '../../src/search/search.service';
-import { InMemoryTermDictionary } from '../../src/index/term-dictionary';
+import { TermDictionary } from '../../src/index/term-dictionary';
 import { DocumentProcessorService } from '../../src/document/document-processor.service';
 import { IndexStatsService } from '../../src/index/index-stats.service';
 import { IndexDocumentDto } from '../../src/api/dtos/document.dto';
@@ -18,7 +18,7 @@ describe('DocumentService Bulk Indexing Integration', () => {
   let documentService: DocumentService;
   let bulkIndexingService: BulkIndexingService;
   let indexService: IndexService;
-  let termDictionary: InMemoryTermDictionary;
+  let termDictionary: TermDictionary;
 
   const testIndexName = 'document-bulk-test';
 
@@ -35,7 +35,10 @@ describe('DocumentService Bulk Indexing Integration', () => {
         BulkIndexingService,
         IndexService,
         DocumentStorageService,
-        IndexStorageService,
+        {
+          provide: 'INDEX_STORAGE',
+          useClass: PostgreSQLIndexStorageService,
+        },
         IndexingService,
         SearchService,
         DocumentProcessorService,
@@ -43,7 +46,7 @@ describe('DocumentService Bulk Indexing Integration', () => {
         {
           provide: 'TERM_DICTIONARY',
           useFactory: () => {
-            const dict = new InMemoryTermDictionary({ persistToDisk: false });
+            const dict = new TermDictionary({ persistToDisk: false });
             return dict;
           },
         },
@@ -56,9 +59,7 @@ describe('DocumentService Bulk Indexing Integration', () => {
     documentService = moduleFixture.get<DocumentService>(DocumentService);
     bulkIndexingService = moduleFixture.get<BulkIndexingService>(BulkIndexingService);
     indexService = moduleFixture.get<IndexService>(IndexService);
-    termDictionary = moduleFixture.get<InMemoryTermDictionary>('TERM_DICTIONARY');
-
-    await termDictionary.onModuleInit();
+    termDictionary = moduleFixture.get<TermDictionary>('TERM_DICTIONARY');
   });
 
   afterAll(async () => {
@@ -257,10 +258,10 @@ describe('DocumentService Bulk Indexing Integration', () => {
 
     it('should fall back to sequential processing on BulkIndexingService failure', async () => {
       // Mock a scenario where BulkIndexingService might fail
-      const originalMethod = bulkIndexingService.queueBatchDocuments;
+      const originalMethod = bulkIndexingService.queueBulkIndexing;
 
       // Temporarily replace the method to simulate failure
-      bulkIndexingService.queueBatchDocuments = jest
+      bulkIndexingService.queueBulkIndexing = jest
         .fn()
         .mockRejectedValue(new Error('BulkIndexingService unavailable'));
 
@@ -283,7 +284,7 @@ describe('DocumentService Bulk Indexing Integration', () => {
       expect(result.items).toHaveLength(2);
 
       // Restore original method
-      bulkIndexingService.queueBatchDocuments = originalMethod;
+      bulkIndexingService.queueBulkIndexing = originalMethod;
 
       // Verify documents were still indexed via fallback
       const doc1 = await documentService.getDocument(testIndexName, 'fallback-doc-1');

@@ -5,7 +5,7 @@ export interface PostingEntry {
   /**
    * Document ID
    */
-  docId: string | number;
+  docId: string;
 
   /**
    * Term frequency in the document
@@ -15,7 +15,7 @@ export interface PostingEntry {
   /**
    * Optional list of positions where the term appears in the document
    */
-  positions?: number[];
+  positions: number[];
 
   /**
    * Optional metadata for the posting entry
@@ -55,12 +55,12 @@ export interface PostingList {
   /**
    * Serialize the posting list for storage
    */
-  serialize(): Buffer;
+  serialize(): any;
 
   /**
    * Deserialize a posting list from storage
    */
-  deserialize(data: Buffer): void;
+  deserialize(data: any): void;
 }
 
 /**
@@ -68,24 +68,29 @@ export interface PostingList {
  */
 export interface TermDictionary {
   /**
+   * Initialize the dictionary
+   */
+  initialize(): Promise<void>;
+
+  /**
    * Add a term to the dictionary
    */
-  addTerm(term: string): Promise<PostingList>;
-
-  /**
-   * Get a posting list for a term
-   */
-  getPostingList(term: string): Promise<PostingList | undefined>;
-
-  /**
-   * Check if a term exists in the dictionary
-   */
-  hasTerm(term: string): boolean;
+  addTerm(term: string): Promise<void>;
 
   /**
    * Remove a term from the dictionary
    */
-  removeTerm(term: string): Promise<boolean>;
+  removeTerm(term: string): Promise<void>;
+
+  /**
+   * Add a document to a term's posting list
+   */
+  addPosting(term: string, documentId: string, positions: number[]): Promise<void>;
+
+  /**
+   * Remove a document from a term's posting list
+   */
+  removePosting(term: string, documentId: string): Promise<void>;
 
   /**
    * Get all terms in the dictionary
@@ -93,32 +98,22 @@ export interface TermDictionary {
   getTerms(): string[];
 
   /**
+   * Get postings for a term
+   */
+  getPostings(term: string): Map<string, number[]> | undefined;
+
+  /**
+   * Check if a posting exists for a term and document
+   */
+  hasPosting(term: string, documentId: string): boolean;
+
+  /**
+   * Clear the dictionary
+   */
+  clear(): void;
+
+  /**
    * Get the number of terms in the dictionary
    */
   size(): number;
-
-  /**
-   * Add a document to a term's posting list
-   */
-  addPosting(term: string, entry: PostingEntry): Promise<void>;
-
-  /**
-   * Remove a document from a term's posting list
-   */
-  removePosting(term: string, docId: number | string): Promise<boolean>;
-
-  /**
-   * Serialize the dictionary for storage
-   */
-  serialize(): Buffer;
-
-  /**
-   * Deserialize a dictionary from storage
-   */
-  deserialize(data: Buffer | Record<string, any>): void;
-
-  /**
-   * Save the current state to disk
-   */
-  saveToDisk(): Promise<void>;
 }

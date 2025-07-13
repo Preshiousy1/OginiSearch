@@ -8,7 +8,6 @@ import { WorkerManagementService } from './services/worker-management.service';
 import { IndexModule } from '../index/index.module';
 import { DocumentModule } from '../document/document.module';
 import { SearchModule } from '../search/search.module';
-import { MongoDBModule } from '../storage/mongodb/mongodb.module';
 import { StorageModule } from '../storage/storage.module';
 import { IndexingModule } from '../indexing/indexing.module';
 import { BulkIndexingModule } from '../indexing/bulk-indexing.module';
@@ -19,7 +18,6 @@ import { BullModule } from '@nestjs/bull';
     IndexModule,
     DocumentModule,
     SearchModule,
-    MongoDBModule,
     StorageModule,
     IndexingModule,
     BulkIndexingModule,

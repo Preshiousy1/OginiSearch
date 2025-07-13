@@ -1,5 +1,5 @@
 import { Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
-import { IndexStorageService } from '../storage/index-storage/index-storage.service';
+import { PostgreSQLIndexStorageService } from '../storage/postgresql/postgresql-index-storage.service';
 import { DocumentProcessorService } from '../document/document-processor.service';
 import { IndexStatsService } from '../index/index-stats.service';
 import { ProcessedDocument } from '../document/interfaces/document-processor.interface';
@@ -13,7 +13,7 @@ export class MemoryOptimizedIndexingService implements OnModuleDestroy {
   private pendingOperations = new Map<string, Promise<void>>();
 
   constructor(
-    private readonly indexStorage: IndexStorageService,
+    private readonly indexStorage: PostgreSQLIndexStorageService,
     private readonly documentProcessor: DocumentProcessorService,
     private readonly indexStats: IndexStatsService,
   ) {
@@ -219,30 +219,15 @@ export class MemoryOptimizedIndexingService implements OnModuleDestroy {
       const fieldTerm = `${field}:${term}`;
       const positions = fieldData.positions?.[term] || [];
 
-      // Handle field-specific posting list
-      await this.updateTermPostingList(indexName, fieldTerm, documentId, positions);
+      // Add to term dictionary
+      await this.indexStorage.addTermToIndex(indexName, fieldTerm, documentId, positions);
 
-      // Handle _all field posting list
+      // Handle _all field
       const allFieldTerm = `_all:${term}`;
-      await this.updateTermPostingList(indexName, allFieldTerm, documentId, positions);
+      await this.indexStorage.addTermToIndex(indexName, allFieldTerm, documentId, positions);
     } catch (error) {
       this.logger.warn(`Failed to index term ${field}:${term}: ${error.message}`);
       // Continue with other terms rather than failing the entire operation
-    }
-  }
-
-  private async updateTermPostingList(
-    indexName: string,
-    fieldTerm: string,
-    documentId: string,
-    positions: number[],
-  ): Promise<void> {
-    try {
-      const postings = (await this.indexStorage.getTermPostings(indexName, fieldTerm)) || new Map();
-      postings.set(documentId, positions);
-      await this.indexStorage.storeTermPostings(indexName, fieldTerm, postings);
-    } catch (error) {
-      this.logger.warn(`Failed to update posting list for ${fieldTerm}: ${error.message}`);
     }
   }
 
@@ -282,34 +267,12 @@ export class MemoryOptimizedIndexingService implements OnModuleDestroy {
   ): Promise<void> {
     try {
       const fieldTerm = `${field}:${term}`;
-      await this.removeFromTermPostingList(indexName, fieldTerm, documentId);
+      await this.indexStorage.removeTermFromIndex(indexName, fieldTerm, documentId);
 
       const allFieldTerm = `_all:${term}`;
-      await this.removeFromTermPostingList(indexName, allFieldTerm, documentId);
+      await this.indexStorage.removeTermFromIndex(indexName, allFieldTerm, documentId);
     } catch (error) {
       this.logger.warn(`Failed to remove term ${field}:${term}: ${error.message}`);
-    }
-  }
-
-  private async removeFromTermPostingList(
-    indexName: string,
-    fieldTerm: string,
-    documentId: string,
-  ): Promise<void> {
-    try {
-      const postings = await this.indexStorage.getTermPostings(indexName, fieldTerm);
-
-      if (postings && postings.has(documentId)) {
-        postings.delete(documentId);
-
-        if (postings.size === 0) {
-          await this.indexStorage.deleteTermPostings(indexName, fieldTerm);
-        } else {
-          await this.indexStorage.storeTermPostings(indexName, fieldTerm, postings);
-        }
-      }
-    } catch (error) {
-      this.logger.warn(`Failed to remove from posting list ${fieldTerm}: ${error.message}`);
     }
   }
 

@@ -1,45 +1,18 @@
 import { Controller, Get } from '@nestjs/common';
-import { RocksDBService } from '../../../storage/rocksdb/rocksdb.service';
-import { MongoDBService } from '../../../storage/mongodb/mongodb.service';
+import { PostgreSQLService } from '../../../storage/postgresql/postgresql.service';
 
 @Controller('health')
 export class HealthController {
-  constructor(
-    private readonly mongoDBService: MongoDBService,
-    private readonly rocksDBService: RocksDBService,
-  ) {}
+  constructor(private readonly postgresqlService: PostgreSQLService) {}
 
   @Get()
-  async check() {
-    const mongoStatus = {
-      name: 'mongodb',
-      status: 'up',
-      message: 'MongoDB is connected',
-    };
-
+  async checkHealth() {
     try {
-      // Check MongoDB connection
-      const isMongoConnected = await this.mongoDBService.isConnected();
-      if (!isMongoConnected) {
-        mongoStatus.status = 'down';
-        mongoStatus.message = 'MongoDB is disconnected';
-      }
+      // Check PostgreSQL connection
+      await this.postgresqlService.query('SELECT 1');
+      return { status: 'ok', message: 'All services are healthy' };
     } catch (error) {
-      mongoStatus.status = 'down';
-      mongoStatus.message = `MongoDB error: ${error.message}`;
+      return { status: 'error', message: error.message };
     }
-
-    return {
-      status: 'ok',
-      timestamp: new Date().toISOString(),
-      services: [
-        mongoStatus,
-        {
-          name: 'rocksdb',
-          status: 'up',
-          message: 'RocksDB is available',
-        },
-      ],
-    };
   }
 }

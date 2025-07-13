@@ -33,13 +33,18 @@ import {
   ApiExtraModels,
 } from '@nestjs/swagger';
 import { DocumentService } from '../../document/document.service';
+import { BulkIndexingService } from '../../indexing/services/bulk-indexing.service';
+import { v4 as uuidv4 } from 'uuid';
 
 @ApiTags('Documents')
 @ApiExtraModels(IndexDocumentDto, BulkIndexDocumentsDto, DeleteByQueryDto)
 @ApiBearerAuth('JWT-auth')
 @Controller('api/indices/:index/documents')
 export class DocumentController {
-  constructor(private readonly documentService: DocumentService) {}
+  constructor(
+    private readonly documentService: DocumentService,
+    private readonly bulkIndexingService: BulkIndexingService,
+  ) {}
 
   @Post()
   @ApiOperation({
@@ -317,7 +322,34 @@ export class DocumentController {
     @Param('index') index: string,
     @Body(ValidationPipe) bulkIndexDocumentsDto: BulkIndexDocumentsDto,
   ): Promise<BulkResponseDto> {
-    return this.documentService.bulkIndexDocuments(index, bulkIndexDocumentsDto.documents);
+    const startTime = Date.now();
+
+    // Map documents to ensure required id field
+    const documents = bulkIndexDocumentsDto.documents.map(doc => ({
+      id: doc.id || uuidv4(), // Use provided id or generate one
+      document: doc.document,
+    }));
+
+    const { batchId, totalBatches, totalDocuments } =
+      await this.bulkIndexingService.queueBulkIndexing(index, documents, {
+        batchSize: 1000,
+        skipDuplicates: true,
+        enableProgress: true,
+        priority: 5,
+      });
+
+    return {
+      took: Date.now() - startTime,
+      errors: false,
+      items: documents.map(doc => ({
+        id: doc.id,
+        index,
+        success: true,
+        status: HttpStatus.ACCEPTED,
+        batchId,
+      })),
+      successCount: totalDocuments,
+    };
   }
 
   @Post('_delete_by_query')

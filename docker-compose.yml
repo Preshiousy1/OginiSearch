@@ -14,17 +14,18 @@ services:
     volumes:
       - .:/usr/src/app
       - /usr/src/app/node_modules
-      - rocksdb-data:/usr/src/app/data/rocksdb
     environment:
       - NODE_ENV=development
       - PORT=3000
-      - MONGODB_URI=mongodb://mongodb:27017/ogini
-      - ROCKSDB_PATH=/usr/src/app/data/rocksdb
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=ogini_search_dev
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
       - REDIS_HOST=redis
       - REDIS_PORT=6379
-      - REDIS_DB=0
     depends_on:
-      mongodb:
+      postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
@@ -36,18 +37,39 @@ services:
       retries: 3
       start_period: 10s
 
-  mongodb:
-    image: mongo:7
+  postgres:
+    image: postgres:16-alpine
+    container_name: ogini-postgres-dev
     networks:
       - ogini-network
     ports:
-      - '27017:27017'
+      - '5432:5432'
     volumes:
-      - mongodb-data:/data/db
+      - postgres-data:/var/lib/postgresql/data
+      - ./scripts/init-postgres.sql:/docker-entrypoint-initdb.d/init-postgres.sql
     environment:
-      - MONGO_INITDB_DATABASE=ogini
+      - POSTGRES_DB=ogini_search_dev
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_INITDB_ARGS=--encoding=UTF-8 --locale=C
+    command: >
+      postgres
+      -c shared_preload_libraries=pg_stat_statements
+      -c pg_stat_statements.track=all
+      -c max_connections=200
+      -c shared_buffers=256MB
+      -c effective_cache_size=1GB
+      -c maintenance_work_mem=64MB
+      -c checkpoint_completion_target=0.9
+      -c wal_buffers=16MB
+      -c default_statistics_target=100
+      -c random_page_cost=1.1
+      -c effective_io_concurrency=200
+      -c work_mem=4MB
+      -c min_wal_size=1GB
+      -c max_wal_size=4GB
     healthcheck:
-      test: echo 'db.runCommand("ping").ok' | mongosh localhost:27017/ogini --quiet
+      test: ['CMD-SHELL', 'pg_isready -U postgres -d ogini_search_dev']
       interval: 10s
       timeout: 5s
       retries: 5
@@ -55,6 +77,7 @@ services:
 
   redis:
     image: redis:7-alpine
+    container_name: ogini-redis-dev
     networks:
       - ogini-network
     ports:
@@ -70,8 +93,7 @@ services:
       start_period: 5s
 
 volumes:
-  mongodb-data:
-  rocksdb-data:
+  postgres-data:
   redis-data:
 
 networks:

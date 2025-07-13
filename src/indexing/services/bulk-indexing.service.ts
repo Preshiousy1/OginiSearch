@@ -1,237 +1,84 @@
 import { Injectable, Logger, Inject, forwardRef } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
-import { DocumentService } from 'src/document/document.service';
-import { IndexService } from 'src/index/index.service';
+import Bull, { Queue } from 'bull';
 import { InjectQueue } from '@nestjs/bull';
-import Bull from 'bull';
-
-export interface BulkIndexingOptions {
-  batchSize?: number;
-  concurrency?: number;
-  skipDuplicates?: boolean;
-  enableProgress?: boolean;
-  priority?: number;
-  retryAttempts?: number;
-  retryDelay?: number;
-}
-
-export interface BulkIndexingProgress {
-  processed: number;
-  total: number;
-  percentage: number;
-  currentBatch: number;
-  totalBatches: number;
-  documentsPerSecond: number;
-  estimatedTimeRemaining: number;
-  errors: number;
-  skipped: number;
-}
-
-export interface BulkIndexingResult {
-  successCount: number;
-  errorCount: number;
-  skippedCount: number;
-  totalProcessed: number;
-  duration: number;
-  errors: Array<{
-    documentId: string;
-    error: string;
-  }>;
-}
-
-export interface SingleIndexingJob {
-  indexName: string;
-  documentId: string;
-  document: any;
-  priority?: number;
-  metadata?: Record<string, any>;
-}
-
-export interface BatchIndexingJob {
-  indexName: string;
-  documents: Array<{ id: string; document: any }>;
-  batchId: string;
-  options: BulkIndexingOptions;
-  metadata?: Record<string, any>;
-}
-
-export interface BulkIndexingResponse {
-  batchId: string;
-  totalBatches: number;
-  totalDocuments: number;
-  status: string;
-}
+import { BulkIndexingOptions } from '../interfaces/bulk-indexing.interface';
+import { IndexService } from '../../index/index.service';
+import { chunk } from 'lodash';
 
 @Injectable()
 export class BulkIndexingService {
   private readonly logger = new Logger(BulkIndexingService.name);
-  private readonly deadLetterQueue: Bull.Queue;
-
-  // Configuration constants
-  private readonly DEFAULT_BATCH_SIZE = 500;
-  private readonly DEFAULT_CONCURRENCY = 3;
 
   constructor(
-    @Inject(forwardRef(() => DocumentService))
-    private readonly documentService: DocumentService,
+    @InjectQueue('bulk-indexing') private readonly bulkIndexingQueue: Queue,
+    @Inject(forwardRef(() => IndexService))
     private readonly indexService: IndexService,
-    private readonly configService: ConfigService,
-    @InjectQueue('indexing') private readonly indexingQueue: Bull.Queue,
-  ) {
-    // Initialize dead letter queue
-    this.deadLetterQueue = new Bull('indexing-dlq', {
-      redis: {
-        host: this.configService.get('REDIS_HOST', 'localhost'),
-        port: this.configService.get('REDIS_PORT', 6379),
-      },
-      defaultJobOptions: {
-        removeOnComplete: false,
-        removeOnFail: false,
-      },
-    });
+  ) {}
 
-    // Listen for failed jobs
-    this.indexingQueue.on('failed', async (job: Bull.Job, error: Error) => {
-      if (job.attemptsMade >= job.opts.attempts) {
-        await this.moveToDeadLetterQueue(job, error);
-      }
-    });
-  }
-
-  private async moveToDeadLetterQueue(job: Bull.Job, error: Error): Promise<void> {
-    try {
-      await this.deadLetterQueue.add(
-        'failed',
-        {
-          ...job.data,
-          error: {
-            message: error.message,
-            stack: error.stack,
-          },
-          failedAt: new Date().toISOString(),
-          attempts: job.attemptsMade,
-        },
-        {
-          jobId: `dlq:${job.id}`,
-        },
-      );
-
-      this.logger.warn(
-        `Moved failed job ${job.id} to dead letter queue after ${job.attemptsMade} attempts`,
-      );
-    } catch (dlqError) {
-      this.logger.error(`Failed to move job ${job.id} to dead letter queue: ${dlqError.message}`);
-    }
-  }
-
-  /**
-   * Queue a single document for indexing
-   */
-  async queueSingleDocument(
-    indexName: string,
-    documentId: string,
-    document: any,
-    options: Partial<BulkIndexingOptions> = {},
-  ): Promise<string> {
-    const jobId = this.generateJobId('single', indexName, documentId);
-
-    const job: SingleIndexingJob = {
-      indexName,
-      documentId,
-      document,
-      priority: options.priority || 5,
-      metadata: {
-        queuedAt: new Date().toISOString(),
-        source: 'api',
-      },
-    };
-
-    // Add to Bull queue
-    await this.indexingQueue.add('single', job, {
-      jobId,
-      removeOnComplete: 10,
-      removeOnFail: 5,
-      attempts: options.retryAttempts || 3,
-      priority: options.priority || 5,
-    });
-
-    this.logger.debug(
-      `Queued single document ${documentId} for index ${indexName} with job ID ${jobId}`,
-    );
-    return jobId;
-  }
-
-  /**
-   * Queue a batch of documents for indexing
-   */
   async queueBulkIndexing(
     indexName: string,
     documents: Array<{ id: string; document: any }>,
     options: BulkIndexingOptions = {},
-    customMetadata: Record<string, any> = {},
-  ): Promise<BulkIndexingResponse> {
+  ): Promise<{
+    batchId: string;
+    totalBatches: number;
+    totalDocuments: number;
+    status: string;
+  }> {
     const {
-      batchSize = 100,
+      batchSize = 1000,
       skipDuplicates = true,
-      enableProgress = true,
+      enableProgress = false,
       priority = 5,
-      retryAttempts = 3,
-      retryDelay = 5000,
     } = options;
 
-    const batchId = `batch:${indexName}:${Date.now()}:${Math.random().toString(36).substr(2, 6)}`;
-    const batches = [];
+    // Check if index exists
+    const index = await this.indexService.getIndex(indexName);
+    if (!index) {
+      throw new Error(`Index ${indexName} does not exist`);
+    }
 
     // Split documents into batches
-    for (let i = 0; i < documents.length; i += batchSize) {
-      const batch = documents.slice(i, i + batchSize);
-      const batchNumber = Math.floor(i / batchSize) + 1;
-      const totalBatches = Math.ceil(documents.length / batchSize);
+    const batches = chunk(documents, batchSize);
+    const totalBatches = batches.length;
+    const batchId = `bulk-${Date.now()}`;
 
-      const job = await this.indexingQueue.add(
+    // Queue each batch for processing
+    for (let i = 0; i < batches.length; i++) {
+      const batch = batches[i];
+      await this.bulkIndexingQueue.add(
         'batch',
         {
           indexName,
           documents: batch,
-          batchId: `${batchId}:${batchNumber}`,
+          batchId: `${batchId}-${i + 1}`,
+          batchNumber: i + 1,
+          totalBatches,
           options: {
-            batchSize,
             skipDuplicates,
             enableProgress,
-            priority,
-            retryAttempts,
           },
           metadata: {
-            queuedAt: new Date().toISOString(),
-            parentBatchId: batchId,
-            batchNumber,
-            totalBatches,
-            source: 'bulk',
-            ...customMetadata,
+            priority,
           },
         },
         {
-          priority,
-          attempts: retryAttempts,
+          attempts: 3,
           backoff: {
             type: 'exponential',
-            delay: retryDelay,
+            delay: 2000,
           },
           removeOnComplete: 100,
           removeOnFail: 50,
         },
       );
-
-      batches.push(job);
     }
-
-    this.logger.log(`Queued ${batches.length} batches for bulk indexing`);
 
     return {
       batchId,
-      totalBatches: batches.length,
+      totalBatches,
       totalDocuments: documents.length,
-      status: 'queued',
+      status: 'completed',
     };
   }
 
@@ -251,10 +98,10 @@ export class BulkIndexingService {
     try {
       // Get all jobs in different states
       const [waitingJobs, activeJobs, completedJobs, failedJobs] = await Promise.all([
-        this.indexingQueue.getWaiting(),
-        this.indexingQueue.getActive(),
-        this.indexingQueue.getCompleted(),
-        this.indexingQueue.getFailed(),
+        this.bulkIndexingQueue.getWaiting(),
+        this.bulkIndexingQueue.getActive(),
+        this.bulkIndexingQueue.getCompleted(),
+        this.bulkIndexingQueue.getFailed(),
       ]);
 
       this.logger.debug(
@@ -322,11 +169,11 @@ export class BulkIndexingService {
     delayed: number;
   }> {
     const [waiting, active, completed, failed, delayed] = await Promise.all([
-      this.indexingQueue.getWaiting(),
-      this.indexingQueue.getActive(),
-      this.indexingQueue.getCompleted(),
-      this.indexingQueue.getFailed(),
-      this.indexingQueue.getDelayed(),
+      this.bulkIndexingQueue.getWaiting(),
+      this.bulkIndexingQueue.getActive(),
+      this.bulkIndexingQueue.getCompleted(),
+      this.bulkIndexingQueue.getFailed(),
+      this.bulkIndexingQueue.getDelayed(),
     ]);
 
     return {
@@ -342,42 +189,34 @@ export class BulkIndexingService {
    * Get queue health status
    */
   async getQueueHealth(): Promise<{
-    status: 'healthy' | 'degraded' | 'unhealthy';
-    message: string;
-    stats: any;
+    status: 'healthy' | 'degraded' | 'critical';
+    queues: {
+      singleJobs: number;
+      batchJobs: number;
+      failedSingleJobs: number;
+      failedBatchJobs: number;
+      totalActive: number;
+      totalFailed: number;
+    };
+    timestamp: string;
   }> {
-    try {
-      const stats = await this.getQueueStats();
-      const totalJobs = stats.waiting + stats.active + stats.delayed;
-
-      if (stats.failed > 10 && stats.failed > totalJobs * 0.1) {
-        return {
-          status: 'unhealthy',
-          message: 'High failure rate detected',
-          stats,
-        };
-      }
-
-      if (stats.waiting > 1000) {
-        return {
-          status: 'degraded',
-          message: 'High queue backlog',
-          stats,
-        };
-      }
-
-      return {
-        status: 'healthy',
-        message: 'Queue operating normally',
-        stats,
-      };
-    } catch (error) {
-      return {
-        status: 'unhealthy',
-        message: `Queue error: ${error.message}`,
-        stats: null,
-      };
-    }
+    const stats = await this.getDetailedQueueStats();
+    
+    const isHealthy = stats.failedSingleJobs === 0 && stats.failedBatchJobs === 0;
+    const isDegraded = stats.failedSingleJobs > 0 || stats.failedBatchJobs > 0;
+    
+    return {
+      status: isHealthy ? 'healthy' : isDegraded ? 'degraded' : 'critical',
+      queues: {
+        singleJobs: stats.singleJobs,
+        batchJobs: stats.batchJobs,
+        failedSingleJobs: stats.failedSingleJobs,
+        failedBatchJobs: stats.failedBatchJobs,
+        totalActive: stats.totalActive,
+        totalFailed: stats.totalFailed,
+      },
+      timestamp: new Date().toISOString(),
+    };
   }
 
   /**
@@ -394,19 +233,19 @@ export class BulkIndexingService {
       );
 
       // Clean completed jobs (aggressive - older than 1 second)
-      await this.indexingQueue.clean(1000, 'completed');
+      await this.bulkIndexingQueue.clean(1000, 'completed');
 
       // Clean failed jobs (aggressive - older than 1 second)
-      await this.indexingQueue.clean(1000, 'failed');
+      await this.bulkIndexingQueue.clean(1000, 'failed');
 
       // Clean active jobs (force clean stuck jobs)
-      await this.indexingQueue.clean(0, 'active');
+      await this.bulkIndexingQueue.clean(0, 'active');
 
       // Clean delayed jobs
-      await this.indexingQueue.clean(0, 'delayed');
+      await this.bulkIndexingQueue.clean(0, 'delayed');
 
       // For waiting jobs, we need to manually remove them
-      const waitingJobs = await this.indexingQueue.getWaiting();
+      const waitingJobs = await this.bulkIndexingQueue.getWaiting();
       this.logger.log(`Manually removing ${waitingJobs.length} waiting jobs`);
 
       for (const job of waitingJobs) {
@@ -437,7 +276,7 @@ export class BulkIndexingService {
    * Pause the queue
    */
   async pauseQueue(): Promise<void> {
-    await this.indexingQueue.pause();
+    await this.bulkIndexingQueue.pause();
     this.logger.log('Indexing queue paused');
   }
 
@@ -445,7 +284,7 @@ export class BulkIndexingService {
    * Resume the queue
    */
   async resumeQueue(): Promise<void> {
-    await this.indexingQueue.resume();
+    await this.bulkIndexingQueue.resume();
     this.logger.log('Indexing queue resumed');
   }
 
@@ -456,8 +295,8 @@ export class BulkIndexingService {
     try {
       // Get failed jobs from both queues
       const [mainQueueFailedJobs, dlqFailedJobs] = await Promise.all([
-        this.indexingQueue.getFailed(),
-        this.deadLetterQueue.getJobs(['failed']),
+        this.bulkIndexingQueue.getFailed(),
+        this.bulkIndexingQueue.getJobs(['failed']),
       ]);
 
       // Combine and sort all failed jobs by timestamp
@@ -473,14 +312,14 @@ export class BulkIndexingService {
 
   async retryFailedJob(jobId: string): Promise<void> {
     try {
-      const job = await this.deadLetterQueue.getJob(jobId);
+      const job = await this.bulkIndexingQueue.getJob(jobId);
       if (!job) {
         throw new Error(`Job ${jobId} not found in dead letter queue`);
       }
 
       // Remove error information and retry in main queue
       const { error, failedAt, attempts, ...jobData } = job.data;
-      await this.indexingQueue.add('batch', jobData, {
+      await this.bulkIndexingQueue.add('batch', jobData, {
         attempts: 3,
         backoff: {
           type: 'exponential',

@@ -2,9 +2,7 @@ import { INestApplication } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { ValidationPipe } from '@nestjs/common';
 import { IndexSettings, IndexMappings } from '../../src/index/interfaces/index.interface';
-import { RocksDBService } from '../../src/storage/rocksdb/rocksdb.service';
-import { MockRocksDBService } from './test-database.module';
-import { MongooseModule } from '@nestjs/mongoose';
+import * as express from 'express';
 
 export const createTestIndex = async (app: INestApplication, name = 'test-index'): Promise<any> => {
   const indexSettings: IndexSettings = {
@@ -37,17 +35,18 @@ export const createTestIndex = async (app: INestApplication, name = 'test-index'
   return response.body;
 };
 
-export const overrideRocksDBProvider = (builder: any) =>
-  builder.overrideProvider(RocksDBService).useClass(MockRocksDBService);
-
 export const setupTestApp = async (modules: any[]): Promise<INestApplication> => {
-  let builder = Test.createTestingModule({
-    imports: [MongooseModule.forRoot(process.env.MONGODB_URI), ...modules],
-  });
-  builder = overrideRocksDBProvider(builder);
+  const moduleFixture: TestingModule = await Test.createTestingModule({
+    imports: [...modules],
+  }).compile();
 
-  const moduleFixture: TestingModule = await builder.compile();
   const app = moduleFixture.createNestApplication();
+
+  // Configure Express middleware before initialization
+  const expressApp = app.getHttpAdapter().getInstance();
+  expressApp.use(express.json({ limit: '500mb' }));
+  expressApp.use(express.urlencoded({ limit: '500mb', extended: true }));
+
   app.useGlobalPipes(new ValidationPipe());
   await app.init();
   return app;

@@ -17,10 +17,7 @@ export class IndexStatsService implements IndexStats {
   private _totalDocuments = 0;
   private fieldStats = new Map<string, { totalLength: number; docCount: number }>();
 
-  constructor(
-    @Inject('TermDictionary') private readonly termDictionary: TermDictionary,
-    @Inject('IndexStorage') private readonly indexStorage: IndexStorage,
-  ) {}
+  constructor(@Inject('IndexStorage') private readonly indexStorage: IndexStorage) {}
 
   get totalDocuments(): number {
     return this._totalDocuments;

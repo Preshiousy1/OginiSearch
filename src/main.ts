@@ -11,8 +11,8 @@ async function bootstrap() {
 
   // Configure body parser with larger limits
   const expressApp = app.getHttpAdapter().getInstance();
-  expressApp.use(express.json({ limit: '50mb' }));
-  expressApp.use(express.urlencoded({ limit: '50mb', extended: true }));
+  expressApp.use(express.json({ limit: '500mb' }));
+  expressApp.use(express.urlencoded({ limit: '500mb', extended: true }));
 
   // Enable CORS
   app.enableCors({
@@ -39,6 +39,6 @@ async function bootstrap() {
 
   await app.listen(port, host);
   console.log(`Application is running on: ${await app.getUrl()}`);
-  console.log('Body parser configured with 50MB limit for large payloads');
+  console.log('Body parser configured with 500MB limit for large payloads');
 }
 bootstrap();

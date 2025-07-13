@@ -1,40 +1,10 @@
-import { MongoMemoryServer } from 'mongodb-memory-server';
 import { config } from 'dotenv';
 import * as path from 'path';
-
-// Mock RocksDB dependencies
-jest.mock('rocksdb', () => {
-  return {
-    RocksDB: jest.fn().mockImplementation(() => ({
-      open: jest.fn().mockResolvedValue(undefined),
-      close: jest.fn().mockResolvedValue(undefined),
-      put: jest.fn().mockResolvedValue(undefined),
-      get: jest.fn().mockResolvedValue(Buffer.from('{"test":"data"}')),
-      del: jest.fn().mockResolvedValue(undefined),
-      createReadStream: jest.fn().mockReturnValue({
-        on: jest.fn().mockImplementation(function (event, callback) {
-          if (event === 'data') {
-            callback({ key: 'test-key', value: Buffer.from('{"test":"data"}') });
-          }
-          if (event === 'end') {
-            callback();
-          }
-          return this;
-        }),
-      }),
-    })),
-  };
-});
-
-jest.mock('levelup', () => {
-  return jest.fn().mockImplementation(() => ({}));
-});
-
-jest.mock('encoding-down', () => {
-  return jest.fn().mockImplementation(() => ({}));
-});
-
-let mongod: MongoMemoryServer;
+import {
+  setupTestDatabase,
+  teardownTestDatabase,
+  TEST_DB,
+} from '../scripts/testing/setup-test-database';
 
 // Load environment variables from .env file
 config({
@@ -43,14 +13,20 @@ config({
 
 // Setup hook
 beforeAll(async () => {
-  // Start MongoDB memory server if needed
-  mongod = await MongoMemoryServer.create();
-  process.env.MONGODB_URI = mongod.getUri();
+  // Set PostgreSQL test environment variables
+  process.env.POSTGRES_HOST = 'localhost';
+  process.env.POSTGRES_PORT = '5432';
+  process.env.POSTGRES_DB = TEST_DB;
+  process.env.POSTGRES_USER = 'postgres';
+  process.env.POSTGRES_PASSWORD = 'postgres';
+  process.env.POSTGRES_SSL = 'false';
+
+  // Setup test database with migrations
+  await setupTestDatabase();
 });
 
 // Teardown hook
 afterAll(async () => {
-  if (mongod) {
-    await mongod.stop();
-  }
+  // Cleanup test database
+  await teardownTestDatabase();
 });

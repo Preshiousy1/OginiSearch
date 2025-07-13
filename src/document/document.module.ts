@@ -7,18 +7,19 @@ import { BulkIndexingModule } from '../indexing/bulk-indexing.module';
 import { SearchModule } from '../search/search.module';
 import { DocumentProcessorService } from './document-processor.service';
 import { AnalysisModule } from '../analysis/analysis.module';
-import { InMemoryTermDictionary } from '../index/term-dictionary';
+import { TermDictionary } from '../index/term-dictionary';
+import { DocumentProcessingService } from './document-processing.service';
 
 @Module({
   imports: [
-    IndexModule,
-    StorageModule,
+    forwardRef(() => IndexModule),
+    forwardRef(() => StorageModule),
     forwardRef(() => IndexingModule),
-    BulkIndexingModule,
+    forwardRef(() => BulkIndexingModule),
     forwardRef(() => SearchModule),
     forwardRef(() => AnalysisModule),
   ],
-  providers: [DocumentService, DocumentProcessorService],
-  exports: [DocumentService, DocumentProcessorService],
+  providers: [DocumentService, DocumentProcessorService, DocumentProcessingService],
+  exports: [DocumentService, DocumentProcessorService, DocumentProcessingService],
 })
 export class DocumentModule {}
