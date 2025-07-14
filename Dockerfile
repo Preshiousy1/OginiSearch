@@ -10,12 +10,7 @@ RUN apk add --no-cache \
     g++ \
     git \
     linux-headers \
-    bash \
-    snappy-dev \
-    zlib-dev \
-    bzip2-dev \
-    lz4-dev \
-    zstd-dev
+    bash
 
 # Set Python path for node-gyp
 ENV PYTHON=/usr/bin/python3
@@ -45,7 +40,7 @@ ENV DOCKER=true
 WORKDIR /usr/src/app
 
 # Install runtime dependencies
-RUN apk add --no-cache ca-certificates snappy zlib bzip2 lz4 zstd bash
+RUN apk add --no-cache ca-certificates bash
 
 # Copy package files
 COPY package*.json ./
@@ -58,22 +53,8 @@ RUN npm ci --only=production --no-optional || \
 # Copy built application from build stage
 COPY --from=build /usr/src/app/dist ./dist
 
-# Copy all scripts with proper directory structure
-COPY scripts/ ./scripts/
-
-# Copy the root-level production script
-COPY start-optimized.sh ./start-optimized.sh
-
-# Make all scripts executable and verify
-RUN find ./scripts -name "*.sh" -type f -exec chmod +x {} \; && \
-    chmod +x ./start-optimized.sh && \
-    echo "Verifying script exists and is executable:" && \
-    ls -la ./start-optimized.sh && \
-    echo "Script content preview:" && \
-    head -3 ./start-optimized.sh
-
 # Create data directories
-RUN mkdir -p /usr/src/app/data/rocksdb && \
+RUN mkdir -p /usr/src/app/data && \
     chmod -R 777 /usr/src/app/data
 
 # Expose application port
@@ -83,5 +64,5 @@ EXPOSE 3000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
     CMD wget -qO- http://localhost:3000/health || exit 1
 
-# Start the application using npm script for consistency
-CMD ["sh", "-c", "echo 'Starting container...' && pwd && ls -la start-optimized.sh && npm run prod:start"]
+# Start the application
+CMD ["node", "dist/main"]
