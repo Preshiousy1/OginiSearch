@@ -35,6 +35,9 @@
     "demo:postgresql": "npx ts-node scripts/demo-postgresql-search.ts",
     "demo:api": "./scripts/demo-api-endpoints.sh",
     "setup:postgresql": "./scripts/setup-postgresql-demo.sh",
+    "setup:postgresql:init": "psql -h $POSTGRES_HOST -p $POSTGRES_PORT -U $POSTGRES_USER -d $POSTGRES_DB -f scripts/init-postgres.sql",
+    "setup:postgresql:dev": "psql -h localhost -p 5432 -U postgres -d ogini_search_dev -f scripts/init-postgres.sql",
+    "setup:postgresql:prod": "psql -h $POSTGRES_HOST -p $POSTGRES_PORT -U $POSTGRES_USER -d $POSTGRES_DB -f scripts/init-postgres.sql",
     "test:postgresql": "npx ts-node scripts/test-postgresql-connection.ts",
     "ts-node": "npx ts-node",
     "verify-counts": "npx ts-node scripts/verify-document-counts.ts"
