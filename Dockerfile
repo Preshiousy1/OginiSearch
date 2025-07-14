@@ -53,6 +53,9 @@ RUN npm ci --only=production --no-optional || \
 # Copy built application from build stage
 COPY --from=build /usr/src/app/dist ./dist
 
+# Copy scripts folder for SQL migrations
+COPY --from=build /usr/src/app/scripts ./scripts
+
 # Create data directories
 RUN mkdir -p /usr/src/app/data && \
     chmod -R 777 /usr/src/app/data
