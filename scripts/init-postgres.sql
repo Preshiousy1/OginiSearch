@@ -69,6 +69,9 @@ CREATE INDEX IF NOT EXISTS idx_search_documents_index_name ON search_documents (
 -- Create index on field_weights for weighted searches
 CREATE INDEX IF NOT EXISTS idx_field_weights ON search_documents USING GIN (field_weights jsonb_path_ops);
 
+-- Create index on metadata for document filtering
+CREATE INDEX IF NOT EXISTS idx_documents_metadata ON documents USING GIN (metadata);
+
 -- Update timestamp function
 CREATE OR REPLACE FUNCTION update_updated_at_column()
 RETURNS TRIGGER AS $$

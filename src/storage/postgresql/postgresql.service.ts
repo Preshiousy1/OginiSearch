@@ -22,9 +22,9 @@ export class PostgreSQLService implements OnModuleInit {
 
   async onModuleInit(): Promise<void> {
     await this.setupExtensions();
+    await this.clearDatabase(); // TEMPORARY: Clear database to start fresh - REMOVE AFTER RAILWAY DEPLOYMENT
     await this.ensureTablesExist();
     await this.runMigrations();
-    await this.setupIndexes();
   }
 
   /**
@@ -119,8 +119,8 @@ export class PostgreSQLService implements OnModuleInit {
     try {
       this.logger.log('Running database migrations...');
 
-      // Run status column migration
-      await this.runStatusColumnMigration();
+      // Run comprehensive migration script
+      await this.runComprehensiveMigration();
 
       this.logger.log('Database migrations completed successfully');
     } catch (error) {
@@ -130,55 +130,50 @@ export class PostgreSQLService implements OnModuleInit {
   }
 
   /**
-   * Run status column migration
+   * Run comprehensive migration script
    */
-  private async runStatusColumnMigration(): Promise<void> {
+  private async runComprehensiveMigration(): Promise<void> {
     try {
       // Read the migration script
-      const scriptPath = path.join(process.cwd(), 'scripts', 'add-status-column.sql');
-      const scriptContent = fs.readFileSync(scriptPath, 'utf8');
+      const scriptPath = path.join(process.cwd(), 'scripts', 'migrate-postgresql-schema.sql');
+
+      let scriptContent: string;
+      try {
+        scriptContent = fs.readFileSync(scriptPath, 'utf8');
+      } catch (fileError) {
+        this.logger.warn(`Migration file not found at ${scriptPath}, using fallback SQL`);
+        // Fallback SQL for comprehensive migration
+        scriptContent = `
+          -- Add status column to indices table if it doesn't exist
+          DO $$
+          BEGIN
+              IF NOT EXISTS (
+                  SELECT 1 
+                  FROM information_schema.columns 
+                  WHERE table_name = 'indices' 
+                  AND column_name = 'status'
+              ) THEN
+                  ALTER TABLE indices ADD COLUMN status VARCHAR(50) NOT NULL DEFAULT 'open';
+                  RAISE NOTICE 'Added status column to indices table';
+              ELSE
+                  RAISE NOTICE 'Status column already exists in indices table';
+              END IF;
+          END $$;
+
+          -- Add missing indexes if they don't exist
+          CREATE INDEX IF NOT EXISTS idx_documents_metadata ON documents USING GIN (metadata);
+
+          -- Update existing indices to have 'open' status if they don't have it
+          UPDATE indices SET status = 'open' WHERE status IS NULL;
+        `;
+      }
 
       // Execute the migration
       await this.dataSource.query(scriptContent);
 
-      this.logger.log('Status column migration completed');
+      this.logger.log('Comprehensive migration completed');
     } catch (error) {
-      this.logger.error(`Failed to run status column migration: ${error.message}`);
-      throw error;
-    }
-  }
-
-  /**
-   * Setup optimized indexes for search performance
-   */
-  private async setupIndexes(): Promise<void> {
-    try {
-      this.logger.log('Setting up PostgreSQL indexes...');
-
-      // First create indexes for search_documents table
-      const searchDocumentIndexes = [
-        'CREATE INDEX IF NOT EXISTS idx_search_documents_search_vector ON search_documents USING GIN(search_vector)',
-        'CREATE INDEX IF NOT EXISTS idx_search_documents_field_weights ON search_documents USING GIN(field_weights)',
-        'CREATE INDEX IF NOT EXISTS idx_search_documents_index_name ON search_documents(index_name)',
-      ];
-
-      for (const index of searchDocumentIndexes) {
-        await this.dataSource.query(index);
-      }
-
-      // Then create indexes for documents table
-      const documentIndexes = [
-        'CREATE INDEX IF NOT EXISTS idx_documents_index_name ON documents(index_name)',
-        'CREATE INDEX IF NOT EXISTS idx_documents_metadata ON documents USING GIN(metadata)',
-      ];
-
-      for (const index of documentIndexes) {
-        await this.dataSource.query(index);
-      }
-
-      this.logger.log('PostgreSQL indexes setup completed');
-    } catch (error) {
-      this.logger.error(`Failed to setup PostgreSQL indexes: ${error.message}`);
+      this.logger.error(`Failed to run comprehensive migration: ${error.message}`);
       throw error;
     }
   }
@@ -466,5 +461,21 @@ export class PostgreSQLService implements OnModuleInit {
     const queryRunner = this.dataSource.createQueryRunner();
     await queryRunner.connect();
     return queryRunner;
+  }
+
+  private async clearDatabase(): Promise<void> {
+    this.logger.log('Clearing database tables...');
+    const tables = ['search_documents', 'schema_versions', 'documents', 'indices'];
+
+    for (const table of tables) {
+      try {
+        await this.dataSource.query(`DROP TABLE IF EXISTS ${table} CASCADE`);
+        this.logger.log(`Dropped table: ${table}`);
+      } catch (error) {
+        this.logger.error(`Failed to drop table ${table}: ${error.message}`);
+        throw error;
+      }
+    }
+    this.logger.log('Database tables cleared successfully');
   }
 }
