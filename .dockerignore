@@ -11,7 +11,14 @@ dist
 coverage
 docs
 test
-scripts
+scripts/*.js
+scripts/*.ts
+scripts/*.sh
+scripts/*.mjs
+scripts/testing/
+scripts/development/
+scripts/production/
+scripts/monitoring/
 monitoring
 performance-results
 env-configs

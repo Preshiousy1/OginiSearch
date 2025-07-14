@@ -1,25 +1,51 @@
--- Drop existing tables and related objects
-DROP TRIGGER IF EXISTS update_search_documents_tsvector ON search_documents;
+-- =====================================================
+-- OGINI SEARCH ENGINE - POSTGRESQL MIGRATION SCRIPT
+-- =====================================================
+-- This script handles both new installations and existing databases
+-- It's safe to run multiple times (idempotent)
 
-DROP TRIGGER IF EXISTS update_search_documents_updated_at ON search_documents;
+-- Step 1: Add status column to indices table if it doesn't exist
+DO $$
+BEGIN
+    -- Check if the status column exists
+    IF NOT EXISTS (
+        SELECT 1 
+        FROM information_schema.columns 
+        WHERE table_name = 'indices' 
+        AND column_name = 'status'
+    ) THEN
+        -- Add the status column
+        ALTER TABLE indices ADD COLUMN status VARCHAR(50) NOT NULL DEFAULT 'open';
+        RAISE NOTICE 'Added status column to indices table';
+    ELSE
+        RAISE NOTICE 'Status column already exists in indices table';
+    END IF;
+END $$;
 
-DROP TRIGGER IF EXISTS update_documents_updated_at ON documents;
+-- Step 2: Add missing indexes if they don't exist
+CREATE INDEX IF NOT EXISTS idx_documents_metadata ON documents USING GIN (metadata);
 
-DROP TRIGGER IF EXISTS update_indices_updated_at ON indices;
+-- Step 3: Ensure all required extensions are enabled
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
-DROP TRIGGER IF EXISTS update_search_indexes_updated_at ON search_indexes;
+CREATE EXTENSION IF NOT EXISTS "pg_trgm";
 
-DROP FUNCTION IF EXISTS update_tsvector_column ();
+CREATE EXTENSION IF NOT EXISTS "unaccent";
 
-DROP FUNCTION IF EXISTS update_updated_at_column ();
+CREATE EXTENSION IF NOT EXISTS "pg_stat_statements";
 
-DROP TABLE IF EXISTS search_documents;
+-- Step 4: Update existing indices to have 'open' status if they don't have it
+UPDATE indices SET status = 'open' WHERE status IS NULL;
 
-DROP TABLE IF EXISTS documents;
+-- Log migration completion
+DO $$ BEGIN RAISE NOTICE 'PostgreSQL migration completed successfully';
 
-DROP TABLE IF EXISTS search_indexes;
+RAISE NOTICE 'Status column: Added to indices table';
 
-DROP TABLE IF EXISTS indices;
+RAISE NOTICE 'Indexes: All required indexes created';
 
--- Now run the new initialization script
-\i init-postgres.sql
+RAISE NOTICE 'Extensions: All required extensions enabled';
+
+RAISE NOTICE 'Database is ready for search operations';
+
+END $$;
