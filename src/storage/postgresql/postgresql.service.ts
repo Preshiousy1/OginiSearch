@@ -22,7 +22,7 @@ export class PostgreSQLService implements OnModuleInit {
 
   async onModuleInit(): Promise<void> {
     await this.setupExtensions();
-    await this.clearDatabase(); // TEMPORARY: Clear database to start fresh - REMOVE AFTER RAILWAY DEPLOYMENT
+    // await this.clearDatabase(); // TEMPORARY: Clear database to start fresh - REMOVE AFTER RAILWAY DEPLOYMENT
     await this.ensureTablesExist();
     await this.runMigrations();
   }
