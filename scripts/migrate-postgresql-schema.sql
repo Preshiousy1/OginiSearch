@@ -43,6 +43,27 @@ END $$;
 -- Step 2: Add missing indexes if they don't exist
 CREATE INDEX IF NOT EXISTS idx_documents_metadata ON documents USING GIN (metadata);
 
+-- Step 2.5: Ensure primary key constraint exists on documents table
+DO $$
+BEGIN
+    -- Check if the primary key constraint exists
+    IF NOT EXISTS (
+        SELECT 1 
+        FROM information_schema.table_constraints 
+        WHERE table_name = 'documents' 
+        AND constraint_type = 'PRIMARY KEY'
+    ) THEN
+        -- Add the primary key constraint
+        ALTER TABLE documents ADD CONSTRAINT documents_pkey PRIMARY KEY (document_id, index_name);
+
+RAISE NOTICE 'Added primary key constraint to documents table';
+
+ELSE RAISE NOTICE 'Primary key constraint already exists on documents table';
+
+END IF;
+
+END $$;
+
 -- Step 3: Ensure all required extensions are enabled
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
