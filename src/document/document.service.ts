@@ -519,6 +519,7 @@ export class DocumentService implements OnModuleInit {
         detectedMappings.properties[fieldPath] = this.createFieldMapping(
           fieldType,
           fieldExamples.get(fieldPath),
+          fieldPath,
         );
       }
 

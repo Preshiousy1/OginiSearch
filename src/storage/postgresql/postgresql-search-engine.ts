@@ -412,8 +412,26 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
    * Get PostgreSQL index information
    */
   async getIndex(indexName: string): Promise<IndexResponseDto> {
+    // If index is not in memory, check database and add to cache if found
     if (!this.indices.has(indexName)) {
-      throw new NotFoundException(`Index ${indexName} not found`);
+      const indexResult = await this.dataSource.query(
+        'SELECT settings, document_count FROM indices WHERE index_name = $1',
+        [indexName],
+      );
+
+      if (indexResult.length === 0) {
+        throw new NotFoundException(`Index ${indexName} not found`);
+      }
+
+      // Add index to memory cache
+      const indexConfig: IndexConfig = {
+        searchableAttributes: ['name', 'title', 'description'],
+        filterableAttributes: [],
+        defaultAnalyzer: 'standard',
+        fieldAnalyzers: {},
+      };
+      this.indices.set(indexName, indexConfig);
+      this.logger.log(`Added index ${indexName} to memory cache`);
     }
 
     // Get index data from database including settings and mappings
@@ -740,14 +758,28 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
         const likePattern = wildcardValue.replace(/\*/g, '%').replace(/\?/g, '_');
         params.push(likePattern);
 
-        // Handle _all field by searching across all fields
+        // Handle _all field by searching across specified fields or entire content
         if (field === '_all') {
-          sql += `
+          // If searchQuery.fields is provided, search across those specific fields
+          if (searchQuery.fields && searchQuery.fields.length > 0) {
+            const fieldConditions = searchQuery.fields
+              .map(f => `d.content->>'${f.replace('.keyword', '')}' ILIKE $${paramIndex}::text`)
+              .join(' OR ');
+            sql += `
+          ${boost}::float as score
+        FROM search_documents sd
+        JOIN documents d ON d.document_id = sd.document_id AND d.index_name = sd.index_name
+        WHERE sd.index_name = $1
+          AND (${fieldConditions})`;
+          } else {
+            // Fallback to searching entire content JSON as text
+            sql += `
           ${boost}::float as score
         FROM search_documents sd
         JOIN documents d ON d.document_id = sd.document_id AND d.index_name = sd.index_name
         WHERE sd.index_name = $1
           AND d.content::text ILIKE $${paramIndex}::text`;
+          }
         } else {
           // Handle .keyword subfields by extracting the base field name
           const baseField = field.includes('.keyword') ? field.split('.')[0] : field;

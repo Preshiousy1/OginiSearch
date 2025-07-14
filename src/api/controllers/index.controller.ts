@@ -635,11 +635,49 @@ export class IndexController {
       return { properties: {} };
     }
 
-    // Use the same ensureFieldMappings logic as the document service
-    await this.documentService['ensureFieldMappings'](
-      indexName,
-      sampleDocs.documents.map(doc => doc.source),
-    );
+    // Force re-detection by temporarily clearing mappings
+    const currentSettings = { ...index.settings };
+    const currentMappings = currentSettings.mappings;
+
+    // Temporarily clear mappings to force re-detection
+    if (currentMappings) {
+      this.logger.log(`Clearing existing mappings to force re-detection`);
+      delete currentSettings.mappings;
+      await this.indexService.updateIndex(indexName, currentSettings);
+    }
+
+    // Directly call the field detection logic instead of ensureFieldMappings
+    this.logger.log(`Calling field detection logic with ${sampleDocs.documents.length} documents`);
+
+    // Analyze field types from sample documents
+    const fieldTypes = new Map<string, string>();
+    const fieldExamples = new Map<string, Set<any>>();
+
+    for (const doc of sampleDocs.documents) {
+      this.documentService['analyzeDocumentFields'](doc.source, '', fieldTypes, fieldExamples);
+    }
+
+    // Create mappings
+    const detectedMappings = {
+      dynamic: true,
+      properties: {} as Record<string, any>,
+    };
+
+    for (const [fieldPath, fieldType] of fieldTypes.entries()) {
+      detectedMappings.properties[fieldPath] = this.documentService['createFieldMapping'](
+        fieldType,
+        fieldExamples.get(fieldPath),
+        fieldPath,
+      );
+    }
+
+    // Update index with detected mappings
+    const updatedSettings = {
+      ...currentSettings,
+      mappings: detectedMappings,
+    };
+    await this.indexService.updateIndex(indexName, updatedSettings);
+    this.logger.log(`Auto-detected and configured mappings for ${fieldTypes.size} fields`);
 
     // Get the updated index with new mappings
     const updatedIndex = await this.indexService.getIndex(indexName);

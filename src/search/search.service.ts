@@ -28,6 +28,42 @@ export class SearchService {
     const index = await this.postgresSearchEngine.getIndex(indexName);
     const mappings = index.mappings?.properties || {};
 
+    // Collect all base fields that are keyword fields or have a keyword subfield
+    const keywordFields: string[] = [];
+    for (const [field, mapping] of Object.entries(mappings)) {
+      const m = mapping as any;
+      // If the field itself is a keyword field
+      if (m.type === 'keyword') {
+        keywordFields.push(field);
+      }
+      // If the field is text and has a keyword subfield, add only the base field
+      else if (
+        m.type === 'text' &&
+        m.fields &&
+        m.fields.keyword &&
+        m.fields.keyword.type === 'keyword'
+      ) {
+        keywordFields.push(field);
+      }
+    }
+
+    this.logger.debug(
+      `Extracted keyword fields for index ${indexName}: ${JSON.stringify(keywordFields)}`,
+    );
+
+    if (
+      searchQuery.query &&
+      typeof searchQuery.query === 'object' &&
+      'wildcard' in searchQuery.query &&
+      (searchQuery.fields === undefined || searchQuery.fields.length === 0) &&
+      ((searchQuery.query as any).wildcard.field === undefined ||
+        (searchQuery.query as any).wildcard.field === '_all')
+    ) {
+      if (keywordFields.length > 0) {
+        searchQuery.fields = keywordFields;
+      }
+    }
+
     // If match query with wildcard and no field, set fields to all keyword fields
     if (
       searchQuery.query &&
@@ -38,22 +74,11 @@ export class SearchService {
       (searchQuery.query.match.field === undefined || searchQuery.query.match.field === '_all') &&
       (searchQuery.query.match.value.includes('*') || searchQuery.query.match.value.includes('?'))
     ) {
-      // Collect all top-level keyword fields
-      const keywordFields: string[] = [];
-      for (const [field, mapping] of Object.entries(mappings)) {
-        const m = mapping as any;
-        if (m.type === 'keyword') {
-          keywordFields.push(field);
-        }
-        // Also add subfields like name.keyword, profile.keyword, etc.
-        if (m.fields && m.fields.keyword && m.fields.keyword.type === 'keyword') {
-          keywordFields.push(`${field}.keyword`);
-        }
-      }
       if (keywordFields.length > 0) {
         searchQuery.fields = keywordFields;
       }
     }
+
     // --- END: Keyword field extraction ---
 
     try {
@@ -71,6 +96,7 @@ export class SearchService {
         // Convert the processed wildcard query back to the format expected by PostgreSQLSearchEngine
         const wildcardQuery = {
           ...searchQuery,
+          fields: searchQuery.fields, // Ensure fields are passed through
           query: {
             wildcard: {
               field: targetField,
