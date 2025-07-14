@@ -23,6 +23,7 @@ export class PostgreSQLService implements OnModuleInit {
   async onModuleInit(): Promise<void> {
     await this.setupExtensions();
     await this.ensureTablesExist();
+    await this.runMigrations();
     await this.setupIndexes();
   }
 
@@ -107,6 +108,42 @@ export class PostgreSQLService implements OnModuleInit {
       this.logger.log('Init script executed successfully');
     } catch (error) {
       this.logger.error(`Failed to execute init script: ${error.message}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Run database migrations
+   */
+  private async runMigrations(): Promise<void> {
+    try {
+      this.logger.log('Running database migrations...');
+
+      // Run status column migration
+      await this.runStatusColumnMigration();
+
+      this.logger.log('Database migrations completed successfully');
+    } catch (error) {
+      this.logger.error(`Failed to run migrations: ${error.message}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Run status column migration
+   */
+  private async runStatusColumnMigration(): Promise<void> {
+    try {
+      // Read the migration script
+      const scriptPath = path.join(process.cwd(), 'scripts', 'add-status-column.sql');
+      const scriptContent = fs.readFileSync(scriptPath, 'utf8');
+
+      // Execute the migration
+      await this.dataSource.query(scriptContent);
+
+      this.logger.log('Status column migration completed');
+    } catch (error) {
+      this.logger.error(`Failed to run status column migration: ${error.message}`);
       throw error;
     }
   }

@@ -1,18 +1,20 @@
--- Add status column to indices table
-ALTER TABLE indices
-ADD COLUMN IF NOT EXISTS status VARCHAR(50) NOT NULL DEFAULT 'open';
+-- Migration: Add status column to indices table
+-- This script adds the missing status column to existing indices tables
 
--- Update existing indices to have 'open' status
-UPDATE indices SET status = 'open' WHERE status IS NULL;
-
--- Create an index on the status column for faster filtering
-CREATE INDEX IF NOT EXISTS idx_indices_status ON indices (status);
-
--- Log completion
-DO $$ BEGIN RAISE NOTICE 'Added status column to indices table';
-
-RAISE NOTICE 'Created index on status column';
-
-RAISE NOTICE 'Updated existing indices to have open status';
-
+-- Check if status column exists, if not add it
+DO $$
+BEGIN
+    -- Check if the status column exists
+    IF NOT EXISTS (
+        SELECT 1 
+        FROM information_schema.columns 
+        WHERE table_name = 'indices' 
+        AND column_name = 'status'
+    ) THEN
+        -- Add the status column
+        ALTER TABLE indices ADD COLUMN status VARCHAR(50) NOT NULL DEFAULT 'open';
+        RAISE NOTICE 'Added status column to indices table';
+    ELSE
+        RAISE NOTICE 'Status column already exists in indices table';
+    END IF;
 END $$;
