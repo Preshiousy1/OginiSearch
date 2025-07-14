@@ -1,11 +1,16 @@
 import { Injectable, Logger, Optional, BadRequestException } from '@nestjs/common';
-import { DocumentRepository } from '../mongodb/repositories/document.repository';
-import { SourceDocument } from '../mongodb/schemas/document.schema';
-import { MongoDBService } from '../mongodb/mongodb.service';
 import { SchemaVersionManagerService } from '../../schema/schema-version-manager.service';
+import { PostgreSQLService } from '../postgresql/postgresql.service';
 
 interface DocumentStorageOptions {
   batchSize?: number;
+}
+
+export interface SourceDocument {
+  indexName: string;
+  documentId: string;
+  content: Record<string, any>;
+  metadata?: Record<string, any>;
 }
 
 @Injectable()
@@ -14,19 +19,11 @@ export class DocumentStorageService {
   private readonly defaultOptions: DocumentStorageOptions = {
     batchSize: 100,
   };
-  private useInMemoryFallback = false;
-  private inMemoryStore: Map<string, any> = new Map();
 
   constructor(
-    @Optional() private readonly documentRepository: DocumentRepository,
-    // private readonly mongoDBService: MongoDBService,
+    private readonly postgresService: PostgreSQLService,
     private readonly schemaVersionManager: SchemaVersionManagerService,
-  ) {
-    if (!documentRepository) {
-      this.logger.warn('MongoDB repository not available, using in-memory fallback');
-      this.useInMemoryFallback = true;
-    }
-  }
+  ) {}
 
   async storeDocument(
     indexName: string,
@@ -70,8 +67,8 @@ export class DocumentStorageService {
         metadata,
       };
 
-      const result = await this.documentRepository.create(document);
-      return result;
+      await this.postgresService.storeDocument(document);
+      return document;
     } catch (error) {
       this.logger.error(`Failed to store document: ${error.message}`);
       throw error;
@@ -80,7 +77,7 @@ export class DocumentStorageService {
 
   async getDocument(indexName: string, documentId: string): Promise<SourceDocument | null> {
     try {
-      return await this.documentRepository.findOne(indexName, documentId);
+      return await this.postgresService.getDocument(indexName, documentId);
     } catch (error) {
       this.logger.error(`Failed to get document: ${error.message}`);
       throw error;
@@ -98,7 +95,7 @@ export class DocumentStorageService {
       // If schema is provided, validate the updated document
       if (schemaName) {
         // Get the existing document
-        const existingDoc = await this.documentRepository.findOne(indexName, documentId);
+        const existingDoc = await this.postgresService.getDocument(indexName, documentId);
         if (!existingDoc) {
           throw new BadRequestException(`Document with id ${documentId} not found`);
         }
@@ -131,7 +128,15 @@ export class DocumentStorageService {
         updateData.metadata = metadata;
       }
 
-      return await this.documentRepository.update(indexName, documentId, updateData);
+      const document = {
+        indexName,
+        documentId,
+        content,
+        metadata: metadata || {},
+      };
+
+      await this.postgresService.updateDocument(document);
+      return document;
     } catch (error) {
       this.logger.error(`Failed to update document: ${error.message}`);
       throw error;
@@ -140,7 +145,7 @@ export class DocumentStorageService {
 
   async deleteDocument(indexName: string, documentId: string): Promise<boolean> {
     try {
-      return await this.documentRepository.delete(indexName, documentId);
+      return await this.postgresService.deleteDocument(indexName, documentId);
     } catch (error) {
       this.logger.error(`Failed to delete document: ${error.message}`);
       throw error;
@@ -149,42 +154,27 @@ export class DocumentStorageService {
 
   async bulkStoreDocuments(
     indexName: string,
-    documents: Array<{ id: string; content: Record<string, any>; metadata?: Record<string, any> }>,
-    options?: DocumentStorageOptions,
-  ): Promise<number> {
-    const { batchSize = this.defaultOptions.batchSize } = options || {};
-    let storedCount = 0;
+    documents: Array<Omit<SourceDocument, 'indexName'>>,
+    options: { batchSize?: number; skipDuplicates?: boolean } = {},
+  ): Promise<{
+    successCount: number;
+    errors: Array<{ documentId: string; error: string }>;
+  }> {
+    this.logger.log(`Bulk storing ${documents.length} documents in index ${indexName}`);
 
-    try {
-      // Split documents into batches
-      for (let i = 0; i < documents.length; i += batchSize) {
-        const batch = documents.slice(i, i + batchSize);
+    const sourceDocuments = documents.map(doc => ({
+      indexName,
+      documentId: doc.documentId,
+      content: doc.content,
+      metadata: doc.metadata,
+    }));
 
-        const operations = batch.map(doc => ({
-          insertOne: {
-            document: {
-              indexName,
-              documentId: doc.id,
-              content: doc.content,
-              metadata: doc.metadata || {},
-            },
-          },
-        }));
-
-        const result = await this.documentRepository.bulkWrite(operations);
-        storedCount += result.insertedCount;
-      }
-
-      return storedCount;
-    } catch (error) {
-      this.logger.error(`Failed to bulk store documents: ${error.message}`);
-      throw error;
-    }
+    return this.postgresService.bulkStoreDocuments(sourceDocuments, options);
   }
 
   async bulkDeleteDocuments(indexName: string, documentIds: string[]): Promise<number> {
     try {
-      return await this.documentRepository.deleteMany(indexName, documentIds);
+      return await this.postgresService.bulkDeleteDocuments(indexName, documentIds);
     } catch (error) {
       this.logger.error(`Failed to bulk delete documents: ${error.message}`);
       throw error;
@@ -193,7 +183,7 @@ export class DocumentStorageService {
 
   async deleteAllDocumentsInIndex(indexName: string): Promise<number> {
     try {
-      return await this.documentRepository.deleteMany(indexName);
+      return await this.postgresService.deleteAllDocumentsInIndex(indexName);
     } catch (error) {
       this.logger.error(`Failed to delete all documents in index: ${error.message}`);
       throw error;
@@ -212,7 +202,7 @@ export class DocumentStorageService {
       this.logger.debug(
         `Getting documents from ${indexName} with options: ${JSON.stringify(options)}`,
       );
-      const result = await this.documentRepository.findAll(indexName, options);
+      const result = await this.postgresService.getDocuments(indexName, options);
       this.logger.debug(`Found ${result.documents.length} documents in document storage`);
       return result;
     } catch (error) {
@@ -223,7 +213,7 @@ export class DocumentStorageService {
 
   async deleteAllDocuments(): Promise<void> {
     try {
-      await this.documentRepository.deleteAll();
+      await this.postgresService.deleteAllDocuments();
     } catch (error) {
       this.logger.error(`Failed to delete all documents: ${error.message}`);
       throw error;
@@ -272,11 +262,19 @@ export class DocumentStorageService {
         metadata,
       };
 
-      const result = await this.documentRepository.upsert(document);
-      return result;
+      await this.postgresService.upsertDocument(document);
+      return document;
     } catch (error) {
       this.logger.error(`Failed to upsert document: ${error.message}`);
       throw error;
     }
+  }
+
+  async getAllDocuments(indexName: string): Promise<Array<{ id: string; source: any }>> {
+    const result = await this.postgresService.query(
+      'SELECT document_id as id, content as source FROM processed_documents WHERE index_name = $1',
+      [indexName],
+    );
+    return result.rows;
   }
 }

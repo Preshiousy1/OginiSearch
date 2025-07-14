@@ -8,6 +8,8 @@ import {
   Query,
   BadRequestException,
   Delete,
+  NotFoundException,
+  InternalServerErrorException,
 } from '@nestjs/common';
 import {
   SearchQueryDto,
@@ -396,16 +398,24 @@ export class SearchController {
       throw new BadRequestException('Suggest query text is required');
     }
 
-    const suggestions = await this.searchService.suggest(index, suggestDto);
+    try {
+      const startTime = Date.now();
+      const suggestions = await this.searchService.suggest(index, suggestDto);
+      const took = Date.now() - startTime;
 
-    return {
-      suggestions,
-      took: Math.floor(Math.random() * 10) + 1, // Simulated processing time
-    };
-  }
-
-  @Delete('_clear_dictionary')
-  async clearDictionary(@Param('index') index: string) {
-    return this.searchService.clearDictionary(index);
+      return {
+        suggestions,
+        took,
+      };
+    } catch (error) {
+      this.logger.error(`Error in suggest endpoint: ${error.message}`);
+      if (error instanceof NotFoundException) {
+        throw error;
+      }
+      if (error instanceof BadRequestException) {
+        throw error;
+      }
+      throw new InternalServerErrorException(`Failed to get suggestions: ${error.message}`);
+    }
   }
 }

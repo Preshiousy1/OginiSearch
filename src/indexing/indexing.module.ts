@@ -2,12 +2,12 @@ import { forwardRef, Module } from '@nestjs/common';
 import { BullModule } from '@nestjs/bull';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { IndexingService } from './indexing.service';
-import { BulkIndexingService } from './services/bulk-indexing.service';
 import { IndexingWorkerService } from './services/indexing-worker.service';
 import { DocumentProcessorPool } from './services/document-processor.pool';
 import { DocumentModule } from '../document/document.module';
 import { IndexModule } from '../index/index.module';
-import { StorageModule } from 'src/storage/storage.module';
+import { StorageModule } from '../storage/storage.module';
+import { BulkIndexingModule } from './bulk-indexing.module';
 
 @Module({
   imports: [
@@ -27,10 +27,11 @@ import { StorageModule } from 'src/storage/storage.module';
       inject: [ConfigService],
     }),
     forwardRef(() => DocumentModule),
-    IndexModule,
-    StorageModule,
+    forwardRef(() => IndexModule),
+    forwardRef(() => StorageModule),
+    forwardRef(() => BulkIndexingModule),
   ],
-  providers: [IndexingService, BulkIndexingService, IndexingWorkerService, DocumentProcessorPool],
-  exports: [IndexingService, BulkIndexingService, IndexingWorkerService, DocumentProcessorPool],
+  providers: [IndexingService, IndexingWorkerService, DocumentProcessorPool],
+  exports: [IndexingService, IndexingWorkerService, DocumentProcessorPool],
 })
 export class IndexingModule {}

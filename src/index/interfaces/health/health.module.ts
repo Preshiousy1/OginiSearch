@@ -1,10 +1,9 @@
 import { Module } from '@nestjs/common';
 import { HealthController } from './health.controller';
-import { MongoDBModule } from '../../../storage/mongodb/mongodb.module';
 import { StorageModule } from '../../../storage/storage.module';
 
 @Module({
-  imports: [MongoDBModule, StorageModule],
+  imports: [StorageModule],
   controllers: [HealthController],
 })
 export class HealthModule {}

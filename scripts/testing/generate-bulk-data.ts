@@ -5,12 +5,6 @@ import * as path from 'path';
 const NUM_DOCUMENTS = 10000;
 const OUTPUT_FILE = path.join(__dirname, '../../data/bulk-test-data.json');
 
-// Ensure data directory exists
-const dataDir = path.dirname(OUTPUT_FILE);
-if (!fs.existsSync(dataDir)) {
-  fs.mkdirSync(dataDir, { recursive: true });
-}
-
 // Generate random text
 function generateRandomText(wordCount: number): string {
   const words = [
@@ -80,24 +74,35 @@ function generateRandomText(wordCount: number): string {
 function generateDocument(id: number) {
   return {
     id: `doc${id}`,
-    document: {
-      title: generateRandomText(5),
-      content: generateRandomText(50),
-      tags: Array.from({ length: 3 }, () => generateRandomText(1)),
-      metadata: {
-        author: `user${Math.floor(Math.random() * 10)}`,
-        createdAt: new Date(Date.now() - Math.random() * 365 * 24 * 60 * 60 * 1000).toISOString(),
-        views: Math.floor(Math.random() * 1000),
-        score: Math.random() * 100,
-      },
+    title: generateRandomText(5),
+    content: generateRandomText(50),
+    tags: Array.from({ length: 3 }, () => generateRandomText(1)),
+    metadata: {
+      author: `user${Math.floor(Math.random() * 10)}`,
+      createdAt: new Date(Date.now() - Math.random() * 365 * 24 * 60 * 60 * 1000).toISOString(),
+      views: Math.floor(Math.random() * 1000),
+      score: Math.random() * 100,
     },
   };
 }
 
-// Generate documents
-console.log(`Generating ${NUM_DOCUMENTS} test documents...`);
-const documents = Array.from({ length: NUM_DOCUMENTS }, (_, i) => generateDocument(i));
+// Export function to generate test documents
+export function generateTestDocuments(count: number) {
+  return Array.from({ length: count }, (_, i) => generateDocument(i));
+}
 
-// Write to file in the correct format for bulk indexing
-fs.writeFileSync(OUTPUT_FILE, JSON.stringify({ documents }, null, 2));
-console.log(`Test data written to ${OUTPUT_FILE}`);
+// If this file is run directly, generate and save test data
+if (require.main === module) {
+  console.log(`Generating ${NUM_DOCUMENTS} test documents...`);
+  const documents = generateTestDocuments(NUM_DOCUMENTS);
+
+  // Ensure data directory exists
+  const dataDir = path.dirname(OUTPUT_FILE);
+  if (!fs.existsSync(dataDir)) {
+    fs.mkdirSync(dataDir, { recursive: true });
+  }
+
+  // Write to file in the correct format for bulk indexing
+  fs.writeFileSync(OUTPUT_FILE, JSON.stringify({ documents }, null, 2));
+  console.log(`Test data written to ${OUTPUT_FILE}`);
+}

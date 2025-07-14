@@ -13,10 +13,8 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiParam, ApiQuery, ApiBody } from '@nestjs/swagger';
-import {
-  BulkIndexingService,
-  BulkIndexingOptions,
-} from '../../indexing/services/bulk-indexing.service';
+import { BulkIndexingService } from '../../indexing/services/bulk-indexing.service';
+import { BulkIndexingOptions } from '../../indexing/interfaces/bulk-indexing.interface';
 
 class QueueSingleDocumentDto {
   indexName: string;
@@ -57,52 +55,6 @@ export class BulkIndexingController {
 
   constructor(private readonly bulkIndexingService: BulkIndexingService) {}
 
-  @Post('queue/single')
-  @HttpCode(HttpStatus.ACCEPTED)
-  @ApiOperation({ summary: 'Queue a single document for indexing' })
-  @ApiBody({ type: QueueSingleDocumentDto })
-  @ApiResponse({
-    status: HttpStatus.ACCEPTED,
-    description: 'Document queued successfully',
-    schema: {
-      type: 'object',
-      properties: {
-        jobId: { type: 'string', nullable: true },
-        message: { type: 'string' },
-      },
-    },
-  })
-  @ApiResponse({ status: HttpStatus.BAD_REQUEST, description: 'Invalid request data' })
-  async queueSingleDocument(@Body() dto: QueueSingleDocumentDto) {
-    if (!dto.indexName || !dto.documentId || !dto.document) {
-      throw new BadRequestException('indexName, documentId, and document are required');
-    }
-
-    try {
-      const jobId = await this.bulkIndexingService.queueSingleDocument(
-        dto.indexName,
-        dto.documentId,
-        dto.document,
-        dto.options || {},
-      );
-
-      if (!jobId) {
-        return {
-          jobId: null,
-          message: 'Document was skipped (likely duplicate)',
-        };
-      }
-
-      return {
-        jobId,
-        message: 'Document queued successfully',
-      };
-    } catch (error) {
-      this.logger.error(`Failed to queue single document: ${error.message}`);
-      throw new BadRequestException(`Failed to queue document: ${error.message}`);
-    }
-  }
-
   @Post('queue/batch')
   @HttpCode(HttpStatus.ACCEPTED)
   @ApiOperation({ summary: 'Queue a batch of documents for indexing' })
@@ -137,7 +89,7 @@ export class BulkIndexingController {
     }
 
     try {
-      const { batchId, status } = await this.bulkIndexingService.queueBulkIndexing(
+      const { batchId } = await this.bulkIndexingService.queueBulkIndexing(
         dto.indexName,
         dto.documents,
         dto.options || {},
@@ -186,26 +138,6 @@ export class BulkIndexingController {
     } catch (error) {
       this.logger.error(`Failed to get status for batch ${batchId}: ${error.message}`);
       throw new BadRequestException(`Failed to get status: ${error.message}`);
-    }
-  }
-
-  @Delete('progress/:batchId')
-  @HttpCode(HttpStatus.NO_CONTENT)
-  @ApiOperation({ summary: 'Clear job records for a batch' })
-  @ApiParam({ name: 'batchId', description: 'Batch ID to clear records for', type: 'string' })
-  @ApiResponse({ status: HttpStatus.NO_CONTENT, description: 'Records cleared successfully' })
-  @ApiResponse({ status: HttpStatus.BAD_REQUEST, description: 'Invalid batch ID' })
-  async clearProgress(@Param('batchId') batchId: string): Promise<void> {
-    if (!batchId) {
-      throw new BadRequestException('Batch ID is required');
-    }
-
-    try {
-      // Simplified - could clean specific job records in a full implementation
-      await this.bulkIndexingService.cleanQueue();
-    } catch (error) {
-      this.logger.error(`Failed to clear records for batch ${batchId}: ${error.message}`);
-      throw new BadRequestException(`Failed to clear records: ${error.message}`);
     }
   }
 
@@ -281,7 +213,7 @@ export class BulkIndexingController {
   async getHealth() {
     try {
       const health = await this.bulkIndexingService.getQueueHealth();
-      const stats = health.stats;
+      const stats = health.queues;
 
       // Get detailed stats to properly categorize job types
       const detailedStats = await this.bulkIndexingService.getDetailedQueueStats();

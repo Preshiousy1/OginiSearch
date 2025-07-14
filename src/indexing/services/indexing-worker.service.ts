@@ -40,6 +40,17 @@ export class IndexingWorkerService implements OnApplicationBootstrap, OnModuleDe
     // Cleanup will be handled by NestJS
   }
 
+  private convertTermsToMap(
+    terms: Array<{ term: string; positions: number[] }>,
+    docId: string,
+  ): Map<string, any> {
+    const termsMap = new Map<string, any>();
+    for (const { term, positions } of terms) {
+      termsMap.set(term, { docId, positions });
+    }
+    return termsMap;
+  }
+
   @Process('single')
   async processSingleDocument(job: Job<any>) {
     const { indexName, documentId, document } = job.data;
@@ -57,7 +68,10 @@ export class IndexingWorkerService implements OnApplicationBootstrap, OnModuleDe
       await this.documentService.storeDocument(indexName, documentId, document);
 
       // Update term dictionary and postings
-      await this.documentService.updateTermDictionary(indexName, processedDoc.terms);
+      await this.documentService.updateTermDictionary(
+        indexName,
+        this.convertTermsToMap(processedDoc.terms, documentId),
+      );
 
       return { success: true, documentId };
     } catch (error) {
@@ -102,7 +116,10 @@ export class IndexingWorkerService implements OnApplicationBootstrap, OnModuleDe
             );
 
             await this.documentService.storeDocument(indexName, doc.id, doc.document);
-            await this.documentService.updateTermDictionary(indexName, processedDoc.terms);
+            await this.documentService.updateTermDictionary(
+              indexName,
+              this.convertTermsToMap(processedDoc.terms, doc.id),
+            );
 
             results.processed++;
             this.workerMetrics.processedDocuments++;

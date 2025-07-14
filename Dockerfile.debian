@@ -16,8 +16,9 @@ ENV PYTHON=/usr/bin/python3
 # Copy package files
 COPY package*.json ./
 
-# Install dependencies
-RUN npm ci
+# Install dependencies and NestJS CLI
+RUN npm ci && \
+    npm install -g @nestjs/cli
 
 # Copy source code
 COPY . .
@@ -43,8 +44,9 @@ ENV PYTHON=/usr/bin/python3
 # Copy package files
 COPY package*.json ./
 
-# Install production dependencies
-RUN npm ci --only=production
+# Install production dependencies and NestJS CLI for development mode
+RUN npm ci --only=production && \
+    npm install -g @nestjs/cli
 
 # Copy built application from build stage
 COPY --from=build /usr/src/app/dist ./dist

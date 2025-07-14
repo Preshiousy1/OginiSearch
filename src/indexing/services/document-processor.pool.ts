@@ -40,7 +40,9 @@ export class DocumentProcessorPool implements OnModuleInit, OnModuleDestroy {
     this.logger.log(`Starting ${this.maxWorkers} document processing workers...`);
 
     for (let i = 0; i < this.maxWorkers; i++) {
-      const worker = new Worker(path.join(__dirname, '../workers/document-processor.worker.js'));
+      const worker = new Worker(
+        path.join(process.cwd(), 'dist/indexing/workers/document-processor.worker.js'),
+      );
       const workerId = this.workers.length;
 
       worker.on('message', message => {
@@ -99,7 +101,9 @@ export class DocumentProcessorPool implements OnModuleInit, OnModuleDestroy {
       }
     }
 
-    const worker = new Worker(path.join(__dirname, '../workers/document-processor.worker.js'));
+    const worker = new Worker(
+      path.join(process.cwd(), 'dist/indexing/workers/document-processor.worker.js'),
+    );
 
     worker.on('message', message => {
       if (message.type === 'ready') {

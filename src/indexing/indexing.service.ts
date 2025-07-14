@@ -1,23 +1,24 @@
 import { Injectable, Logger, Inject } from '@nestjs/common';
-import { IndexStorageService } from '../storage/index-storage/index-storage.service';
 import { DocumentProcessorService } from '../document/document-processor.service';
 import { IndexStatsService } from '../index/index-stats.service';
 import { ProcessedDocument } from '../document/interfaces/document-processor.interface';
-import { InMemoryTermDictionary } from '../index/term-dictionary';
-import { PersistentTermDictionaryService } from '../storage/index-storage/persistent-term-dictionary.service';
+import { TermDictionary } from '../index/term-dictionary';
 import { DocumentMapping } from '../document/interfaces/document-processor.interface';
 import { IndexMappings } from '../index/interfaces/index.interface';
+import { IndexStorage } from '../index/interfaces/index-storage.interface';
+import { SimplePostingList } from '../index/posting-list';
+import { BulkIndexingService } from './services/bulk-indexing.service';
 
 @Injectable()
 export class IndexingService {
   private readonly logger = new Logger(IndexingService.name);
 
   constructor(
-    private readonly indexStorage: IndexStorageService,
     private readonly documentProcessor: DocumentProcessorService,
     private readonly indexStats: IndexStatsService,
-    @Inject('TERM_DICTIONARY') private readonly termDictionary: InMemoryTermDictionary,
-    private readonly persistentTermDictionary: PersistentTermDictionaryService,
+    @Inject('TERM_DICTIONARY') private readonly termDictionary: TermDictionary,
+    @Inject('IndexStorage') private readonly indexStorage: IndexStorage,
+    private readonly bulkIndexingService: BulkIndexingService,
   ) {}
 
   async indexDocument(
@@ -25,7 +26,6 @@ export class IndexingService {
     documentId: string,
     document: any,
     fromBulk = false,
-    persistToMongoDB = false,
   ): Promise<void> {
     if (!fromBulk) {
       this.logger.debug(`Processing and indexing document ${documentId} in index ${indexName}`);
@@ -70,48 +70,13 @@ export class IndexingService {
         };
 
         // Use index-aware term dictionary
-        await this.termDictionary.addPostingForIndex(indexName, fieldTerm, termEntry);
-
-        // Only persist to MongoDB periodically or when explicitly requested
-        if (persistToMongoDB) {
-          const indexAwareFieldTerm = `${indexName}:${fieldTerm}`;
-          const fieldPostingList = await this.termDictionary.getPostingListForIndex(
-            indexName,
-            fieldTerm,
-          );
-          if (fieldPostingList) {
-            await this.persistentTermDictionary.saveTermPostings(
-              indexAwareFieldTerm,
-              fieldPostingList,
-            );
-          }
-        }
+        const indexPrefixedTerm = `${indexName}:${fieldTerm}`;
+        await this.termDictionary.addPosting(indexPrefixedTerm, documentId.toString(), positions);
 
         // Also add to _all field for cross-field search using index-aware approach
         const allFieldTerm = `_all:${term}`;
-        const allTermEntry = {
-          docId: documentId.toString(),
-          frequency: 1,
-          positions: [],
-          metadata: { field },
-        };
-
-        await this.termDictionary.addPostingForIndex(indexName, allFieldTerm, allTermEntry);
-
-        // Only persist to MongoDB periodically or when explicitly requested
-        if (persistToMongoDB) {
-          const indexAwareAllFieldTerm = `${indexName}:${allFieldTerm}`;
-          const allPostingList = await this.termDictionary.getPostingListForIndex(
-            indexName,
-            allFieldTerm,
-          );
-          if (allPostingList) {
-            await this.persistentTermDictionary.saveTermPostings(
-              indexAwareAllFieldTerm,
-              allPostingList,
-            );
-          }
-        }
+        const indexPrefixedAllTerm = `${indexName}:${allFieldTerm}`;
+        await this.termDictionary.addPosting(indexPrefixedAllTerm, documentId.toString(), []);
       }
     }
 
@@ -148,45 +113,35 @@ export class IndexingService {
           // Remove from field-specific posting list
           const fieldTerm = `${field}:${term}`;
           try {
-            const postingList = await this.termDictionary.getPostingList(fieldTerm);
+            const postings = this.termDictionary.getPostings(fieldTerm);
+            let postingList: SimplePostingList | undefined;
+            if (postings) {
+              postingList = new SimplePostingList();
+              for (const [docId, positions] of postings.entries()) {
+                postingList.addEntry({ docId, positions, frequency: positions.length });
+              }
+            }
             if (postingList) {
               const removed = postingList.removeEntry(documentId);
-              if (removed) {
-                if (postingList.size() === 0) {
-                  // Remove term completely from both RocksDB and MongoDB
-                  const indexAwareFieldTerm = `${indexName}:${fieldTerm}`;
-                  await this.persistentTermDictionary.deleteTermPostings(indexAwareFieldTerm);
-                  await this.termDictionary.removeTerm(fieldTerm);
-                } else {
-                  // Update the posting list in both RocksDB and MongoDB
-                  const indexAwareFieldTerm = `${indexName}:${fieldTerm}`;
-                  await this.persistentTermDictionary.saveTermPostings(
-                    indexAwareFieldTerm,
-                    postingList,
-                  );
-                }
+              if (removed && postingList.size() === 0) {
+                await this.termDictionary.removeTerm(fieldTerm);
               }
             }
 
             // Also remove from _all field posting list
             const allFieldTerm = `_all:${term}`;
-            const allPostingList = await this.termDictionary.getPostingList(allFieldTerm);
+            const allPostings = this.termDictionary.getPostings(allFieldTerm);
+            let allPostingList: SimplePostingList | undefined;
+            if (allPostings) {
+              allPostingList = new SimplePostingList();
+              for (const [docId, positions] of allPostings.entries()) {
+                allPostingList.addEntry({ docId, positions, frequency: positions.length });
+              }
+            }
             if (allPostingList) {
               const removed = allPostingList.removeEntry(documentId);
-              if (removed) {
-                if (allPostingList.size() === 0) {
-                  // Remove term completely from both RocksDB and MongoDB
-                  const indexAwareAllFieldTerm = `${indexName}:${allFieldTerm}`;
-                  await this.persistentTermDictionary.deleteTermPostings(indexAwareAllFieldTerm);
-                  await this.termDictionary.removeTerm(allFieldTerm);
-                } else {
-                  // Update the posting list in both RocksDB and MongoDB
-                  const indexAwareAllFieldTerm = `${indexName}:${allFieldTerm}`;
-                  await this.persistentTermDictionary.saveTermPostings(
-                    indexAwareAllFieldTerm,
-                    allPostingList,
-                  );
-                }
+              if (removed && allPostingList.size() === 0) {
+                await this.termDictionary.removeTerm(allFieldTerm);
               }
             }
           } catch (error) {
@@ -354,95 +309,27 @@ export class IndexingService {
     }
   }
 
-  /**
-   * Persist all term postings for an index to MongoDB
-   * This should be called after bulk indexing operations to ensure data persistence
-   */
-  async persistTermPostingsToMongoDB(indexName: string): Promise<void> {
-    this.logger.log(`Persisting term postings to MongoDB for index: ${indexName}`);
+  async bulkIndexDocuments(
+    indexName: string,
+    documents: Array<{ id: string; document: any }>,
+  ): Promise<void> {
+    this.logger.debug(
+      `Queueing ${documents.length} documents for bulk indexing in index ${indexName}`,
+    );
 
-    try {
-      // Get all index-aware terms for this index from the term dictionary
-      const indexAwareTerms = this.termDictionary.getTermsForIndex(indexName);
-      this.logger.debug(`Found ${indexAwareTerms.length} index-aware terms for index ${indexName}`);
-
-      if (indexAwareTerms.length === 0) {
-        this.logger.debug(`No terms found for index: ${indexName}`);
-        return;
-      }
-
-      // Log first few terms for debugging
-      if (indexAwareTerms.length > 0) {
-        const sampleTerms = indexAwareTerms.slice(0, 5);
-        this.logger.debug(`Sample index-aware terms: ${sampleTerms.join(', ')}`);
-      }
-
-      let persistedCount = 0;
-      const batchSize = 100; // Process in batches to avoid memory issues
-
-      for (let i = 0; i < indexAwareTerms.length; i += batchSize) {
-        const termBatch = indexAwareTerms.slice(i, i + batchSize);
-
-        await Promise.all(
-          termBatch.map(async indexAwareTerm => {
-            try {
-              // Get posting list using the index-aware term directly
-              const postingList = await this.termDictionary.getPostingListForIndex(
-                indexName,
-                indexAwareTerm,
-                true, // isIndexAware = true
-              );
-
-              if (postingList && postingList.size() > 0) {
-                // Use the index-aware term directly for MongoDB storage
-                await this.persistentTermDictionary.saveTermPostings(
-                  indexAwareTerm, // Use full index-aware term
-                  postingList,
-                );
-                persistedCount++;
-                if (persistedCount <= 5) {
-                  this.logger.debug(
-                    `Persisted term ${indexAwareTerm} with ${postingList.size()} documents`,
-                  );
-                }
-              } else {
-                if (persistedCount <= 5) {
-                  this.logger.debug(
-                    `No posting list found for index-aware term: ${indexAwareTerm}`,
-                  );
-                }
-              }
-            } catch (error) {
-              this.logger.warn(`Failed to persist term ${indexAwareTerm}: ${error.message}`);
-            }
-          }),
-        );
-
-        // Log progress for large batches
-        if (indexAwareTerms.length > 1000) {
-          const progress = Math.min(i + batchSize, indexAwareTerms.length);
-          this.logger.debug(`Persisted ${progress}/${indexAwareTerms.length} terms to MongoDB`);
-        }
-      }
-
-      this.logger.log(
-        `Successfully persisted ${persistedCount} term postings to MongoDB for index: ${indexName}`,
-      );
-    } catch (error) {
-      this.logger.error(`Failed to persist term postings for index ${indexName}: ${error.message}`);
-      throw error;
-    }
+    await this.bulkIndexingService.queueBulkIndexing(indexName, documents, {
+      batchSize: 1000,
+      skipDuplicates: true,
+      enableProgress: true,
+      priority: 5,
+    });
   }
 
-  private parseIndexAwareTerm(indexAwareTerm: string): { fieldTerm: string } {
-    // Parse indexName:field:term format and return field:term
-    const parts = indexAwareTerm.split(':');
-    if (parts.length >= 3) {
-      // Skip the first part (indexName) and rejoin the rest as field:term
-      const fieldTerm = parts.slice(1).join(':');
-      return { fieldTerm };
+  private chunkArray<T>(array: T[], size: number): T[][] {
+    const chunks: T[][] = [];
+    for (let i = 0; i < array.length; i += size) {
+      chunks.push(array.slice(i, i + size));
     }
-    // Fallback if format is unexpected
-    return { fieldTerm: indexAwareTerm };
+    return chunks;
   }
 }

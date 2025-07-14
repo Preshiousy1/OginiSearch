@@ -1,73 +1,34 @@
 import { forwardRef, Module } from '@nestjs/common';
-import { ScheduleModule } from '@nestjs/schedule';
 import { IndexService } from './index.service';
-import { StorageModule } from '../storage/storage.module';
-import { AnalysisModule } from '../analysis/analysis.module';
-import { InMemoryTermDictionary } from './term-dictionary';
 import { IndexStatsService } from './index-stats.service';
-import { SimplePostingList } from './posting-list';
-import { CompressedPostingList } from './compressed-posting-list';
-import { RocksDBService } from '../storage/rocksdb/rocksdb.service';
 import { BM25Scorer } from './bm25-scorer';
+import { TermDictionary } from './term-dictionary';
+import { StorageModule } from '../storage/storage.module';
+import { PostgreSQLService } from '../storage/postgresql/postgresql.service';
 import { DocumentCountVerifierService } from './document-count-verifier.service';
-import { IndexStorageService } from '../storage/index-storage/index-storage.service';
-import { TermDictionary } from './interfaces/term-dictionary.interface';
-import { IndexStorage } from './interfaces/index-storage.interface';
+import { ScheduleModule } from '@nestjs/schedule';
+import { IndexingModule } from '../indexing/indexing.module';
 
 @Module({
-  imports: [
-    ScheduleModule.forRoot(),
-    forwardRef(() => StorageModule),
-    forwardRef(() => AnalysisModule),
-  ],
+  imports: [StorageModule, ScheduleModule.forRoot(), forwardRef(() => IndexingModule)],
   providers: [
+    IndexService,
+    IndexStatsService,
+    DocumentCountVerifierService,
+    PostgreSQLService,
     {
       provide: 'TERM_DICTIONARY',
-      useFactory: (rocksDBService: RocksDBService): TermDictionary =>
-        new InMemoryTermDictionary(
-          {
-            useCompression: false,
-            persistToDisk: true,
-            maxPostingListSize: 10000,
-          },
-          rocksDBService,
-        ),
-      inject: [RocksDBService],
+      useFactory: (postgresqlService: PostgreSQLService) =>
+        new TermDictionary({ persistToDisk: true }, postgresqlService),
+      inject: [PostgreSQLService],
     },
     {
-      provide: 'IndexStorage',
-      useExisting: IndexStorageService,
-    },
-    IndexService,
-    {
-      provide: IndexStatsService,
-      useFactory: (termDictionary: TermDictionary, indexStorage: IndexStorage) =>
-        new IndexStatsService(termDictionary, indexStorage),
-      inject: ['TERM_DICTIONARY', 'IndexStorage'],
-    },
-    {
-      provide: 'BM25_SCORER',
+      provide: BM25Scorer,
       useFactory: (indexStats: IndexStatsService) =>
-        new BM25Scorer(indexStats, {
-          k1: 1.2,
-          b: 0.75,
-          fieldWeights: { title: 3.0, body: 1.0, keywords: 2.0 },
-        }),
+        new BM25Scorer(indexStats, { k1: 1.2, b: 0.75 }),
       inject: [IndexStatsService],
     },
-    SimplePostingList,
-    CompressedPostingList,
-    DocumentCountVerifierService,
   ],
-  exports: [
-    'TERM_DICTIONARY',
-    'IndexStorage',
-    IndexStatsService,
-    'BM25_SCORER',
-    SimplePostingList,
-    CompressedPostingList,
-    IndexService,
-    DocumentCountVerifierService,
-  ],
+  exports: [IndexService, IndexStatsService, 'TERM_DICTIONARY'],
 })
 export class IndexModule {}

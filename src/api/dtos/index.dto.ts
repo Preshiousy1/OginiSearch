@@ -148,6 +148,13 @@ export class IndexResponseDto {
   name: string;
 
   @ApiProperty({
+    name: 'documentCount',
+    example: 100,
+    description: 'Number of documents in the index',
+  })
+  documentCount: number;
+
+  @ApiProperty({
     name: 'createdAt',
     example: '2021-01-01T00:00:00.000Z',
     description: 'Creation date',
@@ -155,11 +162,11 @@ export class IndexResponseDto {
   createdAt: Date;
 
   @ApiProperty({
-    name: 'documentCount',
-    example: 100,
-    description: 'Number of documents in the index',
+    name: 'updatedAt',
+    example: '2021-01-01T00:00:00.000Z',
+    description: 'Last update date',
   })
-  documentCount: number;
+  updatedAt: Date;
 
   @ApiProperty({
     name: 'settings',

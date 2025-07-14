@@ -11,17 +11,17 @@ services:
       - ogini-network
     ports:
       - '3000:3000'
-    volumes:
-      - rocksdb-data:/usr/src/app/data/rocksdb
     environment:
       - NODE_ENV=production
-      - MONGODB_URI=mongodb://mongodb:27017/ogini
-      - ROCKSDB_PATH=/usr/src/app/data/rocksdb
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=ogini_search_prod
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres}
       - REDIS_HOST=redis
       - REDIS_PORT=6379
-      - REDIS_DB=0
     depends_on:
-      mongodb:
+      postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
@@ -36,22 +36,50 @@ services:
       timeout: 5s
       retries: 3
 
-  mongodb:
-    image: mongo:7
+  postgres:
+    image: postgres:16-alpine
+    container_name: ogini-postgres-prod
     networks:
       - ogini-network
     volumes:
-      - mongodb-data:/data/db
+      - postgres-data:/var/lib/postgresql/data
+      - ./scripts/init-postgres.sql:/docker-entrypoint-initdb.d/init-postgres.sql
     environment:
-      - MONGO_INITDB_DATABASE=ogini
+      - POSTGRES_DB=ogini_search_prod
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres}
+      - POSTGRES_INITDB_ARGS=--encoding=UTF-8 --locale=C
+    command: >
+      postgres
+      -c shared_preload_libraries=pg_stat_statements
+      -c pg_stat_statements.track=all
+      -c max_connections=300
+      -c shared_buffers=512MB
+      -c effective_cache_size=2GB
+      -c maintenance_work_mem=128MB
+      -c checkpoint_completion_target=0.9
+      -c wal_buffers=32MB
+      -c default_statistics_target=100
+      -c random_page_cost=1.1
+      -c effective_io_concurrency=300
+      -c work_mem=8MB
+      -c min_wal_size=2GB
+      -c max_wal_size=8GB
+      -c log_min_duration_statement=1000
+      -c log_checkpoints=on
+      -c log_connections=on
+      -c log_disconnections=on
+      -c log_lock_waits=on
     healthcheck:
-      test: echo 'db.runCommand("ping").ok' | mongosh localhost:27017/ogini --quiet
+      test: ['CMD-SHELL', 'pg_isready -U postgres -d ogini_search_prod']
       interval: 10s
       timeout: 5s
       retries: 5
+      start_period: 10s
 
   redis:
     image: redis:7-alpine
+    container_name: ogini-redis-prod
     networks:
       - ogini-network
     volumes:
@@ -65,8 +93,7 @@ services:
       start_period: 5s
 
 volumes:
-  mongodb-data:
-  rocksdb-data:
+  postgres-data:
   redis-data:
 
 networks:

@@ -1,8 +1,12 @@
-import { PostingEntry, PostingList, TermDictionary } from './interfaces/posting.interface';
+import {
+  PostingEntry,
+  PostingList,
+  TermDictionary as ITermDictionary,
+} from './interfaces/posting.interface';
 import { SimplePostingList } from './posting-list';
 import { CompressedPostingList } from './compressed-posting-list';
 import { Injectable, Inject, Logger, OnModuleInit } from '@nestjs/common';
-import { RocksDBService } from '../storage/rocksdb/rocksdb.service';
+import { PostgreSQLService } from '../storage/postgresql/postgresql.service';
 
 const BATCH_SIZE = 100; // Reduced from 1000
 const TERM_PREFIX = 'term:';
@@ -18,6 +22,8 @@ export interface TermDictionaryOptions {
   maxCacheSize?: number;
   evictionThreshold?: number;
   maxPostingListSize?: number;
+  maxTerms?: number;
+  maxPostingsPerTerm?: number;
 }
 
 // Memory-optimized LRU Node
@@ -215,564 +221,149 @@ class MemoryOptimizedLRUCache {
 }
 
 @Injectable()
-export class InMemoryTermDictionary implements TermDictionary, OnModuleInit {
-  private lruCache: MemoryOptimizedLRUCache;
-  private options: TermDictionaryOptions;
-  private readonly logger = new Logger(InMemoryTermDictionary.name);
-  private rocksDBService?: RocksDBService;
-  private initialized = false;
-  private termList: Set<string> = new Set();
+export class TermDictionary implements ITermDictionary {
+  private readonly logger = new Logger(TermDictionary.name);
+  private readonly terms = new Set<string>();
+  private readonly postings = new Map<string, Map<string, number[]>>();
+  private readonly options: TermDictionaryOptions;
   private operationCount = 0;
-  private lastMemoryCheck = Date.now();
-  private memoryUsage = {
-    currentSize: 0,
-    maxSize: 0,
-    evictions: 0,
-    hits: 0,
-    misses: 0,
-    memoryPressureEvictions: 0,
-  };
+  private readonly postgresqlService?: PostgreSQLService;
 
-  constructor(options: TermDictionaryOptions = {}, rocksDBService?: RocksDBService) {
+  constructor(options: TermDictionaryOptions = {}, postgresqlService?: PostgreSQLService) {
     this.options = {
-      useCompression: true,
-      persistToDisk: true,
-      maxCacheSize: DEFAULT_MAX_CACHE_SIZE,
-      evictionThreshold: DEFAULT_EVICTION_THRESHOLD,
-      maxPostingListSize: MAX_POSTING_LIST_SIZE,
+      persistToDisk: false,
+      maxTerms: 1000000,
+      maxPostingsPerTerm: 100000,
       ...options,
     };
-    this.rocksDBService = rocksDBService;
-    this.lruCache = new MemoryOptimizedLRUCache(this.options.maxCacheSize!);
-
-    // Start aggressive memory monitoring
-    this.startMemoryMonitoring();
+    this.postgresqlService = postgresqlService;
   }
 
-  async onModuleInit() {
-    if (this.options.persistToDisk && this.rocksDBService) {
-      try {
-        await this.loadTermList();
-        this.initialized = true;
-      } catch (err) {
-        this.logger.warn(`Failed to load term list: ${err.message}`);
-        this.initialized = true;
-      }
-    } else {
-      this.initialized = true;
+  async initialize(): Promise<void> {
+    if (this.options.persistToDisk && this.postgresqlService) {
+      await this.loadTermsFromStorage();
     }
   }
 
-  private async loadTermList() {
-    if (!this.rocksDBService) return;
+  private async loadTermsFromStorage(): Promise<void> {
+    if (!this.postgresqlService) return;
 
     try {
-      const data = await this.rocksDBService.get(TERM_LIST_KEY);
-      if (data) {
-        let terms;
-
-        // Handle data based on its type
-        if (data.type === 'Buffer' && Array.isArray(data.data)) {
-          const buffer = Buffer.from(data.data);
-          terms = JSON.parse(buffer.toString());
-        } else if (typeof data === 'string') {
-          terms = JSON.parse(data);
-        } else if (Array.isArray(data)) {
-          terms = data;
-        } else {
-          terms = data;
-        }
-
-        if (Array.isArray(terms)) {
-          // Limit the number of terms loaded to prevent memory issues
-          const maxTermsToLoad = Math.min(terms.length, this.options.maxCacheSize! * 2);
-          this.termList = new Set(terms.slice(0, maxTermsToLoad));
-          this.logger.log(
-            `Loaded ${this.termList.size} terms from term list (limited from ${terms.length})`,
-          );
-        }
-      }
-    } catch (error) {
-      this.logger.error(`Error loading term list: ${error.message}`);
-    }
-  }
-
-  private async saveTermList() {
-    if (!this.rocksDBService) return;
-
-    try {
-      // Only save a limited number of terms to prevent memory issues
-      const termsArray = Array.from(this.termList).slice(0, this.options.maxCacheSize! * 2);
-      await this.rocksDBService.put(TERM_LIST_KEY, termsArray);
-    } catch (error) {
-      this.logger.error(`Error saving term list: ${error.message}`);
-    }
-  }
-
-  private getTermKey(term: string): string {
-    return `${TERM_PREFIX}${term}`;
-  }
-
-  private startMemoryMonitoring(): void {
-    setInterval(() => {
-      const memUsage = process.memoryUsage();
-      const heapUsedMB = memUsage.heapUsed / 1024 / 1024;
-
-      this.memoryUsage.currentSize = this.lruCache.size();
-      this.memoryUsage.maxSize = Math.max(this.memoryUsage.maxSize, this.memoryUsage.currentSize);
-
-      // Log memory stats every 30 seconds
-      const now = Date.now();
-      if (now - this.lastMemoryCheck > 30000) {
-        this.logger.debug(
-          `Memory stats - Terms: ${this.memoryUsage.currentSize}, ` +
-            `Hits: ${this.memoryUsage.hits}, Misses: ${this.memoryUsage.misses}, ` +
-            `Evictions: ${this.memoryUsage.evictions}, Heap: ${heapUsedMB.toFixed(1)}MB`,
-        );
-        this.lastMemoryCheck = now;
-      }
-    }, 5000); // Check every 5 seconds
-  }
-
-  private async persistTermToDisk(term: string, postingList: PostingList): Promise<void> {
-    if (!this.options.persistToDisk || !this.rocksDBService) return;
-
-    try {
-      const key = this.getTermKey(term);
-      const serialized = postingList.serialize();
-      await this.rocksDBService.put(key, serialized);
-    } catch (error) {
-      this.logger.error(`Failed to persist term ${term}: ${error.message}`);
-    }
-  }
-
-  private async loadTermFromDisk(term: string): Promise<PostingList | null> {
-    if (!this.options.persistToDisk || !this.rocksDBService) return null;
-
-    try {
-      const key = this.getTermKey(term);
-      const data = await this.rocksDBService.get(key);
-      if (!data) return null;
-
-      const postingList = this.options.useCompression
-        ? new CompressedPostingList()
-        : new SimplePostingList();
-
-      postingList.deserialize(data);
-      return postingList;
-    } catch (error) {
-      this.logger.error(`Failed to load term ${term} from disk: ${error.message}`);
-      return null;
-    }
-  }
-
-  /**
-   * Create an index-aware term key
-   */
-  private createIndexAwareTerm(indexName: string, term: string): string {
-    // If term already includes field (field:term), prepend index
-    if (term.includes(':')) {
-      return `${indexName}:${term}`;
-    }
-    // Otherwise create index:field:term format
-    return `${indexName}:_all:${term}`;
-  }
-
-  /**
-   * Parse an index-aware term back to its components
-   */
-  private parseIndexAwareTerm(indexAwareTerm: string): { indexName: string; fieldTerm: string } {
-    const parts = indexAwareTerm.split(':');
-    if (parts.length >= 2) {
-      const indexName = parts[0];
-      const fieldTerm = parts.slice(1).join(':');
-      return { indexName, fieldTerm };
-    }
-    throw new Error(`Invalid index-aware term format: ${indexAwareTerm}`);
-  }
-
-  /**
-   * Add term with index context
-   */
-  async addTermForIndex(indexName: string, term: string): Promise<PostingList> {
-    this.ensureInitialized();
-
-    const indexAwareTerm = this.createIndexAwareTerm(indexName, term);
-
-    // Add to term list
-    this.termList.add(indexAwareTerm);
-
-    // Save term list if persistence is enabled
-    if (this.options.persistToDisk && this.rocksDBService) {
-      await this.saveTermList();
-    }
-
-    // Get or create posting list
-    let postingList = this.lruCache.get(indexAwareTerm);
-    if (!postingList) {
-      postingList = this.options.useCompression
-        ? new CompressedPostingList()
-        : new SimplePostingList();
-      const evictedKeys = this.lruCache.put(indexAwareTerm, postingList);
-      // Handle evicted terms
-      for (const key of evictedKeys) {
-        if (this.options.persistToDisk && this.rocksDBService) {
-          await this.persistTermToDisk(key, postingList);
-        }
-      }
-    }
-
-    return postingList;
-  }
-
-  /**
-   * Get posting list for a specific index and term
-   * @param indexName - The name of the index
-   * @param term - The term to search for
-   * @param isIndexAware - Whether the term parameter is already index-aware (indexName:field:term format)
-   */
-  async getPostingListForIndex(
-    indexName: string,
-    term: string,
-    isIndexAware = false,
-  ): Promise<PostingList | undefined> {
-    this.ensureInitialized();
-
-    // Use the term as-is if it's already index-aware, otherwise make it index-aware
-    const indexAwareTerm = isIndexAware ? term : this.createIndexAwareTerm(indexName, term);
-
-    // Check cache first
-    let postingList = this.lruCache.get(indexAwareTerm);
-    if (postingList) {
-      this.memoryUsage.hits++;
-      return postingList;
-    }
-
-    this.memoryUsage.misses++;
-
-    // If not in cache and persistence is enabled, try loading from disk
-    if (this.options.persistToDisk && this.rocksDBService) {
-      postingList = await this.loadTermFromDisk(indexAwareTerm);
-      if (postingList) {
-        // Add to cache
-        const evictedKeys = this.lruCache.put(indexAwareTerm, postingList);
-        // Handle evicted terms
-        for (const key of evictedKeys) {
-          if (this.options.persistToDisk && this.rocksDBService) {
-            await this.persistTermToDisk(key, postingList);
-          }
-        }
-        return postingList;
-      }
-    }
-
-    // Not found
-    return undefined;
-  }
-
-  /**
-   * Get all terms for a specific index
-   */
-  getTermsForIndex(indexName: string): string[] {
-    const prefix = `${indexName}:`;
-    const indexTerms = Array.from(this.termList).filter(term => term.startsWith(prefix));
-
-    // Also check cache for recently accessed terms
-    const cacheKeys = this.lruCache.getKeysByIndex(indexName);
-
-    // Combine and deduplicate
-    const allTerms = new Set([...indexTerms, ...cacheKeys]);
-
-    // Return the full index-aware terms (indexName:field:term format)
-    return Array.from(allTerms);
-  }
-
-  /**
-   * Check if term exists for a specific index
-   */
-  hasTermForIndex(indexName: string, term: string): boolean {
-    const indexAwareTerm = this.createIndexAwareTerm(indexName, term);
-    return this.lruCache.has(indexAwareTerm) || this.termList.has(indexAwareTerm);
-  }
-
-  /**
-   * Add posting with index context
-   */
-  async addPostingForIndex(indexName: string, term: string, entry: PostingEntry): Promise<void> {
-    const postingList = await this.addTermForIndex(indexName, term);
-
-    // Check posting list size limit
-    if (postingList.size() >= this.options.maxPostingListSize!) {
-      this.logger.debug(
-        `Posting list for term '${term}' in index '${indexName}' has reached size limit (${this.options.maxPostingListSize}) - removing oldest entries`,
+      const result = await this.postgresqlService.query(
+        'SELECT term FROM term_dictionary WHERE term = ANY($1::text[])',
+        [Array.from(this.terms)],
       );
-      // Remove oldest entries to make room
-      const entries = postingList.getEntries();
-      const toRemove = entries.slice(0, Math.floor(this.options.maxPostingListSize! * 0.1));
-      toRemove.forEach(e => postingList.removeEntry(e.docId));
-    }
 
-    postingList.addEntry(entry);
-
-    // Persist periodically
-    if (this.options.persistToDisk && this.rocksDBService && this.operationCount % 50 === 0) {
-      try {
-        const indexAwareTerm = this.createIndexAwareTerm(indexName, term);
-        const serialized = postingList.serialize();
-        await this.rocksDBService.put(this.getTermKey(indexAwareTerm), serialized);
-      } catch (error) {
-        this.logger.error(
-          `Failed to persist postings for term ${term} in index ${indexName}: ${error.message}`,
-        );
-      }
-    }
-
-    this.operationCount++;
-  }
-
-  /**
-   * Clear all data for a specific index
-   */
-  async clearIndex(indexName: string): Promise<void> {
-    this.logger.log(`Clearing term dictionary for index: ${indexName}`);
-
-    try {
-      // Clear from cache
-      this.lruCache.clearIndex(indexName);
-
-      // Clear from term list
-      const prefix = `${indexName}:`;
-      const termsToRemove = Array.from(this.termList).filter(term => term.startsWith(prefix));
-      for (const term of termsToRemove) {
-        this.termList.delete(term);
-      }
-
-      // Clear from disk storage
-      if (this.options.persistToDisk && this.rocksDBService) {
-        for (const term of termsToRemove) {
-          try {
-            await this.rocksDBService.delete(this.getTermKey(term));
-          } catch (error) {
-            this.logger.warn(`Failed to delete term ${term} from disk: ${error.message}`);
-          }
-        }
-        await this.saveTermList();
-      }
-
-      this.logger.log(`Cleared ${termsToRemove.length} terms for index ${indexName}`);
-    } catch (error) {
-      this.logger.error(`Failed to clear index ${indexName}: ${error.message}`);
-      throw error;
-    }
-  }
-
-  private ensureInitialized() {
-    if (!this.initialized) {
-      throw new Error('TermDictionary not initialized. Call onModuleInit() first.');
-    }
-  }
-
-  serialize(): Buffer {
-    // Only serialize a limited subset to prevent memory issues
-    const limitedTerms = Array.from(this.termList).slice(0, 100);
-    const data = {
-      terms: limitedTerms,
-      cacheSize: this.lruCache.size(),
-      memoryUsage: this.memoryUsage,
-    };
-    return Buffer.from(JSON.stringify(data));
-  }
-
-  deserialize(data: Buffer | Record<string, any>): void {
-    try {
-      let parsed;
-      if (Buffer.isBuffer(data)) {
-        parsed = JSON.parse(data.toString());
-      } else {
-        parsed = data;
-      }
-
-      if (parsed.terms && Array.isArray(parsed.terms)) {
-        this.termList = new Set(parsed.terms);
-      }
-      if (parsed.memoryUsage) {
-        this.memoryUsage = { ...this.memoryUsage, ...parsed.memoryUsage };
+      for (const row of result.rows) {
+        this.terms.add(row.term);
       }
     } catch (error) {
-      this.logger.error(`Failed to deserialize term dictionary: ${error.message}`);
+      this.logger.error(`Failed to load terms from storage: ${error.message}`);
     }
   }
 
-  getTermStats(term: string): { term: string; docFreq: number } | undefined {
-    const postingList = this.lruCache.get(term);
-    if (!postingList) return undefined;
+  private async saveTermsToStorage(): Promise<void> {
+    if (!this.postgresqlService) return;
 
-    return {
-      term,
-      docFreq: postingList.size(),
-    };
-  }
-
-  getPostingLists(terms: string[]): Map<string, PostingList> {
-    const result = new Map<string, PostingList>();
-
-    // Limit the number of terms processed to prevent memory issues
-    const limitedTerms = terms.slice(0, 100);
-
-    for (const term of limitedTerms) {
-      const postingList = this.lruCache.get(term);
-      if (postingList) {
-        result.set(term, postingList);
-      }
+    try {
+      const termsArray = Array.from(this.terms);
+      await this.postgresqlService.query(
+        'INSERT INTO term_dictionary (term) VALUES (unnest($1::text[])) ON CONFLICT DO NOTHING',
+        [termsArray],
+      );
+    } catch (error) {
+      this.logger.error(`Failed to save terms to storage: ${error.message}`);
     }
-
-    return result;
   }
 
-  async saveToDisk(): Promise<void> {
-    if (!this.options.persistToDisk || !this.rocksDBService) {
+  async addTerm(term: string): Promise<void> {
+    if (this.terms.size >= this.options.maxTerms!) {
+      this.logger.warn(`Term dictionary full (${this.terms.size} terms)`);
       return;
     }
 
-    try {
-      // Save term list
-      await this.saveTermList();
+    this.terms.add(term);
+    this.operationCount++;
 
-      // Save only the most recently used terms to prevent memory issues
-      const entries = this.lruCache.entries().slice(0, 100);
-      await Promise.all(
-        entries.map(async ([term, postingList]) => {
-          const key = this.getTermKey(term);
-          const serialized = postingList.serialize();
-          await this.rocksDBService.put(key, serialized);
-        }),
+    if (this.options.persistToDisk && this.postgresqlService && this.operationCount % 50 === 0) {
+      await this.saveTermsToStorage();
+    }
+  }
+
+  async removeTerm(term: string): Promise<void> {
+    const wasInTermList = this.terms.delete(term);
+    this.postings.delete(term);
+
+    if (wasInTermList && this.options.persistToDisk && this.postgresqlService) {
+      await this.postgresqlService.query('DELETE FROM term_dictionary WHERE term = $1', [term]);
+    }
+  }
+
+  async addPosting(term: string, documentId: string, positions: number[]): Promise<void> {
+    if (!this.terms.has(term)) {
+      await this.addTerm(term);
+    }
+
+    let termPostings = this.postings.get(term);
+    if (!termPostings) {
+      termPostings = new Map();
+      this.postings.set(term, termPostings);
+    }
+
+    if (termPostings.size >= this.options.maxPostingsPerTerm!) {
+      this.logger.warn(`Postings list full for term "${term}" (${termPostings.size} postings)`);
+      return;
+    }
+
+    termPostings.set(documentId, positions);
+
+    if (this.options.persistToDisk && this.postgresqlService) {
+      await this.postgresqlService.query(
+        `INSERT INTO term_postings (term, document_id, positions)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (term, document_id) DO UPDATE SET positions = $3`,
+        [term, documentId, positions],
       );
-
-      this.logger.log(`Term dictionary saved to disk successfully (${entries.length} terms)`);
-    } catch (error) {
-      this.logger.error(`Failed to save term dictionary to disk: ${error.message}`);
-      throw error;
     }
   }
 
-  getMemoryStats() {
-    return {
-      ...this.memoryUsage,
-      termListSize: this.termList.size,
-      cacheSize: this.lruCache.size(),
-    };
-  }
+  async removePosting(term: string, documentId: string): Promise<void> {
+    const termPostings = this.postings.get(term);
+    if (!termPostings) return;
 
-  // Force cleanup method
-  async cleanup(): Promise<void> {
-    try {
-      // Save current state
-      await this.saveToDisk();
+    const removed = termPostings.delete(documentId);
 
-      // Clear caches
-      this.lruCache.clear();
-      this.termList.clear();
-
-      // Reset stats
-      this.memoryUsage = {
-        currentSize: 0,
-        maxSize: 0,
-        evictions: 0,
-        hits: 0,
-        misses: 0,
-        memoryPressureEvictions: 0,
-      };
-
-      // Force garbage collection
-      if (global.gc) {
-        global.gc();
-      }
-
-      this.logger.log('Term dictionary cleanup completed');
-    } catch (error) {
-      this.logger.error(`Failed to cleanup term dictionary: ${error.message}`);
-    }
-  }
-
-  // Implement the required clear() method from TermDictionary interface
-  async clear(): Promise<void> {
-    await this.cleanup();
-  }
-
-  // Legacy interface methods (kept for backward compatibility)
-  async addTerm(term: string): Promise<PostingList> {
-    // Use a default index for backward compatibility
-    return this.addTermForIndex('_default', term);
-  }
-
-  async getPostingList(term: string): Promise<PostingList | undefined> {
-    // Use a default index for backward compatibility
-    return this.getPostingListForIndex('_default', term);
-  }
-
-  hasTerm(term: string): boolean {
-    // Check in default index for backward compatibility
-    return this.hasTermForIndex('_default', term);
-  }
-
-  async removeTerm(term: string): Promise<boolean> {
-    this.ensureInitialized();
-
-    const indexAwareTerm = this.createIndexAwareTerm('_default', term);
-    const wasInCache = this.lruCache.delete(indexAwareTerm);
-    const wasInTermList = this.termList.delete(indexAwareTerm);
-
-    if (wasInTermList && this.options.persistToDisk && this.rocksDBService) {
-      try {
-        await this.rocksDBService.delete(this.getTermKey(indexAwareTerm));
-        await this.saveTermList();
-      } catch (error) {
-        this.logger.error(`Failed to remove term ${term} from storage: ${error.message}`);
-      }
+    if (removed && this.options.persistToDisk && this.postgresqlService) {
+      await this.postgresqlService.query(
+        'DELETE FROM term_postings WHERE term = $1 AND document_id = $2',
+        [term, documentId],
+      );
     }
 
-    return wasInCache || wasInTermList;
+    if (termPostings.size === 0) {
+      await this.removeTerm(term);
+    }
   }
 
   getTerms(): string[] {
-    this.ensureInitialized();
-    return Array.from(this.termList).map(term => {
-      // Ensure all terms have a field prefix
-      return term.includes(':') ? term : `_all:${term}`;
-    });
+    return Array.from(this.terms);
+  }
+
+  getPostings(term: string): Map<string, number[]> | undefined {
+    return this.postings.get(term);
+  }
+
+  hasPosting(term: string, documentId: string): boolean {
+    return this.postings.get(term)?.has(documentId) ?? false;
+  }
+
+  clear(): void {
+    this.terms.clear();
+    this.postings.clear();
   }
 
   size(): number {
-    return Math.min(this.termList.size, this.options.maxCacheSize! * 2);
-  }
-
-  async addPosting(term: string, entry: PostingEntry): Promise<void> {
-    return this.addPostingForIndex('_default', term, entry);
-  }
-
-  async removePosting(term: string, docId: number | string): Promise<boolean> {
-    const postingList = await this.getPostingList(term);
-    if (!postingList) {
-      return false;
-    }
-
-    const removed = postingList.removeEntry(docId);
-
-    if (removed && this.options.persistToDisk && this.rocksDBService) {
-      try {
-        if (postingList.size() === 0) {
-          await this.removeTerm(term);
-        } else {
-          const indexAwareTerm = this.createIndexAwareTerm('_default', term);
-          const serialized = postingList.serialize();
-          await this.rocksDBService.put(this.getTermKey(indexAwareTerm), serialized);
-        }
-      } catch (error) {
-        this.logger.error(`Failed to update postings for term ${term}: ${error.message}`);
-      }
-    }
-
-    return removed;
+    return this.terms.size;
   }
 }
 
