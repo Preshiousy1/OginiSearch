@@ -18,6 +18,12 @@ import { BulkIndexingModule } from './bulk-indexing.module';
         redis: {
           host: configService.get('REDIS_HOST', 'localhost'),
           port: configService.get('REDIS_PORT', 6379),
+          username: configService.get('REDIS_USERNAME', 'default'),
+          password: configService.get('REDIS_PASSWORD'),
+          family: 0,
+          maxRetriesPerRequest: 3,
+          enableReadyCheck: false,
+          lazyConnect: true,
         },
         defaultJobOptions: {
           removeOnComplete: 100,

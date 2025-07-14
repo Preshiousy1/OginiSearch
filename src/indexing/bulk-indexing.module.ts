@@ -29,7 +29,16 @@ import { IndexingModule } from './indexing.module';
       },
       redis: {
         host: process.env.REDIS_HOST || 'localhost',
-        port: parseInt(process.env.REDIS_PORT || '6379', 10),
+        port: parseInt(process.env.REDIS_PORT, 10) || 6379,
+        username: process.env.REDIS_USERNAME || 'default',
+        password: process.env.REDIS_PASSWORD || undefined,
+        // Connection pool settings for high throughput
+        maxRetriesPerRequest: 3,
+        enableReadyCheck: false,
+        lazyConnect: true,
+        // Connection pool
+        family: 0,
+        keepAlive: 1,
       },
       limiter: {
         max: 1000, // Maximum number of jobs processed within duration
