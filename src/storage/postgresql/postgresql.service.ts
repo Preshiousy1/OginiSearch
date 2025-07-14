@@ -179,6 +179,22 @@ export class PostgreSQLService implements OnModuleInit {
           -- Add missing indexes if they don't exist
           CREATE INDEX IF NOT EXISTS idx_documents_metadata ON documents USING GIN (metadata);
 
+          -- Ensure primary key constraint exists on documents table
+          DO $$
+          BEGIN
+              IF NOT EXISTS (
+                  SELECT 1 
+                  FROM information_schema.table_constraints 
+                  WHERE table_name = 'documents' 
+                  AND constraint_type = 'PRIMARY KEY'
+              ) THEN
+                  ALTER TABLE documents ADD CONSTRAINT documents_pkey PRIMARY KEY (document_id, index_name);
+                  RAISE NOTICE 'Added primary key constraint to documents table';
+              ELSE
+                  RAISE NOTICE 'Primary key constraint already exists on documents table';
+              END IF;
+          END $$;
+
           -- Update existing indices to have 'open' status if they don't have it
           UPDATE indices SET status = 'open' WHERE status IS NULL;
         `;
