@@ -5,6 +5,8 @@ import { SearchDocument } from './entities/search-document.entity';
 import { Document } from './entities/document.entity';
 import { SourceDocument } from '../document-storage/document-storage.service';
 import { chunk } from 'lodash';
+import * as fs from 'fs';
+import * as path from 'path';
 
 @Injectable()
 export class PostgreSQLService implements OnModuleInit {
@@ -20,6 +22,7 @@ export class PostgreSQLService implements OnModuleInit {
 
   async onModuleInit(): Promise<void> {
     await this.setupExtensions();
+    await this.ensureTablesExist();
     await this.setupIndexes();
   }
 
@@ -43,6 +46,67 @@ export class PostgreSQLService implements OnModuleInit {
       this.logger.log('PostgreSQL extensions setup completed');
     } catch (error) {
       this.logger.error(`Failed to setup PostgreSQL extensions: ${error.message}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Ensure required tables exist, create them if they don't
+   */
+  private async ensureTablesExist(): Promise<void> {
+    try {
+      this.logger.log('Checking if required tables exist...');
+
+      // Check if search_documents table exists
+      const tableExists = await this.dataSource.query(`
+        SELECT EXISTS (
+          SELECT FROM information_schema.tables 
+          WHERE table_schema = 'public' 
+          AND table_name = 'search_documents'
+        );
+      `);
+
+      if (!tableExists[0].exists) {
+        this.logger.log('Required tables do not exist, running initialization script...');
+
+        // Read and execute the init-postgres.sql file
+        await this.runInitScript();
+
+        this.logger.log('Database initialization completed successfully');
+      } else {
+        this.logger.log('Required tables already exist');
+      }
+    } catch (error) {
+      this.logger.error(`Failed to ensure tables exist: ${error.message}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Read and execute the init-postgres.sql script
+   */
+  private async runInitScript(): Promise<void> {
+    try {
+      // Read the init-postgres.sql file
+      const scriptPath = path.join(process.cwd(), 'scripts', 'init-postgres.sql');
+      const scriptContent = fs.readFileSync(scriptPath, 'utf8');
+
+      // Split the script into individual statements
+      const statements = scriptContent
+        .split(';')
+        .map(stmt => stmt.trim())
+        .filter(stmt => stmt.length > 0 && !stmt.startsWith('--'));
+
+      // Execute each statement
+      for (const statement of statements) {
+        if (statement.trim()) {
+          await this.dataSource.query(statement);
+        }
+      }
+
+      this.logger.log('Init script executed successfully');
+    } catch (error) {
+      this.logger.error(`Failed to execute init script: ${error.message}`);
       throw error;
     }
   }
