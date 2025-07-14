@@ -22,7 +22,7 @@ import { SchemaModule } from '../../schema/schema.module';
         username: configService.get<string>('POSTGRES_USER', 'postgres'),
         password: configService.get<string>('POSTGRES_PASSWORD'),
         entities: [Document, SearchDocument, Index],
-        synchronize: true, // Temporarily enable for table creation
+        synchronize: false, // Temporarily enable for table creation
         logging: false,
         ssl:
           configService.get<string>('NODE_ENV') === 'production'

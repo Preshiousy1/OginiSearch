@@ -160,6 +160,22 @@ export class PostgreSQLService implements OnModuleInit {
               END IF;
           END $$;
 
+          -- Add document_count column to indices table if it doesn't exist
+          DO $$
+          BEGIN
+              IF NOT EXISTS (
+                  SELECT 1 
+                  FROM information_schema.columns 
+                  WHERE table_name = 'indices' 
+                  AND column_name = 'document_count'
+              ) THEN
+                  ALTER TABLE indices ADD COLUMN document_count INTEGER NOT NULL DEFAULT 0;
+                  RAISE NOTICE 'Added document_count column to indices table';
+              ELSE
+                  RAISE NOTICE 'Document_count column already exists in indices table';
+              END IF;
+          END $$;
+
           -- Add missing indexes if they don't exist
           CREATE INDEX IF NOT EXISTS idx_documents_metadata ON documents USING GIN (metadata);
 
