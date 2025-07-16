@@ -43,22 +43,58 @@ END $$;
 -- Step 2: Add missing indexes if they don't exist
 CREATE INDEX IF NOT EXISTS idx_documents_metadata ON documents USING GIN (metadata);
 
--- Step 2.5: Ensure primary key constraint exists on documents table
+-- Step 2.5: Ensure composite primary key constraint exists on documents table
 DO $$
+DECLARE
+    pk_name text;
+    single_pk_name text;
 BEGIN
-    -- Check if the primary key constraint exists
-    IF NOT EXISTS (
-        SELECT 1 
-        FROM information_schema.table_constraints 
-        WHERE table_name = 'documents' 
-        AND constraint_type = 'PRIMARY KEY'
-    ) THEN
-        -- Add the primary key constraint
+    -- Find if a single-column primary key exists on document_id
+    SELECT tc.constraint_name INTO single_pk_name
+    FROM information_schema.table_constraints tc
+    JOIN information_schema.key_column_usage kcu
+      ON tc.constraint_name = kcu.constraint_name
+    WHERE tc.table_name = 'documents'
+      AND tc.constraint_type = 'PRIMARY KEY'
+      AND (
+        SELECT COUNT(*) FROM information_schema.key_column_usage kcu2
+        WHERE kcu2.constraint_name = tc.constraint_name
+      ) = 1
+      AND kcu.column_name = 'document_id';
+
+    -- Drop single-column PK if it exists
+    IF single_pk_name IS NOT NULL THEN
+        EXECUTE format('ALTER TABLE documents DROP CONSTRAINT %I', single_pk_name);
+        RAISE NOTICE 'Dropped single-column primary key constraint on document_id';
+    END IF;
+
+    -- Check if composite PK exists
+    SELECT tc.constraint_name INTO pk_name
+    FROM information_schema.table_constraints tc
+    JOIN information_schema.key_column_usage kcu
+      ON tc.constraint_name = kcu.constraint_name
+    WHERE tc.table_name = 'documents'
+      AND tc.constraint_type = 'PRIMARY KEY'
+      AND (
+        SELECT COUNT(*) FROM information_schema.key_column_usage kcu2
+        WHERE kcu2.constraint_name = tc.constraint_name
+      ) = 2
+      AND EXISTS (
+        SELECT 1 FROM information_schema.key_column_usage kcu3
+        WHERE kcu3.constraint_name = tc.constraint_name AND kcu3.column_name = 'document_id'
+      )
+      AND EXISTS (
+        SELECT 1 FROM information_schema.key_column_usage kcu4
+        WHERE kcu4.constraint_name = tc.constraint_name AND kcu4.column_name = 'index_name'
+      );
+
+    -- Add composite PK if not present
+    IF pk_name IS NULL THEN
         ALTER TABLE documents ADD CONSTRAINT documents_pkey PRIMARY KEY (document_id, index_name);
 
-RAISE NOTICE 'Added primary key constraint to documents table';
+RAISE NOTICE 'Added composite primary key (document_id, index_name) to documents table';
 
-ELSE RAISE NOTICE 'Primary key constraint already exists on documents table';
+ELSE RAISE NOTICE 'Composite primary key already exists on documents table';
 
 END IF;
 

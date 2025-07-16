@@ -8,8 +8,7 @@ export class Document {
   })
   documentId: string;
 
-  @Index()
-  @Column({
+  @PrimaryColumn({
     name: 'index_name',
     transformer: { from: value => value, to: value => value },
   })
