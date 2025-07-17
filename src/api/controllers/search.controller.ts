@@ -318,6 +318,8 @@ export class SearchController {
       throw new BadRequestException('Search query is required');
     }
 
+    console.log('search payload', searchDto);
+
     // Convert to appropriate SearchQueryDto format if necessary
     // This handles both string and object formats for backward compatibility
     if (typeof searchDto.query === 'string') {

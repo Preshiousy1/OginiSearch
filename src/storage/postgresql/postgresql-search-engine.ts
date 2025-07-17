@@ -840,7 +840,7 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
     if (searchQuery.filter) {
       const filterSql = this.buildFilterConditions(searchQuery.filter, params, paramIndex);
       sql += filterSql;
-      // Update paramIndex based on the number of parameters added
+      // Update paramIndex based on the number of parameters added by the filter
       paramIndex = params.length + 1;
     }
 
@@ -853,6 +853,9 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
       ORDER BY score DESC, document_id
       LIMIT $${params.length - 1} OFFSET $${params.length}`;
 
+    this.logger.debug(`Final SQL: ${sql}`);
+    this.logger.debug(`Final params: ${JSON.stringify(params)}`);
+
     return { sql, params };
   }
 
@@ -860,29 +863,73 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
     let sql = '';
     let paramIndex = startIndex;
 
-    if (filter.term) {
-      const [field, value] = Object.entries(filter.term)[0];
-      if (Array.isArray(value)) {
-        sql += ` AND d.metadata->>'${field}' = ANY($${paramIndex}::text[])`;
-        params.push(value);
-        paramIndex++;
-      } else {
-        sql += ` AND d.metadata->>'${field}' = $${paramIndex}`;
-        params.push(value);
-        paramIndex++;
+    // Handle bool filters with must/should/must_not clauses
+    if (filter.bool) {
+      const boolClauses: string[] = [];
+
+      // Process MUST clauses (AND conditions)
+      if (filter.bool.must && Array.isArray(filter.bool.must)) {
+        for (const mustClause of filter.bool.must) {
+          const clauseSql = this.buildSingleFilterClause(mustClause, params, paramIndex);
+          if (clauseSql) {
+            boolClauses.push(clauseSql.sql);
+            paramIndex = clauseSql.nextParamIndex;
+          }
+        }
+      }
+
+      // Process SHOULD clauses (OR conditions)
+      if (filter.bool.should && Array.isArray(filter.bool.should)) {
+        const shouldClauses: string[] = [];
+        for (const shouldClause of filter.bool.should) {
+          const clauseSql = this.buildSingleFilterClause(shouldClause, params, paramIndex);
+          if (clauseSql) {
+            shouldClauses.push(clauseSql.sql);
+            paramIndex = clauseSql.nextParamIndex;
+          }
+        }
+        if (shouldClauses.length > 0) {
+          boolClauses.push(`(${shouldClauses.join(' OR ')})`);
+        }
+      }
+
+      // Process MUST_NOT clauses (NOT conditions)
+      if (filter.bool.must_not && Array.isArray(filter.bool.must_not)) {
+        for (const mustNotClause of filter.bool.must_not) {
+          const clauseSql = this.buildSingleFilterClause(mustNotClause, params, paramIndex);
+          if (clauseSql) {
+            boolClauses.push(`NOT (${clauseSql.sql})`);
+            paramIndex = clauseSql.nextParamIndex;
+          }
+        }
+      }
+
+      // Combine all bool clauses with AND
+      if (boolClauses.length > 0) {
+        sql += ` AND (${boolClauses.join(' AND ')})`;
       }
     }
 
+    // Handle simple term filters (backward compatibility)
+    if (filter.term) {
+      const clauseSql = this.buildSingleFilterClause({ term: filter.term }, params, paramIndex);
+      if (clauseSql) {
+        sql += ` AND ${clauseSql.sql}`;
+        paramIndex = clauseSql.nextParamIndex;
+      }
+    }
+
+    // Handle range filters
     if (filter.range) {
       Object.entries(filter.range).forEach(([field, conditions]) => {
         Object.entries(conditions as any).forEach(([op, value]) => {
           const operator = this.getRangeOperator(op);
-          if (field === 'createdAt' || field === 'updatedAt') {
-            sql += ` AND (d.metadata->>'${field}')::timestamp ${operator} $${paramIndex}::timestamp`;
-          } else if (typeof value === 'number') {
-            sql += ` AND (d.metadata->>'${field}')::numeric ${operator} $${paramIndex}::numeric`;
+          const fieldSql = this.getFieldReference(field);
+
+          if (typeof value === 'number') {
+            sql += ` AND (${fieldSql})::numeric ${operator} $${paramIndex}::numeric`;
           } else {
-            sql += ` AND d.metadata->>'${field}' ${operator} $${paramIndex}`;
+            sql += ` AND ${fieldSql} ${operator} $${paramIndex}`;
           }
           params.push(value);
           paramIndex++;
@@ -891,6 +938,162 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
     }
 
     return sql;
+  }
+
+  /**
+   * Build a single filter clause (term, range, etc.)
+   */
+  private buildSingleFilterClause(
+    clause: any,
+    params: any[],
+    paramIndex: number,
+  ): { sql: string; nextParamIndex: number } | null {
+    if (clause.term) {
+      return this.buildTermClause(clause.term, params, paramIndex);
+    }
+    if (clause.range) {
+      return this.buildRangeClause(clause.range, params, paramIndex);
+    }
+    if (clause.match) {
+      return this.buildMatchClause(clause.match, params, paramIndex);
+    }
+    return null;
+  }
+
+  /**
+   * Build a term clause
+   */
+  private buildTermClause(
+    term: any,
+    params: any[],
+    paramIndex: number,
+  ): { sql: string; nextParamIndex: number } {
+    let sql = '';
+    let nextParamIndex = paramIndex;
+
+    // Handle nested term structure: { field: 'fieldName', value: 'fieldValue' }
+    if (term.field && term.value !== undefined) {
+      const field = term.field;
+      const value = term.value;
+      const fieldSql = this.getFieldReference(field);
+
+      if (Array.isArray(value)) {
+        sql = `${fieldSql} = ANY($${paramIndex}::text[])`;
+        params.push(value);
+      } else {
+        sql = `${fieldSql} = $${paramIndex}`;
+        params.push(value);
+      }
+      nextParamIndex = paramIndex + 1;
+    } else {
+      // Handle flat structure: { fieldName: 'fieldValue' }
+      const [field, value] = Object.entries(term)[0];
+      const fieldSql = this.getFieldReference(field);
+
+      if (Array.isArray(value)) {
+        sql = `${fieldSql} = ANY($${paramIndex}::text[])`;
+        params.push(value);
+      } else {
+        sql = `${fieldSql} = $${paramIndex}`;
+        params.push(value);
+      }
+      nextParamIndex = paramIndex + 1;
+    }
+
+    return { sql, nextParamIndex };
+  }
+
+  /**
+   * Build a range clause
+   */
+  private buildRangeClause(
+    range: any,
+    params: any[],
+    paramIndex: number,
+  ): { sql: string; nextParamIndex: number } {
+    const clauses: string[] = [];
+    let nextParamIndex = paramIndex;
+
+    Object.entries(range).forEach(([field, conditions]) => {
+      Object.entries(conditions as any).forEach(([op, value]) => {
+        const operator = this.getRangeOperator(op);
+        const fieldSql = this.getFieldReference(field);
+
+        if (typeof value === 'number') {
+          clauses.push(`(${fieldSql})::numeric ${operator} $${nextParamIndex}::numeric`);
+        } else {
+          clauses.push(`${fieldSql} ${operator} $${nextParamIndex}`);
+        }
+        params.push(value);
+        nextParamIndex++;
+      });
+    });
+
+    return { sql: clauses.join(' AND '), nextParamIndex };
+  }
+
+  /**
+   * Build a match clause
+   */
+  private buildMatchClause(
+    match: any,
+    params: any[],
+    paramIndex: number,
+  ): { sql: string; nextParamIndex: number } {
+    const field = match.field || 'content';
+    const value = match.value;
+    const fieldSql = this.getFieldReference(field);
+
+    const sql = `${fieldSql} ILIKE '%' || $${paramIndex} || '%'`;
+    params.push(value);
+
+    return { sql, nextParamIndex: paramIndex + 1 };
+  }
+
+  /**
+   * Determine whether a field should be referenced from content or metadata
+   */
+  private getFieldReference(field: string): string {
+    // Fields that are typically stored in content (document data)
+    const contentFields = [
+      'name',
+      'title',
+      'description',
+      'category_name',
+      'sub_category_name',
+      'is_active',
+      'is_verified',
+      'is_blocked',
+      'is_featured',
+      'price',
+      'id_number',
+      'slug',
+      'tags',
+      'business_name',
+      'property_end_date',
+      'property_start_date',
+      'property_discounted_price',
+    ];
+
+    // Fields that are typically stored in metadata (system/processing data)
+    const metadataFields = [
+      'index_name',
+      'document_id',
+      'created_at',
+      'updated_at',
+      'processing_status',
+      'index_version',
+      'search_vector',
+    ];
+
+    if (contentFields.includes(field)) {
+      return `d.content->>'${field}'`;
+    } else if (metadataFields.includes(field)) {
+      return `d.metadata->>'${field}'`;
+    } else {
+      // Default to content for unknown fields
+      return `d.content->>'${field}'`;
+    }
   }
 
   private isWildcardPattern(value: string): boolean {
