@@ -11,7 +11,12 @@ import { PostgreSQLAnalysisAdapter } from './postgresql-analysis.adapter';
 import { SearchDocument } from './entities/search-document.entity';
 import { QueryProcessorService } from '../../search/query-processor.service';
 import { IndexConfig } from '../../common/interfaces/index.interface';
-import { SearchQueryDto, SearchResponseDto, SuggestQueryDto } from '../../api/dtos/search.dto';
+import {
+  SearchQueryDto,
+  SearchResponseDto,
+  SuggestQueryDto,
+  SuggestionResultDto,
+} from '../../api/dtos/search.dto';
 import { CreateIndexDto, IndexResponseDto } from '../../api/dtos/index.dto';
 import { RawQuery } from '../../search/interfaces/query-processor.interface';
 import { SearchEngine } from '../../search/interfaces/search-engine.interface';
@@ -133,7 +138,7 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
   /**
    * Get suggestions for autocomplete using PostgreSQL
    */
-  async suggest(indexName: string, suggestQuery: SuggestQueryDto): Promise<string[]> {
+  async suggest(indexName: string, suggestQuery: SuggestQueryDto): Promise<SuggestionResultDto[]> {
     this.logger.log(`PostgreSQL suggestions in index ${indexName} for: ${suggestQuery.text}`);
 
     try {
@@ -143,12 +148,15 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
 
       // First try prefix matching (most relevant)
       const prefixQuery = `
-        SELECT DISTINCT d.content->>'${field}' as suggestion
+        SELECT DISTINCT ON (d.content->>'${field}')
+          d.content->>'${field}' as suggestion,
+          d.document_id as id,
+          d.content->>'category_name' as category
         FROM documents d
         WHERE d.index_name = $1 
           AND d.content->>'${field}' IS NOT NULL
           AND d.content->>'${field}' ILIKE $2
-        ORDER BY d.content->>'${field}'
+        ORDER BY d.content->>'${field}', d.document_id
         LIMIT $3`;
 
       let results = await this.dataSource.query(prefixQuery, [indexName, `${text}%`, size]);
@@ -156,21 +164,28 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
       // If no prefix matches, try substring matching
       if (results.length === 0) {
         const substringQuery = `
-          SELECT DISTINCT d.content->>'${field}' as suggestion
+          SELECT DISTINCT ON (d.content->>'${field}')
+            d.content->>'${field}' as suggestion,
+            d.document_id as id,
+            d.content->>'category_name' as category
           FROM documents d
           WHERE d.index_name = $1 
             AND d.content->>'${field}' IS NOT NULL
             AND d.content->>'${field}' ILIKE $2
-          ORDER BY d.content->>'${field}'
+          ORDER BY d.content->>'${field}', d.document_id
           LIMIT $3`;
         results = await this.dataSource.query(substringQuery, [indexName, `%${text}%`, size]);
       }
 
       // Filter and format results
       return results
-        .map(row => row.suggestion)
-        .filter(suggestion => suggestion && suggestion.toLowerCase().includes(text.toLowerCase()))
-        .slice(0, size);
+        .filter(row => row.suggestion && row.suggestion.toLowerCase().includes(text.toLowerCase()))
+        .slice(0, size)
+        .map(row => ({
+          text: row.suggestion,
+          id: row.id,
+          category: row.category,
+        }));
     } catch (error) {
       this.logger.error(`PostgreSQL suggestions error: ${error.message}`);
       throw error; // Let the controller handle the error
