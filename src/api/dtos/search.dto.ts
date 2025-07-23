@@ -347,17 +347,28 @@ export class SuggestQueryDto {
   size?: number;
 }
 
+export class SuggestionResultDto {
+  @ApiProperty({ description: 'Suggestion text', example: 'Director A mola B.A' })
+  text: string;
+
+  @ApiProperty({ description: 'Document ID', example: '123' })
+  id: string;
+
+  @ApiProperty({ description: 'Category', example: 'Business', required: false })
+  category?: string;
+}
+
 export class SuggestResponseDto {
   @ApiProperty({
     name: 'suggestions',
-    example: [{ text: 'John', score: 1.0, freq: 10 }],
+    example: [
+      { text: 'John', id: '123', category: 'Business' },
+      { text: 'Jane', id: '456', category: 'Deals' },
+    ],
     description: 'Suggestions',
+    type: [SuggestionResultDto],
   })
-  suggestions: Array<{
-    text: string;
-    score: number;
-    freq: number;
-  }>;
+  suggestions: SuggestionResultDto[];
 
   @ApiProperty({
     name: 'took',

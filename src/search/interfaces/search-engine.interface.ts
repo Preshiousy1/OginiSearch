@@ -1,4 +1,9 @@
-import { SearchQueryDto, SuggestQueryDto, SearchResponseDto } from '../../api/dtos/search.dto';
+import {
+  SearchQueryDto,
+  SuggestQueryDto,
+  SearchResponseDto,
+  SuggestionResultDto,
+} from '../../api/dtos/search.dto';
 import { CreateIndexDto, IndexResponseDto } from '../../api/dtos/index.dto';
 
 /**
@@ -14,7 +19,7 @@ export interface SearchEngine {
   /**
    * Get suggestions for autocomplete
    */
-  suggest(indexName: string, suggestQuery: SuggestQueryDto): Promise<string[]>;
+  suggest(indexName: string, suggestQuery: SuggestQueryDto): Promise<SuggestionResultDto[]>;
 
   /**
    * Create a new index
