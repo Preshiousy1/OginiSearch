@@ -2,7 +2,12 @@ import { Injectable, Logger } from '@nestjs/common';
 import { DataSource } from 'typeorm';
 import { QueryProcessorService } from './query-processor.service';
 import { SearchExecutorService } from './search-executor.service';
-import { SearchQueryDto, SearchResponseDto, SuggestQueryDto } from '../api/dtos/search.dto';
+import {
+  SearchQueryDto,
+  SearchResponseDto,
+  SuggestQueryDto,
+  SuggestionResultDto,
+} from '../api/dtos/search.dto';
 import { PostgreSQLSearchEngine } from '../storage/postgresql/postgresql-search-engine';
 
 @Injectable()
@@ -290,7 +295,7 @@ export class SearchService {
   /**
    * Get suggestions using PostgreSQL search engine
    */
-  async suggest(indexName: string, suggestQuery: SuggestQueryDto): Promise<string[]> {
+  async suggest(indexName: string, suggestQuery: SuggestQueryDto): Promise<SuggestionResultDto[]> {
     this.logger.debug(`Getting suggestions for ${suggestQuery.text} in index ${indexName}`);
     return this.postgresSearchEngine.suggest(indexName, suggestQuery);
   }
