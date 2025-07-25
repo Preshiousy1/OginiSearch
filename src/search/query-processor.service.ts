@@ -293,9 +293,17 @@ export class QueryProcessorService implements QueryProcessor {
    * Extract query text and fields from raw query
    */
   private extractQueryTextAndFields(rawQuery: RawQuery): { text: string; fields: string[] } {
+    // Helper to strip boost from field name
+    const stripBoost = (field: string) => field.split('^')[0];
+    // Helper to normalize fields to string[]
+    const normalizeFields = (fields: unknown): string[] => {
+      if (Array.isArray(fields)) return fields.map(f => String(f));
+      if (typeof fields === 'string') return [fields];
+      return ['_all'];
+    };
     // Handle string queries
     if (typeof rawQuery.query === 'string') {
-      return { text: rawQuery.query, fields: rawQuery.fields || ['_all'] };
+      return { text: rawQuery.query, fields: normalizeFields(rawQuery.fields).map(stripBoost) };
     }
 
     // Handle object queries
@@ -303,7 +311,7 @@ export class QueryProcessorService implements QueryProcessor {
       const field = rawQuery.query.match.field;
       return {
         text: rawQuery.query.match.value,
-        fields: field ? [field] : rawQuery.fields || ['_all'],
+        fields: field ? [stripBoost(field)] : normalizeFields(rawQuery.fields).map(stripBoost),
       };
     }
 
@@ -317,7 +325,7 @@ export class QueryProcessorService implements QueryProcessor {
           typeof value === 'object' && value !== null && 'value' in value
             ? String((value as any).value)
             : String(value);
-        return { text: termValue, fields: [field] };
+        return { text: termValue, fields: [stripBoost(field)] };
       }
     }
 
@@ -331,7 +339,7 @@ export class QueryProcessorService implements QueryProcessor {
       ) {
         return {
           text: rawQuery.query.wildcard.value,
-          fields: [rawQuery.query.wildcard.field],
+          fields: [stripBoost(rawQuery.query.wildcard.field)],
         };
       }
       // Handle field-specific format: {"title": {"value": "client*"}}
@@ -345,7 +353,7 @@ export class QueryProcessorService implements QueryProcessor {
           const wildcardValue = typeof config === 'string' ? config : (config as any).value;
           return {
             text: wildcardValue,
-            fields: [field],
+            fields: [stripBoost(field)],
           };
         }
       }
@@ -353,30 +361,25 @@ export class QueryProcessorService implements QueryProcessor {
       else if (typeof rawQuery.query.wildcard === 'string') {
         return {
           text: rawQuery.query.wildcard,
-          fields: rawQuery.fields || ['_all'],
+          fields: normalizeFields(rawQuery.fields).map(stripBoost),
         };
       }
     }
 
     // Handle match-all queries
     if (rawQuery.query?.match_all) {
-      return { text: '*', fields: rawQuery.fields || ['_all'] };
+      return { text: '*', fields: normalizeFields(rawQuery.fields).map(stripBoost) };
     }
 
     // Handle new format
     if (rawQuery.value !== undefined) {
       const text = typeof rawQuery.value === 'string' ? rawQuery.value : '';
-      const fields = Array.isArray(rawQuery.fields)
-        ? rawQuery.fields
-        : typeof rawQuery.fields === 'string'
-        ? [rawQuery.fields]
-        : rawQuery.fields || ['_all'];
-
+      const fields = normalizeFields(rawQuery.fields).map(stripBoost);
       return { text, fields };
     }
 
     // Default to empty query if none of the above formats match
-    return { text: '', fields: rawQuery.fields || ['_all'] };
+    return { text: '', fields: normalizeFields(rawQuery.fields).map(stripBoost) };
   }
 
   /**
