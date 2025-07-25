@@ -28,7 +28,7 @@ async function testPostgreSQLConnection() {
     console.log('✅ Connected successfully!');
 
     console.log('\n🏗️  Checking database structure...');
-    
+
     // Check if search_documents table exists
     const tableExists = await dataSource.query(`
       SELECT EXISTS (
@@ -51,7 +51,9 @@ async function testPostgreSQLConnection() {
 
       console.log('\n📋 Table Structure:');
       tableInfo.forEach((col: any) => {
-        console.log(`   ${col.column_name}: ${col.data_type} ${col.is_nullable === 'NO' ? '(NOT NULL)' : ''}`);
+        console.log(
+          `   ${col.column_name}: ${col.data_type} ${col.is_nullable === 'NO' ? '(NOT NULL)' : ''}`,
+        );
       });
 
       // Check indexes
@@ -88,21 +90,19 @@ async function testPostgreSQLConnection() {
       console.log('\n📊 Current Data:');
       console.log(`   Documents: ${documentCount[0].total_documents}`);
       console.log(`   Indices: ${documentCount[0].total_indices}`);
-
     } else {
       console.log('❌ search_documents table does not exist');
       console.log('💡 Run: npm run setup:postgresql');
     }
 
     console.log('\n🎉 PostgreSQL is ready for Ogini Search Engine!');
-
   } catch (error) {
     console.error('❌ Connection failed:', error.message);
     console.log('\n💡 Troubleshooting:');
     console.log('   1. Make sure PostgreSQL is running');
     console.log('   2. Check your environment variables');
     console.log('   3. Run: npm run setup:postgresql');
-    
+
     process.exit(1);
   } finally {
     if (dataSource.isInitialized) {
