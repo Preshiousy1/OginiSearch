@@ -106,26 +106,32 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
     };
 
     try {
-      // Build the search query
-      const { sql, params } = await this.buildSearchQuery(indexName, searchQuery);
+      // Convert search query to tsquery for PostgreSQL full-text search
+      let tsquery = '';
+      if (typeof searchQuery.query === 'string') {
+        tsquery = searchQuery.query;
+      } else if (searchQuery.query?.match?.value) {
+        tsquery = searchQuery.query.match.value;
+      } else if (searchQuery.query?.wildcard?.value) {
+        const wildcardValue = searchQuery.query.wildcard.value;
+        tsquery = typeof wildcardValue === 'string' ? wildcardValue : wildcardValue.value;
+      }
 
-      // Log the SQL query and parameters for debugging
-      this.logger.debug('Generated SQL:', { sql, params });
-
-      // Execute the search query
-      const result = await this.dataSource.query(sql, params);
+      // Use the new executeSearch method with proper ranking
+      const searchResult = await this.executeSearch(indexName, tsquery, searchQuery);
 
       metrics.execution = Date.now() - startTime;
       metrics.total = metrics.execution;
 
       return {
         data: {
-          hits: result.map((row: any) => ({
-            id: row.document_id,
-            score: row.score,
-            document: row.content,
+          hits: searchResult.hits.map(hit => ({
+            id: hit.id,
+            score: hit.score,
+            source: hit.document,
           })),
-          total: result.length,
+          total: searchResult.totalHits,
+          maxScore: searchResult.maxScore,
         },
         metrics,
       };
@@ -504,61 +510,28 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
   /**
    * Convert search query to PostgreSQL tsquery
    */
-  private convertToTsQuery(searchQuery: SearchQueryDto): string {
-    if (typeof searchQuery.query === 'string') {
-      return searchQuery.query.split(/\s+/).join(' & ');
+  private convertToTsQuery(searchTerms: string): string {
+    if (!searchTerms || searchTerms.trim() === '') {
+      return '';
     }
 
-    const query = searchQuery.query;
+    // Split into individual terms and clean them
+    const terms = searchTerms
+      .split(/\s+/)
+      .map(term => term.toLowerCase().replace(/[^\w]/g, ''))
+      .filter(term => term.length > 0);
 
-    // Handle match query
-    if (query.match?.field && query.match.value) {
-      return query.match.value.split(/\s+/).join(' & ');
+    if (terms.length === 0) {
+      return '';
     }
 
-    // Handle term query
-    if (query.term?.field && query.term.value) {
-      return query.term.value;
+    // Create a simple OR query for multiple terms
+    if (terms.length === 1) {
+      return terms[0];
     }
 
-    // Handle boolean query
-    if (query.bool) {
-      const conditions: string[] = [];
-
-      if (query.bool.must) {
-        const mustConditions = query.bool.must.map(q => this.convertToTsQuery({ query: q }));
-        conditions.push(`(${mustConditions.join(' & ')})`);
-      }
-
-      if (query.bool.should) {
-        const shouldConditions = query.bool.should.map(q => this.convertToTsQuery({ query: q }));
-        conditions.push(`(${shouldConditions.join(' | ')})`);
-      }
-
-      if (query.bool.must_not) {
-        const mustNotConditions = query.bool.must_not.map(
-          q => `!(${this.convertToTsQuery({ query: q })})`,
-        );
-        conditions.push(...mustNotConditions);
-      }
-
-      return conditions.join(' & ');
-    }
-
-    // Handle range query
-    if (query.range?.field) {
-      const { field, gt, gte, lt, lte } = query.range;
-      const conditions: string[] = [];
-
-      if (gt !== undefined) conditions.push(`${field} > ${gt}`);
-      if (gte !== undefined) conditions.push(`${field} >= ${gte}`);
-      if (lt !== undefined) conditions.push(`${field} < ${lt}`);
-      if (lte !== undefined) conditions.push(`${field} <= ${lte}`);
-
-      return conditions.join(' & ');
-    }
-
-    return '';
+    // For multiple terms, create an OR query
+    return terms.join(' | ');
   }
 
   /**
@@ -573,105 +546,149 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
     maxScore: number;
     hits: Array<{ id: string; score: number; document: Record<string, any> }>;
   }> {
-    const { from = 0, size = 10 } = searchQuery;
+    const { from = 0, size = 10, sort } = searchQuery;
     const query = searchQuery.query;
 
-    // Base query parts
-    let whereClause = 'sd.index_name = $1';
+    // Business ranking configuration
+    const businessRankingFields = {
+      has_featured_model: { weight: 1000, type: 'boolean' },
+      is_confirmed: { weight: 500, type: 'boolean' },
+      is_verified: { weight: 300, type: 'boolean' },
+      is_active: { weight: 200, type: 'boolean' },
+      health: { weight: 100, type: 'numeric' },
+      updated_at: { weight: 50, type: 'date' },
+    };
+
+    // Build ranking score calculation
+    const businessRankingParts = [];
+    for (const [field, config] of Object.entries(businessRankingFields)) {
+      if (config.type === 'boolean') {
+        businessRankingParts.push(
+          `(CASE WHEN d.content->>'${field}' = 'true' THEN ${config.weight} ELSE 0 END)`,
+        );
+      } else if (config.type === 'numeric') {
+        businessRankingParts.push(
+          `(COALESCE((d.content->>'${field}')::numeric, 0) * ${config.weight / 100})`,
+        );
+      } else if (config.type === 'date') {
+        businessRankingParts.push(
+          `(EXTRACT(EPOCH FROM (d.content->>'${field}')::timestamp) * ${config.weight / 1000000})`,
+        );
+      }
+    }
+
+    // Build the SQL query
     const params: any[] = [indexName];
-    let paramIndex = 2;
+    let paramIndex = 2; // Start from $2 since $1 is indexName
 
-    // Handle text search
-    if (tsquery && tsquery.trim() !== '') {
-      whereClause += ` AND sd.search_vector @@ to_tsquery('english', $${paramIndex})`;
-      params.push(tsquery);
+    // Handle search conditions
+    let searchCondition = '';
+    let searchQueryParam = '';
+
+    // Handle different query types
+    if (typeof query === 'object' && query.match) {
+      const { field, value } = query.match;
+      if (this.isWildcardPattern(value)) {
+        // Handle wildcard patterns with ILIKE
+        const likePattern = this.convertWildcardToLikePattern(value);
+        searchCondition = `d.content->>'${field || 'name'}' ILIKE $${paramIndex}`;
+        params.push(likePattern);
+        paramIndex++;
+      } else {
+        // Handle regular text search with tsvector
+        searchQueryParam = this.convertToTsQuery(value);
+        searchCondition = `sd.search_vector @@ to_tsquery('english', $${paramIndex})`;
+        params.push(searchQueryParam);
+        paramIndex++;
+      }
+    } else if (typeof query === 'object' && query.wildcard) {
+      const { field, value } = query.wildcard;
+      const likePattern = this.convertWildcardToLikePattern(value);
+      searchCondition = `d.content->>'${field}' ILIKE $${paramIndex}`;
+      params.push(likePattern);
+      paramIndex++;
+    } else if (tsquery && tsquery.trim() !== '') {
+      // Handle string queries
+      searchQueryParam = this.convertToTsQuery(tsquery);
+      searchCondition = `sd.search_vector @@ to_tsquery('english', $${paramIndex})`;
+      params.push(searchQueryParam);
       paramIndex++;
     }
 
-    // Handle term query
-    if (typeof query === 'object' && query.term) {
-      const [field, value] = Object.entries(query.term)[0];
-      whereClause += ` AND (d.metadata->>'${field}' = $${paramIndex} OR jsonb_exists_any(d.metadata->'${field}', ARRAY[$${paramIndex}]))`;
-      params.push(value);
-      paramIndex++;
+    // Combine relevance score with business ranking
+    const relevanceScore = searchQueryParam
+      ? `ts_rank_cd(sd.search_vector, to_tsquery('english', $${paramIndex - 1}))`
+      : '1.0';
+    const finalScore = `(${relevanceScore} * 1000) + ${businessRankingParts.join(' + ')}`;
+    const businessScore = businessRankingParts.join(' + ');
+
+    // First, get the total count of matches (without LIMIT/OFFSET)
+    const countQuery = `
+      SELECT COUNT(*) as total_count
+      FROM search_documents sd
+      JOIN documents d ON d.document_id = sd.document_id AND d.index_name = sd.index_name
+      WHERE sd.index_name = $1 ${searchCondition ? `AND ${searchCondition}` : ''}`;
+
+    const countParams = [indexName];
+    if (searchCondition && searchCondition.includes('$')) {
+      // Add the search parameters for the count query
+      const searchParams = params.slice(1, paramIndex - 1); // Exclude indexName and LIMIT/OFFSET params
+      countParams.push(...searchParams);
     }
 
-    // Handle range query
-    if (typeof query === 'object' && query.range) {
-      const { field, gt, gte, lt, lte } = query.range;
-      if (gt !== undefined) {
-        whereClause += ` AND (d.metadata->>'${field}')::numeric > $${paramIndex}`;
-        params.push(gt);
-        paramIndex++;
-      }
-      if (gte !== undefined) {
-        whereClause += ` AND (d.metadata->>'${field}')::numeric >= $${paramIndex}`;
-        params.push(gte);
-        paramIndex++;
-      }
-      if (lt !== undefined) {
-        whereClause += ` AND (d.metadata->>'${field}')::numeric < $${paramIndex}`;
-        params.push(lt);
-        paramIndex++;
-      }
-      if (lte !== undefined) {
-        whereClause += ` AND (d.metadata->>'${field}')::numeric <= $${paramIndex}`;
-        params.push(lte);
-        paramIndex++;
-      }
-    }
+    // Execute count query to get total matches
+    const countResult = await this.dataSource.query(countQuery, countParams);
+    const totalHits = parseInt(countResult[0]?.total_count || '0', 10);
 
-    // Build the full query
+    // Add LIMIT and OFFSET parameters for the main query
+    params.push(size, from);
+
     const sqlQuery = `
       SELECT 
         d.document_id,
         d.content,
         d.metadata,
-        CASE 
-          WHEN $2 IS NOT NULL AND $2 != '' THEN ts_rank_cd(sd.search_vector, to_tsquery('english', $2))
-          ELSE 1.0
-        END as score
+        ${finalScore} as score,
+        ${relevanceScore} as relevance_score,
+        ${businessScore} as business_score
       FROM search_documents sd
       JOIN documents d ON d.document_id = sd.document_id AND d.index_name = sd.index_name
-      WHERE ${whereClause}
-      ORDER BY score DESC
-      LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`;
+      WHERE sd.index_name = $1 ${searchCondition ? `AND ${searchCondition}` : ''}
+      ORDER BY score DESC, d.content->>'updated_at' DESC
+      LIMIT $${paramIndex}::integer OFFSET $${paramIndex + 1}::integer`;
 
-    // Log the query and parameters
-    this.logger.debug('Executing search query:', {
+    // Log the query and parameters for debugging
+    this.logger.debug('Executing ranked search query:', {
       query: sqlQuery,
-      params: [...params, size, from],
+      params: params,
+      rankingFields: Object.keys(businessRankingFields),
+      searchCondition,
+      searchQueryParam,
+      totalHits,
     });
 
-    // Execute search
-    const results = await this.dataSource.query(sqlQuery, [...params, size, from]);
+    try {
+      const result = await this.dataSource.query(sqlQuery, params);
 
-    // Get total count
-    const countQuery = `
-      SELECT COUNT(*) as total
-      FROM search_documents sd
-      JOIN documents d ON d.document_id = sd.document_id AND d.index_name = sd.index_name
-      WHERE ${whereClause}`;
+      const hits = result.map((row: any) => ({
+        id: row.document_id,
+        score: parseFloat(row.score) || 0,
+        document: row.content,
+        relevance_score: parseFloat(row.relevance_score) || 0,
+        business_score: parseFloat(row.business_score) || 0,
+      }));
 
-    // Log the count query
-    this.logger.debug('Executing count query:', {
-      query: countQuery,
-      params,
-    });
+      const maxScore = hits.length > 0 ? Math.max(...hits.map(h => h.score)) : 0;
 
-    const countResult = await this.dataSource.query(countQuery, params);
-
-    const totalHits = parseInt(countResult[0]?.total || '0', 10);
-
-    const hits = results.map(row => ({
-      id: row.document_id,
-      score: parseFloat(row.score || '0'),
-      document: { ...row.content, ...row.metadata },
-    }));
-
-    const maxScore = hits.length > 0 ? Math.max(...hits.map(h => h.score)) : 0;
-
-    return { totalHits, maxScore, hits };
+      return {
+        totalHits, // ✅ Now returns total matches across all pages
+        maxScore,
+        hits,
+      };
+    } catch (error) {
+      this.logger.error('Search error:', error);
+      throw error;
+    }
   }
 
   /**
