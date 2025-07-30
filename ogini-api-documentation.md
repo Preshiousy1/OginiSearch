@@ -736,7 +736,8 @@ x-api-key: <api_key>
     }
   },
   "fields": ["title", "description"],
-  "size": 10
+  "size": 10,
+  "from": 0
 }
 ```
 
@@ -755,7 +756,8 @@ x-api-key: <api_key>
       "value": "electronics"
     }
   },
-  "size": 20
+  "size": 20,
+  "from": 0
 }
 ```
 
@@ -915,15 +917,16 @@ You can also use a simple string for backward compatibility:
 }
 ```
 
-**Search Response Format:**
+**Enhanced Search Response Format:**
 ```json
 {
-  "hits": {
-    "total": 5,
+  "data": {
+    "total": 45,
     "maxScore": 0.9567,
     "hits": [
       {
         "id": "product-123",
+        "index": "products",
         "score": 0.9567,
         "source": {
           "title": "Wireless Bluetooth Headphones",
@@ -935,7 +938,15 @@ You can also use a simple string for backward compatibility:
           "title": ["<em>Wireless</em> Bluetooth Headphones"]
         }
       }
-    ]
+    ],
+    "pagination": {
+      "currentPage": 1,
+      "totalPages": 5,
+      "pageSize": 10,
+      "hasNext": true,
+      "hasPrevious": false,
+      "totalResults": 45
+    }
   },
   "facets": {
     "categories": {
@@ -947,6 +958,195 @@ You can also use a simple string for backward compatibility:
   },
   "took": 15
 }
+```
+
+### 4.1.8 Enhanced Pagination Features
+
+The Ogini search engine provides comprehensive pagination with complete metadata for optimal user experience and navigation.
+
+#### Pagination Request Parameters
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `size` | number | 10 | Number of results per page |
+| `from` | number | 0 | Starting offset (page * size) |
+
+#### Pagination Response Metadata
+
+The search response includes enhanced pagination metadata:
+
+```json
+{
+  "pagination": {
+    "currentPage": 1,        // Current page number
+    "totalPages": 218,       // Total number of pages
+    "pageSize": 10,          // Results per page
+    "hasNext": true,         // Whether next page exists
+    "hasPrevious": false,    // Whether previous page exists
+    "totalResults": 2176     // Total matches across all pages
+  }
+}
+```
+
+#### Pagination Examples
+
+**First Page (Default):**
+```json
+{
+  "query": {"match": {"value": "restaurant"}},
+  "size": 10,
+  "from": 0
+}
+```
+
+**Response:**
+```json
+{
+  "data": {
+    "total": 2176,
+    "hits": [...],
+    "pagination": {
+      "currentPage": 1,
+      "totalPages": 218,
+      "pageSize": 10,
+      "hasNext": true,
+      "hasPrevious": false,
+      "totalResults": 2176
+    }
+  }
+}
+```
+
+**Second Page:**
+```json
+{
+  "query": {"match": {"value": "restaurant"}},
+  "size": 10,
+  "from": 10
+}
+```
+
+**Response:**
+```json
+{
+  "data": {
+    "total": 2176,
+    "hits": [...],
+    "pagination": {
+      "currentPage": 2,
+      "totalPages": 218,
+      "pageSize": 10,
+      "hasNext": true,
+      "hasPrevious": true,
+      "totalResults": 2176
+    }
+  }
+}
+```
+
+**Last Page:**
+```json
+{
+  "query": {"match": {"value": "restaurant"}},
+  "size": 10,
+  "from": 2170
+}
+```
+
+**Response:**
+```json
+{
+  "data": {
+    "total": 2176,
+    "hits": [...],
+    "pagination": {
+      "currentPage": 218,
+      "totalPages": 218,
+      "pageSize": 10,
+      "hasNext": false,
+      "hasPrevious": true,
+      "totalResults": 2176
+    }
+  }
+}
+```
+
+**Large Page Size:**
+```json
+{
+  "query": {"match": {"value": "food"}},
+  "size": 50,
+  "from": 0
+}
+```
+
+**Response:**
+```json
+{
+  "data": {
+    "total": 6548,
+    "hits": [...],
+    "pagination": {
+      "currentPage": 1,
+      "totalPages": 131,
+      "pageSize": 50,
+      "hasNext": true,
+      "hasPrevious": false,
+      "totalResults": 6548
+    }
+  }
+}
+```
+
+#### Pagination Benefits
+
+✅ **Complete Information**: Users know total results and available pages  
+✅ **Navigation Ready**: `hasNext`/`hasPrevious` flags for UI controls  
+✅ **Flexible Page Sizes**: Any `size` value supported  
+✅ **Performance Optimized**: Efficient SQL with separate count queries  
+✅ **Accurate Totals**: Total count reflects all matches, not just current page  
+✅ **Consistent API**: Works with all query types (match, wildcard, match_all, etc.)
+
+#### Pagination Best Practices
+
+1. **Use Appropriate Page Sizes:**
+```json
+// For browsing - smaller pages
+{"size": 10, "from": 0}
+
+// For data export - larger pages
+{"size": 100, "from": 0}
+```
+
+2. **Calculate Page Numbers:**
+```javascript
+// Calculate page from offset
+const page = Math.floor(offset / size) + 1;
+
+// Calculate offset from page
+const offset = (page - 1) * size;
+```
+
+3. **Handle Navigation:**
+```javascript
+// Check if next page exists
+if (response.data.pagination.hasNext) {
+  const nextOffset = response.data.pagination.currentPage * response.data.pagination.pageSize;
+  // Load next page
+}
+
+// Check if previous page exists
+if (response.data.pagination.hasPrevious) {
+  const prevOffset = (response.data.pagination.currentPage - 2) * response.data.pagination.pageSize;
+  // Load previous page
+}
+```
+
+4. **Display Progress:**
+```javascript
+// Show progress information
+const progress = `${response.data.pagination.currentPage} of ${response.data.pagination.totalPages}`;
+const totalResults = response.data.pagination.totalResults;
 ```
 
 ### 4.2 Suggestions
@@ -1228,13 +1428,52 @@ The API returns appropriate HTTP status codes:
 }
 ```
 
+7. **Implement Proper Pagination:**
+```json
+// Good - paginated results
+{
+  "query": {"match": {"value": "popular term"}},
+  "size": 20,
+  "from": 0
+}
+
+// Better - with larger page size for efficiency
+{
+  "query": {"match": {"value": "popular term"}},
+  "size": 50,
+  "from": 0
+}
+
+// Best - progressive loading
+{
+  "query": {"match": {"value": "popular term"}},
+  "size": 100,
+  "from": 0
+}
+```
+
 ### 8.2 Performance Optimization
 
 1. **Pagination for Large Result Sets:**
 ```json
+// Standard pagination
 {
   "query": {"match": {"value": "popular term"}},
   "size": 20,
+  "from": 0
+}
+
+// Efficient pagination for large datasets
+{
+  "query": {"match": {"value": "popular term"}},
+  "size": 100,
+  "from": 0
+}
+
+// Progressive loading
+{
+  "query": {"match": {"value": "popular term"}},
+  "size": 50,
   "from": 0
 }
 ```
@@ -1246,6 +1485,13 @@ The API returns appropriate HTTP status codes:
 
 // Less optimal - middle wildcards
 {"wildcard": {"field": "title", "value": "*duct*"}}
+
+// Best - prefix patterns with pagination
+{
+  "query": {"wildcard": {"field": "title", "value": "smart*"}},
+  "size": 50,
+  "from": 0
+}
 ```
 
 3. **Use Appropriate Query Types:**
@@ -1264,7 +1510,9 @@ The API returns appropriate HTTP status codes:
 ```json
 {
   "query": {"match": {"value": "search"}},
-  "facets": ["category", "brand", "price_range"]
+  "facets": ["category", "brand", "price_range"],
+  "size": 20,
+  "from": 0
 }
 ```
 
@@ -1275,6 +1523,45 @@ The API returns appropriate HTTP status codes:
 
 // Avoid - too many fields
 {"fields": ["title", "description", "content", "tags", "meta", "notes"]}
+```
+
+6. **Pagination Performance Tips:**
+```json
+// Optimal page sizes for different use cases
+{
+  "size": 10,   // UI browsing
+  "from": 0
+}
+
+{
+  "size": 50,   // Data tables
+  "from": 0
+}
+
+{
+  "size": 100,  // Data export
+  "from": 0
+}
+
+{
+  "size": 500,  // Bulk operations
+  "from": 0
+}
+```
+
+7. **Monitor Pagination Performance:**
+```javascript
+// Check response times
+const responseTime = response.took;
+if (responseTime > 1000) {
+  console.warn('Slow pagination response:', responseTime + 'ms');
+}
+
+// Monitor total results
+const totalResults = response.data.pagination.totalResults;
+if (totalResults > 10000) {
+  console.warn('Large result set:', totalResults + ' results');
+}
 ```
 
 ---
@@ -1322,7 +1609,57 @@ curl -X POST "http://localhost:3000/api/indices/test_products/_search" \
         "field": "title",
         "value": "test"
       }
-    }
+    },
+    "size": 10,
+    "from": 0
+  }'
+```
+
+### Search with Pagination
+```bash
+# First page
+curl -X POST "http://localhost:3000/api/indices/test_products/_search" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <api_key>" \
+  -d '{
+    "query": {
+      "match": {
+        "field": "title",
+        "value": "smartphone"
+      }
+    },
+    "size": 10,
+    "from": 0
+  }'
+
+# Second page
+curl -X POST "http://localhost:3000/api/indices/test_products/_search" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <api_key>" \
+  -d '{
+    "query": {
+      "match": {
+        "field": "title",
+        "value": "smartphone"
+      }
+    },
+    "size": 10,
+    "from": 10
+  }'
+
+# Large page size
+curl -X POST "http://localhost:3000/api/indices/test_products/_search" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <api_key>" \
+  -d '{
+    "query": {
+      "match": {
+        "field": "title",
+        "value": "laptop"
+      }
+    },
+    "size": 50,
+    "from": 0
   }'
 ```
 
@@ -1366,7 +1703,9 @@ curl -X POST "http://localhost:3000/api/indices/test_products/_search" \
         "field": "title",
         "value": "prod*"
       }
-    }
+    },
+    "size": 10,
+    "from": 0
   }'
 
 # Contains pattern
@@ -1379,7 +1718,9 @@ curl -X POST "http://localhost:3000/api/indices/test_products/_search" \
         "field": "description",
         "value": "*quality*"
       }
-    }
+    },
+    "size": 20,
+    "from": 0
   }'
 
 # Single character wildcard
@@ -1392,7 +1733,9 @@ curl -X POST "http://localhost:3000/api/indices/test_products/_search" \
         "field": "status",
         "value": "activ?"
       }
-    }
+    },
+    "size": 10,
+    "from": 0
   }'
 ```
 
@@ -1407,7 +1750,9 @@ curl -X POST "http://localhost:3000/api/indices/test_products/_search" \
         "field": "category",
         "value": "elect*"
       }
-    }
+    },
+    "size": 10,
+    "from": 0
   }'
 ```
 
@@ -1542,6 +1887,7 @@ The Ogini Search Engine provides a comprehensive and powerful API for full-text 
 
 ✅ **Complete Index Management** - Create, read, update, delete operations with auto-mapping detection  
 ✅ **Advanced Search Capabilities** - Match, wildcard, match-all queries with auto-detection  
+✅ **Enhanced Pagination** - Complete pagination metadata with navigation controls  
 ✅ **Flexible Document Operations** - Individual and bulk operations with filtering  
 ✅ **System Management & Recovery** - Cache clearing, index rebuilding, and complete system reset  
 ✅ **Bulk Processing** - Scalable bulk indexing with job management and progress tracking  
@@ -1550,6 +1896,23 @@ The Ogini Search Engine provides a comprehensive and powerful API for full-text 
 ✅ **Index Isolation** - Proper term dictionary isolation preventing cross-index contamination  
 ✅ **Developer Friendly** - Comprehensive cURL examples and clear documentation  
 ✅ **Production Ready** - Health monitoring, memory management, and robust error handling
+
+### New Pagination Features
+
+**🎯 Enhanced Pagination System:**
+- **Complete Metadata** - Total results, page counts, navigation flags
+- **Accurate Totals** - Separate count queries for precise result totals
+- **Navigation Ready** - `hasNext`/`hasPrevious` flags for UI controls
+- **Flexible Page Sizes** - Any page size supported with optimal performance
+- **Performance Optimized** - Efficient SQL with separate count operations
+- **Consistent API** - Works with all query types (match, wildcard, match_all, etc.)
+
+**📊 Pagination Benefits:**
+- **User Experience** - Complete information about available results and pages
+- **Developer Experience** - Familiar API with enhanced metadata access
+- **Performance** - Optimized queries with minimal overhead
+- **Scalability** - Handles large result sets efficiently
+- **Backward Compatibility** - Existing code continues to work
 
 ### New System Management Features
 
@@ -1569,4 +1932,4 @@ The Ogini Search Engine provides a comprehensive and powerful API for full-text 
 - **Wildcard Search Fix** - Wildcard queries now properly scoped to target index only
 - **Performance Preserved** - All optimizations maintain sub-20ms response times
 
-The API is designed for high performance, scalability, and ease of use, making it suitable for both development and production environments. With the new system management capabilities, administrators can maintain and troubleshoot search indices effectively while preserving data integrity and performance. 
+The API is designed for high performance, scalability, and ease of use, making it suitable for both development and production environments. With the new pagination system and system management capabilities, administrators can maintain and troubleshoot search indices effectively while preserving data integrity and performance. 
