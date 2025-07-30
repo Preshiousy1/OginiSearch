@@ -657,16 +657,6 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
       ORDER BY score DESC, d.content->>'updated_at' DESC
       LIMIT $${paramIndex}::integer OFFSET $${paramIndex + 1}::integer`;
 
-    // Log the query and parameters for debugging
-    this.logger.debug('Executing ranked search query:', {
-      query: sqlQuery,
-      params: params,
-      rankingFields: Object.keys(businessRankingFields),
-      searchCondition,
-      searchQueryParam,
-      totalHits,
-    });
-
     try {
       const result = await this.dataSource.query(sqlQuery, params);
 

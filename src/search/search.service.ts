@@ -126,7 +126,7 @@ export class SearchService {
             id: hit.id,
             index: indexName,
             score: hit.score,
-            source: hit.document,
+            source: hit.source,
             highlights: searchQuery.highlight
               ? await this.getPostgresHighlights(
                   hit,
@@ -168,7 +168,7 @@ export class SearchService {
           id: hit.id,
           index: indexName,
           score: hit.score,
-          source: hit.document,
+          source: hit.source,
           highlights: searchQuery.highlight
             ? await this.getPostgresHighlights(hit, this.getQueryText(searchQuery.query), indexName)
             : undefined,
