@@ -142,6 +142,11 @@ export class SearchService {
             total: searchResult.data.total,
             maxScore: hits.length > 0 ? Math.max(...hits.map(h => h.score)) : 0,
             hits,
+            pagination: this.calculatePaginationMetadata(
+              searchResult.data.total,
+              searchQuery.size || 10,
+              searchQuery.from || 0,
+            ),
           },
           took: Date.now() - startTime,
         };
@@ -175,6 +180,11 @@ export class SearchService {
           total: searchResult.data.total,
           maxScore: hits.length > 0 ? Math.max(...hits.map(h => h.score)) : 0,
           hits,
+          pagination: this.calculatePaginationMetadata(
+            searchResult.data.total,
+            searchQuery.size || 10,
+            searchQuery.from || 0,
+          ),
         },
         took: Date.now() - startTime,
       };
@@ -189,6 +199,25 @@ export class SearchService {
       this.logger.error(`Search failed: ${error.message}`);
       throw error;
     }
+  }
+
+  /**
+   * Calculate pagination metadata
+   */
+  private calculatePaginationMetadata(total: number, pageSize: number, offset: number) {
+    const currentPage = Math.floor(offset / pageSize) + 1;
+    const totalPages = Math.ceil(total / pageSize);
+    const hasNext = currentPage < totalPages;
+    const hasPrevious = currentPage > 1;
+
+    return {
+      currentPage,
+      totalPages,
+      pageSize,
+      hasNext,
+      hasPrevious,
+      totalResults: total,
+    };
   }
 
   /**

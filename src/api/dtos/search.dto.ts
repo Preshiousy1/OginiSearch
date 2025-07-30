@@ -281,6 +281,14 @@ export class SearchResponseDto {
       total: 10,
       maxScore: 1.0,
       hits: [{ id: '123', index: 'my-index', score: 1.0, source: { name: 'John Doe' } }],
+      pagination: {
+        currentPage: 1,
+        totalPages: 5,
+        pageSize: 10,
+        hasNext: true,
+        hasPrevious: false,
+        totalResults: 50,
+      },
     },
     description: 'Search results',
   })
@@ -294,6 +302,14 @@ export class SearchResponseDto {
       source: Record<string, any>;
       highlight?: Record<string, string[]>;
     }>;
+    pagination?: {
+      currentPage: number;
+      totalPages: number;
+      pageSize: number;
+      hasNext: boolean;
+      hasPrevious: boolean;
+      totalResults: number;
+    };
   };
 
   @ApiProperty({
