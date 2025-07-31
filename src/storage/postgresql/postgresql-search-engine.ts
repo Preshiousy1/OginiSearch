@@ -622,6 +622,17 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
     const finalScore = `(${relevanceScore} * 1000) + ${businessRankingParts.join(' + ')}`;
     const businessScore = businessRankingParts.join(' + ');
 
+    // Build filter conditions
+    let filterCondition = '';
+    if (searchQuery.filter) {
+      filterCondition = this.buildFilterConditions(searchQuery.filter, params, paramIndex);
+      // Update paramIndex based on how many parameters were added by filters
+      paramIndex +=
+        (searchQuery.filter.bool?.must?.length || 0) +
+        (searchQuery.filter.bool?.should?.length || 0) +
+        (searchQuery.filter.bool?.must_not?.length || 0);
+    }
+
     // Optimized: Use a single query with window function for count and results
     const sqlQuery = `
       WITH search_results AS (
@@ -635,7 +646,9 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
           COUNT(*) OVER() as total_count
         FROM search_documents sd
         JOIN documents d ON d.document_id = sd.document_id AND d.index_name = sd.index_name
-        WHERE sd.index_name = $1 ${searchCondition ? `AND ${searchCondition}` : ''}
+        WHERE sd.index_name = $1 
+          ${searchCondition ? `AND ${searchCondition}` : ''} 
+          ${filterCondition}
         ORDER BY score DESC, d.content->>'updated_at' DESC
         LIMIT $${paramIndex}::integer OFFSET $${paramIndex + 1}::integer
       )

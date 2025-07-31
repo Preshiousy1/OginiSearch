@@ -72,7 +72,7 @@ export class DocumentCountVerifierService {
 
       // Get actual document count from documents table
       const actualResult = await this.postgresqlService.query(
-        "SELECT COUNT(*) as count FROM documents WHERE index_name = $1 AND status = 'indexed'",
+        'SELECT COUNT(*) as count FROM documents WHERE index_name = $1',
         [indexName],
       );
       const actualCount = parseInt(actualResult[0]?.count || '0', 10);
