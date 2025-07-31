@@ -559,7 +559,7 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
       updated_at: { weight: 50, type: 'date' },
     };
 
-    // Build ranking score calculation
+    // Build ranking score calculation - simplified for performance
     const businessRankingParts = [];
     for (const [field, config] of Object.entries(businessRankingFields)) {
       if (config.type === 'boolean') {
@@ -615,47 +615,33 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
       paramIndex++;
     }
 
-    // Combine relevance score with business ranking
+    // Combine relevance score with business ranking - simplified for performance
     const relevanceScore = searchQueryParam
       ? `ts_rank_cd(sd.search_vector, to_tsquery('english', $${paramIndex - 1}))`
       : '1.0';
     const finalScore = `(${relevanceScore} * 1000) + ${businessRankingParts.join(' + ')}`;
     const businessScore = businessRankingParts.join(' + ');
 
-    // First, get the total count of matches (without LIMIT/OFFSET)
-    const countQuery = `
-      SELECT COUNT(*) as total_count
-      FROM search_documents sd
-      JOIN documents d ON d.document_id = sd.document_id AND d.index_name = sd.index_name
-      WHERE sd.index_name = $1 ${searchCondition ? `AND ${searchCondition}` : ''}`;
-
-    const countParams = [indexName];
-    if (searchCondition && searchCondition.includes('$')) {
-      // Add the search parameters for the count query
-      const searchParams = params.slice(1, paramIndex - 1); // Exclude indexName and LIMIT/OFFSET params
-      countParams.push(...searchParams);
-    }
-
-    // Execute count query to get total matches
-    const countResult = await this.dataSource.query(countQuery, countParams);
-    const totalHits = parseInt(countResult[0]?.total_count || '0', 10);
-
-    // Add LIMIT and OFFSET parameters for the main query
-    params.push(size, from);
-
+    // Optimized: Use a single query with window function for count and results
     const sqlQuery = `
-      SELECT 
-        d.document_id,
-        d.content,
-        d.metadata,
-        ${finalScore} as score,
-        ${relevanceScore} as relevance_score,
-        ${businessScore} as business_score
-      FROM search_documents sd
-      JOIN documents d ON d.document_id = sd.document_id AND d.index_name = sd.index_name
-      WHERE sd.index_name = $1 ${searchCondition ? `AND ${searchCondition}` : ''}
-      ORDER BY score DESC, d.content->>'updated_at' DESC
-      LIMIT $${paramIndex}::integer OFFSET $${paramIndex + 1}::integer`;
+      WITH search_results AS (
+        SELECT 
+          d.document_id,
+          d.content,
+          d.metadata,
+          ${finalScore} as score,
+          ${relevanceScore} as relevance_score,
+          ${businessScore} as business_score,
+          COUNT(*) OVER() as total_count
+        FROM search_documents sd
+        JOIN documents d ON d.document_id = sd.document_id AND d.index_name = sd.index_name
+        WHERE sd.index_name = $1 ${searchCondition ? `AND ${searchCondition}` : ''}
+        ORDER BY score DESC, d.content->>'updated_at' DESC
+        LIMIT $${paramIndex}::integer OFFSET $${paramIndex + 1}::integer
+      )
+      SELECT * FROM search_results`;
+
+    params.push(size, from);
 
     try {
       const result = await this.dataSource.query(sqlQuery, params);
@@ -671,7 +657,7 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
       const maxScore = hits.length > 0 ? Math.max(...hits.map(h => h.score)) : 0;
 
       return {
-        totalHits, // ✅ Now returns total matches across all pages
+        totalHits: parseInt(result[0]?.total_count || '0', 10), // ✅ Now returns total matches across all pages
         maxScore,
         hits,
       };

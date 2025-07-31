@@ -26,57 +26,19 @@ export class SearchService {
    */
   async search(indexName: string, searchQuery: SearchQueryDto): Promise<SearchResponseDto> {
     const startTime = Date.now();
-    this.logger.debug(`Executing search query on index ${indexName}`);
 
-    // --- BEGIN: Keyword field extraction for wildcard match queries ---
-    // Fetch index mappings
-    const index = await this.postgresSearchEngine.getIndex(indexName);
-    const mappings = index.mappings?.properties || {};
-
-    // Collect all base fields that are keyword fields or have a keyword subfield
-    const keywordFields: string[] = [];
-    for (const [field, mapping] of Object.entries(mappings)) {
-      const m = mapping as any;
-      // If the field itself is a keyword field
-      if (m.type === 'keyword') {
-        keywordFields.push(field);
-      }
-      // If the field is text and has a keyword subfield, add only the base field
-      else if (
-        m.type === 'text' &&
-        m.fields &&
-        m.fields.keyword &&
-        m.fields.keyword.type === 'keyword'
-      ) {
-        keywordFields.push(field);
-      }
+    // --- START: Keyword field extraction ---
+    const keywordFields = await this.extractKeywordFields(indexName);
+    if (keywordFields.length > 0) {
+      searchQuery.fields = keywordFields;
     }
 
-    this.logger.debug(
-      `Extracted keyword fields for index ${indexName}: ${JSON.stringify(keywordFields)}`,
-    );
-
+    // Check if this is a wildcard pattern in a match query
     if (
-      searchQuery.query &&
-      typeof searchQuery.query === 'object' &&
-      'wildcard' in searchQuery.query &&
-      (searchQuery.fields === undefined || searchQuery.fields.length === 0) &&
-      ((searchQuery.query as any).wildcard.field === undefined ||
-        (searchQuery.query as any).wildcard.field === '_all')
-    ) {
-      if (keywordFields.length > 0) {
-        searchQuery.fields = keywordFields;
-      }
-    }
-
-    // If match query with wildcard and no field, set fields to all keyword fields
-    if (
-      searchQuery.query &&
-      typeof searchQuery.query === 'object' &&
-      searchQuery.query.match &&
+      searchQuery.query?.match &&
+      typeof searchQuery.query.match === 'object' &&
+      'value' in searchQuery.query.match &&
       typeof searchQuery.query.match.value === 'string' &&
-      (searchQuery.fields === undefined || searchQuery.fields.length === 0) &&
-      (searchQuery.query.match.field === undefined || searchQuery.query.match.field === '_all') &&
       (searchQuery.query.match.value.includes('*') || searchQuery.query.match.value.includes('?'))
     ) {
       if (keywordFields.length > 0) {
@@ -110,12 +72,6 @@ export class SearchService {
             },
           },
         };
-
-        this.logger.debug(
-          `Converted match query with wildcard to wildcard query: ${JSON.stringify(
-            wildcardQuery.query,
-          )}`,
-        );
 
         // Execute search using PostgreSQL engine with the converted wildcard query
         const searchResult = await this.postgresSearchEngine.search(indexName, wildcardQuery);
@@ -198,6 +154,41 @@ export class SearchService {
     } catch (error) {
       this.logger.error(`Search failed: ${error.message}`);
       throw error;
+    }
+  }
+
+  /**
+   * Extract keyword fields for an index
+   */
+  private async extractKeywordFields(indexName: string): Promise<string[]> {
+    try {
+      // Fetch index mappings
+      const index = await this.postgresSearchEngine.getIndex(indexName);
+      const mappings = index.mappings?.properties || {};
+
+      // Collect all base fields that are keyword fields or have a keyword subfield
+      const keywordFields: string[] = [];
+      for (const [field, mapping] of Object.entries(mappings)) {
+        const m = mapping as any;
+        // If the field itself is a keyword field
+        if (m.type === 'keyword') {
+          keywordFields.push(field);
+        }
+        // If the field is text and has a keyword subfield, add only the base field
+        else if (
+          m.type === 'text' &&
+          m.fields &&
+          m.fields.keyword &&
+          m.fields.keyword.type === 'keyword'
+        ) {
+          keywordFields.push(field);
+        }
+      }
+
+      return keywordFields;
+    } catch (error) {
+      this.logger.warn(`Failed to extract keyword fields for index ${indexName}: ${error.message}`);
+      return [];
     }
   }
 

@@ -660,14 +660,14 @@ export class WorkerManagementService {
           queueSize: stats.totalWaiting,
         });
 
-        // Keep only last 100 entries (last ~16 minutes of data)
+        // Keep only last 100 entries (last ~100 minutes of data)
         if (this.performanceHistory.length > 100) {
           this.performanceHistory.shift();
         }
       } catch (error) {
         this.logger.error(`Performance tracking error: ${error.message}`);
       }
-    }, 10000); // Every 10 seconds
+    }, 60000); // Every 60 seconds instead of 10 seconds
   }
 
   private calculateCurrentThroughput(): number {
