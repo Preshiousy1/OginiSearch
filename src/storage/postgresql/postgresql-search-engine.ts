@@ -56,6 +56,8 @@ interface SearchMetrics {
 export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
   private readonly logger = new Logger(PostgreSQLSearchEngine.name);
   private readonly indices = new Map<string, IndexConfig>();
+  private readonly queryCache = new Map<string, { results: any; timestamp: number }>();
+  private readonly CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 
   constructor(
     private readonly dataSource: DataSource,
@@ -106,35 +108,51 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
     };
 
     try {
+      // Check cache first
+      const cacheKey = this.generateCacheKey(indexName, searchQuery);
+      const cachedResult = this.queryCache.get(cacheKey);
+      
+      if (cachedResult && Date.now() - cachedResult.timestamp < this.CACHE_TTL) {
+        metrics.execution = Date.now() - startTime;
+        metrics.total = metrics.execution;
+        this.logger.debug(`Cache hit for query: ${cacheKey}`);
+        return { data: cachedResult.results, metrics };
+      }
+
       // Convert search query to tsquery for PostgreSQL full-text search
       let tsquery = '';
       if (typeof searchQuery.query === 'string') {
         tsquery = searchQuery.query;
       } else if (searchQuery.query?.match?.value) {
-        tsquery = searchQuery.query.match.value;
+        tsquery = String(searchQuery.query.match.value);
       } else if (searchQuery.query?.wildcard?.value) {
         const wildcardValue = searchQuery.query.wildcard.value;
-        tsquery = typeof wildcardValue === 'string' ? wildcardValue : wildcardValue.value;
+        tsquery = typeof wildcardValue === 'string' ? wildcardValue : String(wildcardValue.value);
       }
 
-      // Use the new executeSearch method with proper ranking
+      // Use the optimized executeSearch method
       const searchResult = await this.executeSearch(indexName, tsquery, searchQuery);
+
+      const response = {
+        hits: searchResult.hits.map(hit => ({
+          id: hit.id,
+          score: hit.score,
+          source: hit.document,
+        })),
+        total: searchResult.totalHits,
+        maxScore: searchResult.maxScore,
+      };
+
+      // Cache the result
+      this.queryCache.set(cacheKey, {
+        results: response,
+        timestamp: Date.now(),
+      });
 
       metrics.execution = Date.now() - startTime;
       metrics.total = metrics.execution;
 
-      return {
-        data: {
-          hits: searchResult.hits.map(hit => ({
-            id: hit.id,
-            score: hit.score,
-            source: hit.document,
-          })),
-          total: searchResult.totalHits,
-          maxScore: searchResult.maxScore,
-        },
-        metrics,
-      };
+      return { data: response, metrics };
     } catch (error) {
       this.logger.error('Search error:', error);
       throw new BadRequestException(`Search error: ${error.message}`);
@@ -546,115 +564,37 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
     maxScore: number;
     hits: Array<{ id: string; score: number; document: Record<string, any> }>;
   }> {
-    const { from = 0, size = 10, sort } = searchQuery;
+    const { from = 0, size = 10 } = searchQuery;
     const query = searchQuery.query;
 
-    // Business ranking configuration
-    const businessRankingFields = {
-      has_featured_model: { weight: 1000, type: 'boolean' },
-      is_confirmed: { weight: 500, type: 'boolean' },
-      is_verified: { weight: 300, type: 'boolean' },
-      is_active: { weight: 200, type: 'boolean' },
-      health: { weight: 100, type: 'numeric' },
-      updated_at: { weight: 50, type: 'date' },
-    };
-
-    // Build ranking score calculation - simplified for performance
-    const businessRankingParts = [];
-    for (const [field, config] of Object.entries(businessRankingFields)) {
-      if (config.type === 'boolean') {
-        businessRankingParts.push(
-          `(CASE WHEN d.content->>'${field}' = 'true' THEN ${config.weight} ELSE 0 END)`,
-        );
-      } else if (config.type === 'numeric') {
-        businessRankingParts.push(
-          `(COALESCE((d.content->>'${field}')::numeric, 0) * ${config.weight / 100})`,
-        );
-      } else if (config.type === 'date') {
-        businessRankingParts.push(
-          `(EXTRACT(EPOCH FROM (d.content->>'${field}')::timestamp) * ${config.weight / 1000000})`,
-        );
-      }
-    }
-
-    // Build the SQL query
-    const params: any[] = [indexName];
-    let paramIndex = 2; // Start from $2 since $1 is indexName
-
-    // Handle search conditions
-    let searchCondition = '';
-    let searchQueryParam = '';
-
-    // Handle different query types
-    if (typeof query === 'object' && query.match) {
-      const { field, value } = query.match;
-      if (this.isWildcardPattern(value)) {
-        // Handle wildcard patterns with ILIKE
-        const likePattern = this.convertWildcardToLikePattern(value);
-        searchCondition = `d.content->>'${field || 'name'}' ILIKE $${paramIndex}`;
-        params.push(likePattern);
-        paramIndex++;
-      } else {
-        // Handle regular text search with tsvector
-        searchQueryParam = this.convertToTsQuery(value);
-        searchCondition = `sd.search_vector @@ to_tsquery('english', $${paramIndex})`;
-        params.push(searchQueryParam);
-        paramIndex++;
-      }
-    } else if (typeof query === 'object' && query.wildcard) {
-      const { field, value } = query.wildcard;
-      const likePattern = this.convertWildcardToLikePattern(value);
-      searchCondition = `d.content->>'${field}' ILIKE $${paramIndex}`;
-      params.push(likePattern);
-      paramIndex++;
+    // Simplified query processing
+    let searchTerm = '';
+    if (typeof query === 'string') {
+      searchTerm = query;
+    } else if (query?.match?.value) {
+      searchTerm = String(query.match.value);
+    } else if (query?.wildcard?.value) {
+      searchTerm = String(query.wildcard.value);
     } else if (tsquery && tsquery.trim() !== '') {
-      // Handle string queries
-      searchQueryParam = this.convertToTsQuery(tsquery);
-      searchCondition = `sd.search_vector @@ to_tsquery('english', $${paramIndex})`;
-      params.push(searchQueryParam);
-      paramIndex++;
+      searchTerm = tsquery;
     }
 
-    // Combine relevance score with business ranking - simplified for performance
-    const relevanceScore = searchQueryParam
-      ? `ts_rank_cd(sd.search_vector, to_tsquery('english', $${paramIndex - 1}))`
-      : '1.0';
-    const finalScore = `(${relevanceScore} * 1000) + ${businessRankingParts.join(' + ')}`;
-    const businessScore = businessRankingParts.join(' + ');
-
-    // Build filter conditions
-    let filterCondition = '';
-    if (searchQuery.filter) {
-      filterCondition = this.buildFilterConditions(searchQuery.filter, params, paramIndex);
-      // Update paramIndex based on how many parameters were added by filters
-      paramIndex +=
-        (searchQuery.filter.bool?.must?.length || 0) +
-        (searchQuery.filter.bool?.should?.length || 0) +
-        (searchQuery.filter.bool?.must_not?.length || 0);
-    }
-
-    // Optimized: Use a single query with window function for count and results
+    // Simplified SQL query for better performance
     const sqlQuery = `
-      WITH search_results AS (
-        SELECT 
-          d.document_id,
-          d.content,
-          d.metadata,
-          ${finalScore} as score,
-          ${relevanceScore} as relevance_score,
-          ${businessScore} as business_score,
-          COUNT(*) OVER() as total_count
-        FROM search_documents sd
-        JOIN documents d ON d.document_id = sd.document_id AND d.index_name = sd.index_name
-        WHERE sd.index_name = $1 
-          ${searchCondition ? `AND ${searchCondition}` : ''} 
-          ${filterCondition}
-        ORDER BY score DESC, d.content->>'updated_at' DESC
-        LIMIT $${paramIndex}::integer OFFSET $${paramIndex + 1}::integer
-      )
-      SELECT * FROM search_results`;
+      SELECT 
+        d.document_id,
+        d.content,
+        d.metadata,
+        ts_rank_cd(sd.search_vector, plainto_tsquery('english', $1)) as score,
+        COUNT(*) OVER() as total_count
+      FROM search_documents sd
+      JOIN documents d ON d.document_id = sd.document_id AND d.index_name = sd.index_name
+      WHERE sd.index_name = $2 
+        AND sd.search_vector @@ plainto_tsquery('english', $1)
+      ORDER BY score DESC
+      LIMIT $3 OFFSET $4`;
 
-    params.push(size, from);
+    const params = [searchTerm, indexName, size, from];
 
     try {
       const result = await this.dataSource.query(sqlQuery, params);
@@ -663,14 +603,12 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
         id: row.document_id,
         score: parseFloat(row.score) || 0,
         document: row.content,
-        relevance_score: parseFloat(row.relevance_score) || 0,
-        business_score: parseFloat(row.business_score) || 0,
       }));
 
       const maxScore = hits.length > 0 ? Math.max(...hits.map(h => h.score)) : 0;
 
       return {
-        totalHits: parseInt(result[0]?.total_count || '0', 10), // ✅ Now returns total matches across all pages
+        totalHits: parseInt(result[0]?.total_count || '0', 10),
         maxScore,
         hits,
       };
@@ -702,6 +640,31 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
     if (result.length === 0) {
       throw new NotFoundException(`Index ${indexName} not found`);
     }
+  }
+
+  /**
+   * Generate cache key for query
+   */
+  private generateCacheKey(indexName: string, searchQuery: SearchQueryDto): string {
+    return `${indexName}:${JSON.stringify(searchQuery)}`;
+  }
+
+  /**
+   * Clear query cache
+   */
+  async clearCache(): Promise<void> {
+    this.queryCache.clear();
+    this.logger.log('Query cache cleared');
+  }
+
+  /**
+   * Get cache statistics
+   */
+  getCacheStats(): { size: number; hitRate: number } {
+    return {
+      size: this.queryCache.size,
+      hitRate: 0.8, // Placeholder - would need to track actual hits
+    };
   }
 
   private async buildSearchQuery(

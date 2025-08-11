@@ -318,7 +318,7 @@ export class SearchController {
       throw new BadRequestException('Search query is required');
     }
 
-    console.log('search payload', searchDto, 'filter', searchDto.filter.bool.must);
+    console.log('search payload', searchDto, 'filter', searchDto.filter?.bool?.must);
 
     // Convert to appropriate SearchQueryDto format if necessary
     // This handles both string and object formats for backward compatibility
