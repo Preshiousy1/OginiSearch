@@ -856,13 +856,13 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
         WHERE sd.index_name = $1
           AND (${fieldConditions})`;
           } else {
-            // Fallback to searching entire content JSON as text
+            // Fallback to searching entire content JSON as text (use contains match)
             sql += `
           ${boost}::float as score
         FROM search_documents sd
         JOIN documents d ON d.document_id = sd.document_id AND d.index_name = sd.index_name
         WHERE sd.index_name = $1
-          AND d.content::text ILIKE $${paramIndex}::text`;
+          AND d.content::text ILIKE '%' || $${paramIndex}::text || '%'`;
           }
         } else {
           // Handle .keyword subfields by extracting the base field name
@@ -1065,8 +1065,8 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
         sql = `${fieldSql} = ANY($${paramIndex}::text[])`;
         params.push(value);
       } else {
-        sql = `${fieldSql} = $${paramIndex}`;
-        params.push(value);
+        sql = `${fieldSql} = $${paramIndex}::text`;
+        params.push(String(value));
       }
       nextParamIndex = paramIndex + 1;
     } else {
@@ -1078,8 +1078,8 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
         sql = `${fieldSql} = ANY($${paramIndex}::text[])`;
         params.push(value);
       } else {
-        sql = `${fieldSql} = $${paramIndex}`;
-        params.push(value);
+        sql = `${fieldSql} = $${paramIndex}::text`;
+        params.push(String(value));
       }
       nextParamIndex = paramIndex + 1;
     }
