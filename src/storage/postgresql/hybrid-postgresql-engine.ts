@@ -233,7 +233,11 @@ export class HybridPostgreSQLEngine {
    * Calculate term frequency in a text field
    */
   private calculateTermFrequency(text: string, term: string): number {
-    const regex = new RegExp(`\\b${term}\\b`, 'gi');
+    if (!term) return 0;
+    const sanitized = term.replace(/[\*\?]/g, '');
+    if (!sanitized) return 0;
+    const escaped = sanitized.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const regex = new RegExp(`\\b${escaped}\\b`, 'gi');
     const matches = text.match(regex);
     return matches ? matches.length : 0;
   }

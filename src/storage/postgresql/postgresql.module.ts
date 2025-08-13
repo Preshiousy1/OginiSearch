@@ -4,6 +4,7 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { PostgreSQLService } from './postgresql.service';
 import { PostgreSQLFuzzySearch } from './postgresql-fuzzy-search';
 import { PostgreSQLSchemaManager } from './postgresql-schema-manager';
+import { PostgreSQLIndexStats } from './postgresql-index-stats';
 import { Document } from './entities/document.entity';
 import { SearchDocument } from './entities/search-document.entity';
 import { Index } from './entities/index.entity';
@@ -25,7 +26,7 @@ import { SchemaModule } from '../../schema/schema.module';
         synchronize: false, // Temporarily enable for table creation
         logging: false,
         ssl:
-          configService.get<string>('NODE_ENV') === 'production'
+          configService.get<string>('POSTGRES_SSL') === 'true'
             ? { rejectUnauthorized: false }
             : false,
         extra: {
@@ -42,7 +43,18 @@ import { SchemaModule } from '../../schema/schema.module';
     TypeOrmModule.forFeature([Document, SearchDocument, Index]),
     forwardRef(() => SchemaModule),
   ],
-  providers: [PostgreSQLService, PostgreSQLFuzzySearch, PostgreSQLSchemaManager],
-  exports: [PostgreSQLService, PostgreSQLFuzzySearch, PostgreSQLSchemaManager, TypeOrmModule],
+  providers: [
+    PostgreSQLService,
+    PostgreSQLFuzzySearch,
+    PostgreSQLSchemaManager,
+    PostgreSQLIndexStats,
+  ],
+  exports: [
+    PostgreSQLService,
+    PostgreSQLFuzzySearch,
+    PostgreSQLSchemaManager,
+    PostgreSQLIndexStats,
+    TypeOrmModule,
+  ],
 })
 export class PostgreSQLModule {}

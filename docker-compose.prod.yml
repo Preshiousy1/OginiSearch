@@ -3,6 +3,7 @@ version: '3.8'
 name: ogini-prod
 
 services:
+  # === MAIN APPLICATION (API + SEARCH) ===
   app:
     build:
       context: .
@@ -20,12 +21,31 @@ services:
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres}
       - REDIS_HOST=redis
       - REDIS_PORT=6379
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
+      # === RAILWAY 32GB OPTIMIZATIONS ===
+      - NODE_OPTIONS=--max-old-space-size=8192 --expose-gc
+      - INDEXING_CONCURRENCY=20
+      - BULK_INDEXING_CONCURRENCY=10
+      - DOC_PROCESSING_CONCURRENCY=15
+      - BULK_BATCH_SIZE=1000
+      - BULK_MAX_BATCH_SIZE=2000
+      - MAX_CACHE_SIZE=15000
+      - ENABLE_FAST_DEDUPLICATION=true
+      - ENABLE_PARALLEL_ANALYSIS=true
+      - ANALYSIS_WORKERS=8
+      - RAILWAY_MEMORY_LIMIT=32768
+      - RAILWAY_CPU_LIMIT=32
+      - RAILWAY_MAX_CONNECTIONS=50
+      # === WORKER THREAD CONFIGURATION ===
+      - WORKER_THREADS_ENABLED=true
+      - WORKER_THREAD_PERCENTAGE=75
     deploy:
+      resources:
+        limits:
+          cpus: '8' # 8 cores → 6 worker threads (75%)
+          memory: 8G
+        reservations:
+          cpus: '6'
+          memory: 6G
       restart_policy:
         condition: on-failure
         max_attempts: 3
@@ -36,6 +56,7 @@ services:
       timeout: 5s
       retries: 3
 
+  # === POSTGRESQL DATABASE ===
   postgres:
     image: postgres:16-alpine
     container_name: ogini-postgres-prod
@@ -49,27 +70,56 @@ services:
       - POSTGRES_USER=postgres
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres}
       - POSTGRES_INITDB_ARGS=--encoding=UTF-8 --locale=C
+    deploy:
+      resources:
+        limits:
+          cpus: '6'
+          memory: 16G
+        reservations:
+          cpus: '4'
+          memory: 12G
     command: >
       postgres
-      -c shared_preload_libraries=pg_stat_statements
+      -c shared_preload_libraries=pg_stat_statements,pg_stat_monitor,pg_trgm
       -c pg_stat_statements.track=all
-      -c max_connections=300
-      -c shared_buffers=512MB
-      -c effective_cache_size=2GB
-      -c maintenance_work_mem=128MB
+      -c pg_stat_monitor.pgsm_normalized_query=on
+      -c max_connections=500
+      -c shared_buffers=4GB
+      -c effective_cache_size=12GB
+      -c maintenance_work_mem=512MB
       -c checkpoint_completion_target=0.9
-      -c wal_buffers=32MB
-      -c default_statistics_target=100
+      -c wal_buffers=128MB
+      -c default_statistics_target=500
       -c random_page_cost=1.1
-      -c effective_io_concurrency=300
-      -c work_mem=8MB
-      -c min_wal_size=2GB
-      -c max_wal_size=8GB
-      -c log_min_duration_statement=1000
+      -c effective_io_concurrency=400
+      -c work_mem=32MB
+      -c min_wal_size=4GB
+      -c max_wal_size=16GB
+      -c log_min_duration_statement=100
       -c log_checkpoints=on
       -c log_connections=on
       -c log_disconnections=on
       -c log_lock_waits=on
+      -c log_temp_files=0
+      -c log_autovacuum_min_duration=0
+      -c autovacuum_vacuum_scale_factor=0.02
+      -c autovacuum_analyze_scale_factor=0.01
+      -c autovacuum_vacuum_cost_limit=2000
+      -c autovacuum_vacuum_cost_delay=10ms
+      -c max_parallel_workers_per_gather=4
+      -c max_parallel_workers=12
+      -c max_parallel_maintenance_workers=4
+      -c synchronous_commit=off
+      -c fsync=on
+      -c full_page_writes=on
+      -c wal_compression=on
+      -c checkpoint_timeout=10min
+      -c bgwriter_delay=100ms
+      -c bgwriter_lru_maxpages=1000
+      -c bgwriter_lru_multiplier=10.0
+      -c ssl=on
+      -c ssl_ciphers=HIGH:MEDIUM:+3DES:!aNULL
+      -c ssl_prefer_server_ciphers=on
     healthcheck:
       test: ['CMD-SHELL', 'pg_isready -U postgres -d ogini_search_prod']
       interval: 10s
@@ -77,6 +127,7 @@ services:
       retries: 5
       start_period: 10s
 
+  # === REDIS CACHE ===
   redis:
     image: redis:7-alpine
     container_name: ogini-redis-prod
@@ -84,7 +135,29 @@ services:
       - ogini-network
     volumes:
       - redis-data:/data
-    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 1G
+    command: >
+      redis-server
+      --appendonly yes
+      --maxmemory 1.5gb
+      --maxmemory-policy allkeys-lru
+      --save 900 1
+      --save 300 10
+      --save 60 10000
+      --tcp-keepalive 300
+      --timeout 0
+      --tcp-backlog 511
+      --databases 16
+      --maxclients 5000
+      --io-threads 2
+      --io-threads-do-reads yes
     healthcheck:
       test: ['CMD', 'redis-cli', 'ping']
       interval: 10s
@@ -92,10 +165,234 @@ services:
       retries: 5
       start_period: 5s
 
+  # === DEDICATED INDEXING WORKERS ===
+  # Each worker gets 4 cores → 3 worker threads (75%)
+  # Total: 6 workers × 3 threads = 18 worker threads for indexing
+
+  worker-1:
+    build:
+      context: .
+      target: production
+    networks:
+      - ogini-network
+    environment:
+      - NODE_ENV=production
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=ogini_search_prod
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - WORKER_MODE=true
+      - WORKER_ID=1
+      - INDEXING_CONCURRENCY=15
+      - BULK_INDEXING_CONCURRENCY=10
+      - DOC_PROCESSING_CONCURRENCY=12
+      - NODE_OPTIONS=--max-old-space-size=4096 --expose-gc
+      - WORKER_THREADS_ENABLED=true
+      - WORKER_THREAD_PERCENTAGE=75
+    deploy:
+      resources:
+        limits:
+          cpus: '4' # 4 cores → 3 worker threads
+          memory: 4G
+        reservations:
+          cpus: '3'
+          memory: 3G
+      restart_policy:
+        condition: on-failure
+        max_attempts: 3
+    command: ['npm', 'run', 'start:worker']
+
+  worker-2:
+    build:
+      context: .
+      target: production
+    networks:
+      - ogini-network
+    environment:
+      - NODE_ENV=production
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=ogini_search_prod
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - WORKER_MODE=true
+      - WORKER_ID=2
+      - INDEXING_CONCURRENCY=15
+      - BULK_INDEXING_CONCURRENCY=10
+      - DOC_PROCESSING_CONCURRENCY=12
+      - NODE_OPTIONS=--max-old-space-size=4096 --expose-gc
+      - WORKER_THREADS_ENABLED=true
+      - WORKER_THREAD_PERCENTAGE=75
+    deploy:
+      resources:
+        limits:
+          cpus: '4' # 4 cores → 3 worker threads
+          memory: 4G
+        reservations:
+          cpus: '3'
+          memory: 3G
+      restart_policy:
+        condition: on-failure
+        max_attempts: 3
+    command: ['npm', 'run', 'start:worker']
+
+  worker-3:
+    build:
+      context: .
+      target: production
+    networks:
+      - ogini-network
+    environment:
+      - NODE_ENV=production
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=ogini_search_prod
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - WORKER_MODE=true
+      - WORKER_ID=3
+      - INDEXING_CONCURRENCY=15
+      - BULK_INDEXING_CONCURRENCY=10
+      - DOC_PROCESSING_CONCURRENCY=12
+      - NODE_OPTIONS=--max-old-space-size=4096 --expose-gc
+      - WORKER_THREADS_ENABLED=true
+      - WORKER_THREAD_PERCENTAGE=75
+    deploy:
+      resources:
+        limits:
+          cpus: '4' # 4 cores → 3 worker threads
+          memory: 4G
+        reservations:
+          cpus: '3'
+          memory: 3G
+      restart_policy:
+        condition: on-failure
+        max_attempts: 3
+    command: ['npm', 'run', 'start:worker']
+
+  worker-4:
+    build:
+      context: .
+      target: production
+    networks:
+      - ogini-network
+    environment:
+      - NODE_ENV=production
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=ogini_search_prod
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - WORKER_MODE=true
+      - WORKER_ID=4
+      - INDEXING_CONCURRENCY=15
+      - BULK_INDEXING_CONCURRENCY=10
+      - DOC_PROCESSING_CONCURRENCY=12
+      - NODE_OPTIONS=--max-old-space-size=4096 --expose-gc
+      - WORKER_THREADS_ENABLED=true
+      - WORKER_THREAD_PERCENTAGE=75
+    deploy:
+      resources:
+        limits:
+          cpus: '4' # 4 cores → 3 worker threads
+          memory: 4G
+        reservations:
+          cpus: '3'
+          memory: 3G
+      restart_policy:
+        condition: on-failure
+        max_attempts: 3
+    command: ['npm', 'run', 'start:worker']
+
+  worker-5:
+    build:
+      context: .
+      target: production
+    networks:
+      - ogini-network
+    environment:
+      - NODE_ENV=production
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=ogini_search_prod
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - WORKER_MODE=true
+      - WORKER_ID=5
+      - INDEXING_CONCURRENCY=15
+      - BULK_INDEXING_CONCURRENCY=10
+      - DOC_PROCESSING_CONCURRENCY=12
+      - NODE_OPTIONS=--max-old-space-size=4096 --expose-gc
+      - WORKER_THREADS_ENABLED=true
+      - WORKER_THREAD_PERCENTAGE=75
+    deploy:
+      resources:
+        limits:
+          cpus: '4' # 4 cores → 3 worker threads
+          memory: 4G
+        reservations:
+          cpus: '3'
+          memory: 3G
+      restart_policy:
+        condition: on-failure
+        max_attempts: 3
+    command: ['npm', 'run', 'start:worker']
+
+  worker-6:
+    build:
+      context: .
+      target: production
+    networks:
+      - ogini-network
+    environment:
+      - NODE_ENV=production
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=ogini_search_prod
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - WORKER_MODE=true
+      - WORKER_ID=6
+      - INDEXING_CONCURRENCY=15
+      - BULK_INDEXING_CONCURRENCY=10
+      - DOC_PROCESSING_CONCURRENCY=12
+      - NODE_OPTIONS=--max-old-space-size=4096 --expose-gc
+      - WORKER_THREADS_ENABLED=true
+      - WORKER_THREAD_PERCENTAGE=75
+    deploy:
+      resources:
+        limits:
+          cpus: '4' # 4 cores → 3 worker threads
+          memory: 4G
+        reservations:
+          cpus: '3'
+          memory: 3G
+      restart_policy:
+        condition: on-failure
+        max_attempts: 3
+    command: ['npm', 'run', 'start:worker']
+
 volumes:
   postgres-data:
+    driver: local
   redis-data:
+    driver: local
 
 networks:
   ogini-network:
     driver: bridge
+    driver_opts:
+      com.docker.network.driver.mtu: 1500

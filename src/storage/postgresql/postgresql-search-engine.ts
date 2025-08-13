@@ -20,6 +20,8 @@ import {
 import { CreateIndexDto, IndexResponseDto } from '../../api/dtos/index.dto';
 import { RawQuery } from '../../search/interfaces/query-processor.interface';
 import { SearchEngine } from '../../search/interfaces/search-engine.interface';
+import { BM25Scorer } from '../../index/bm25-scorer';
+import { PostgreSQLIndexStats } from './postgresql-index-stats';
 
 export interface PostgreSQLSearchOptions {
   from?: number;
@@ -64,6 +66,7 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
     private readonly documentProcessor: PostgreSQLDocumentProcessor,
     private readonly analysisAdapter: PostgreSQLAnalysisAdapter,
     private readonly queryProcessor: QueryProcessorService,
+    private readonly indexStats: PostgreSQLIndexStats,
   ) {}
 
   async onModuleInit() {
@@ -111,7 +114,7 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
       // Check cache first
       const cacheKey = this.generateCacheKey(indexName, searchQuery);
       const cachedResult = this.queryCache.get(cacheKey);
-      
+
       if (cachedResult && Date.now() - cachedResult.timestamp < this.CACHE_TTL) {
         metrics.execution = Date.now() - startTime;
         metrics.total = metrics.execution;
@@ -579,43 +582,140 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
       searchTerm = tsquery;
     }
 
-    // Simplified SQL query for better performance
+    // Two-stage search: PostgreSQL candidates → BM25 re-ranking
+    const candidateLimit = Math.min(size * 10, 200); // Get more candidates for better BM25 ranking
+
+    // Stage 1: PostgreSQL full-text search (fast candidates)
     const sqlQuery = `
       SELECT 
         d.document_id,
         d.content,
         d.metadata,
-        ts_rank_cd(sd.search_vector, plainto_tsquery('english', $1)) as score,
-        COUNT(*) OVER() as total_count
+        ts_rank_cd(sd.search_vector, plainto_tsquery('english', $1)) as postgresql_score
       FROM search_documents sd
       JOIN documents d ON d.document_id = sd.document_id AND d.index_name = sd.index_name
       WHERE sd.index_name = $2 
         AND sd.search_vector @@ plainto_tsquery('english', $1)
-      ORDER BY score DESC
-      LIMIT $3 OFFSET $4`;
+      ORDER BY postgresql_score DESC
+      LIMIT $3`;
 
-    const params = [searchTerm, indexName, size, from];
+    const params = [searchTerm, indexName, candidateLimit];
 
     try {
       const result = await this.dataSource.query(sqlQuery, params);
 
-      const hits = result.map((row: any) => ({
-        id: row.document_id,
-        score: parseFloat(row.score) || 0,
-        document: row.content,
-      }));
+      if (result.length === 0) {
+        return {
+          totalHits: 0,
+          maxScore: 0,
+          hits: [],
+        };
+      }
 
-      const maxScore = hits.length > 0 ? Math.max(...hits.map(h => h.score)) : 0;
+      // Stage 2: BM25 re-ranking for improved relevance
+      const rerankedHits = await this.bm25Reranking(result, searchTerm);
+
+      // Apply pagination
+      const paginatedHits = rerankedHits.slice(from, from + size);
+
+      const maxScore = paginatedHits.length > 0 ? Math.max(...paginatedHits.map(h => h.score)) : 0;
 
       return {
-        totalHits: parseInt(result[0]?.total_count || '0', 10),
+        totalHits: rerankedHits.length,
         maxScore,
-        hits,
+        hits: paginatedHits,
       };
     } catch (error) {
       this.logger.error('Search error:', error);
       throw error;
     }
+  }
+
+  /**
+   * BM25 re-ranking of PostgreSQL candidates
+   */
+  private async bm25Reranking(
+    candidates: any[],
+    searchTerm: string,
+  ): Promise<Array<{ id: string; score: number; document: Record<string, any> }>> {
+    // Create BM25 scorer with generic field weights
+    const bm25Scorer = new BM25Scorer(this.indexStats, {
+      k1: 1.2,
+      b: 0.75,
+      fieldWeights: {
+        name: 3.0,
+        title: 3.0,
+        headline: 3.0,
+        subject: 3.0,
+        category: 2.0,
+        type: 2.0,
+        classification: 2.0,
+        description: 1.5,
+        summary: 1.5,
+        content: 1.5,
+        tags: 1.5,
+        keywords: 1.5,
+        labels: 1.5,
+      },
+    });
+
+    const queryTerms = searchTerm
+      .toLowerCase()
+      .split(/\s+/)
+      .filter(term => term.length > 0);
+
+    // Calculate BM25 scores for each candidate
+    const rerankedCandidates = candidates.map(candidate => {
+      let bm25Score = 0;
+
+      // Calculate BM25 score for each field
+      for (const [fieldName, fieldWeight] of Object.entries(
+        bm25Scorer.getParameters().fieldWeights,
+      )) {
+        if (candidate.content[fieldName]) {
+          const fieldContent = String(candidate.content[fieldName]).toLowerCase();
+
+          // Calculate term frequency for each query term in this field
+          for (const term of queryTerms) {
+            const termFreq = this.calculateTermFrequency(fieldContent, term);
+            if (termFreq > 0) {
+              const fieldScore = bm25Scorer.score(term, candidate.document_id, fieldName, termFreq);
+              bm25Score += fieldScore * (fieldWeight as number);
+            }
+          }
+        }
+      }
+
+      // Combine PostgreSQL and BM25 scores (weighted average)
+      const postgresqlScore = parseFloat(candidate.postgresql_score) || 0;
+      const postgresqlWeight = 0.3;
+      const bm25Weight = 0.7;
+      const finalScore = postgresqlScore * postgresqlWeight + bm25Score * bm25Weight;
+
+      return {
+        id: candidate.document_id,
+        score: finalScore,
+        document: candidate.content,
+      };
+    });
+
+    // Sort by final combined score
+    return rerankedCandidates.sort((a, b) => b.score - a.score);
+  }
+
+  /**
+   * Calculate term frequency in a text field
+   */
+  private calculateTermFrequency(text: string, term: string): number {
+    if (!term) return 0;
+    // Remove wildcard characters commonly present in search inputs
+    const sanitized = term.replace(/[\*\?]/g, '');
+    if (!sanitized) return 0;
+    // Escape regex metacharacters
+    const escaped = sanitized.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const regex = new RegExp(`\\b${escaped}\\b`, 'gi');
+    const matches = text.match(regex);
+    return matches ? matches.length : 0;
   }
 
   /**
