@@ -640,21 +640,24 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
           Array.isArray(searchQuery.fields) && searchQuery.fields.length > 0
             ? searchQuery.fields
             : ['name', 'title', 'description', 'slug', 'tags', 'category_name'];
-        const fieldConds = fields
+        const fieldCondsSelect = fields
           .map(f => `d.content->>'${f.replace('.keyword', '')}' ILIKE $3`)
+          .join(' OR ');
+        const fieldCondsCount = fields
+          .map(f => `d.content->>'${f.replace('.keyword', '')}' ILIKE $2`)
           .join(' OR ');
 
         const fallbackCountSql = `
           SELECT COUNT(*)::int AS count
           FROM documents d
-          WHERE d.index_name = $1 AND (${fieldConds})
+          WHERE d.index_name = $1 AND (${fieldCondsCount})
         `;
         const fallbackSql = `
           SELECT d.document_id, d.content, d.metadata, 1.0::float AS postgresql_score
           FROM documents d
-          WHERE d.index_name = $1 AND (${fieldConds})
+          WHERE d.index_name = $1 AND (${fieldCondsSelect})
           ORDER BY d.document_id
-          LIMIT $2 OFFSET $4
+          LIMIT $2::int OFFSET $4::int
         `;
         const fbParams = [indexName, candidateLimit, likePattern, from];
         const fbCountParams = [indexName, likePattern];
