@@ -630,11 +630,70 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
         `executeSearch: candidates=${result.length} totalMatches=${totalMatches} index='${indexName}'`,
       );
 
-      if (result.length === 0) {
+      // Fallback: if no candidates from search_documents or wildcard provided, run ILIKE over content fields
+      const hasWildcard = /[\*\?]/.test(searchTerm);
+      let fallbackRows: any[] = [];
+      let fallbackTotal = 0;
+      if (result.length === 0 || hasWildcard) {
+        const likePattern = searchTerm.replace(/\*/g, '%').replace(/\?/g, '_');
+        const fields =
+          Array.isArray(searchQuery.fields) && searchQuery.fields.length > 0
+            ? searchQuery.fields
+            : ['name', 'title', 'description', 'slug', 'tags', 'category_name'];
+        const fieldConds = fields
+          .map(f => `d.content->>'${f.replace('.keyword', '')}' ILIKE $3`)
+          .join(' OR ');
+
+        const fallbackCountSql = `
+          SELECT COUNT(*)::int AS count
+          FROM documents d
+          WHERE d.index_name = $1 AND (${fieldConds})
+        `;
+        const fallbackSql = `
+          SELECT d.document_id, d.content, d.metadata, 1.0::float AS postgresql_score
+          FROM documents d
+          WHERE d.index_name = $1 AND (${fieldConds})
+          ORDER BY d.document_id
+          LIMIT $2 OFFSET $4
+        `;
+        const fbParams = [indexName, candidateLimit, likePattern, from];
+        const fbCountParams = [indexName, likePattern];
+        this.logger.debug(`executeSearch Fallback SQL: ${fallbackSql}`);
+        this.logger.debug(`executeSearch Fallback params: ${JSON.stringify(fbParams)}`);
+        const [fbRows, fbCountRows] = await Promise.all([
+          this.dataSource.query(fallbackSql, fbParams),
+          this.dataSource.query(fallbackCountSql, fbCountParams),
+        ]);
+        fallbackRows = fbRows;
+        fallbackTotal =
+          Array.isArray(fbCountRows) && fbCountRows[0]?.count ? Number(fbCountRows[0].count) : 0;
+        this.logger.debug(
+          `executeSearch Fallback: rows=${fallbackRows.length} total=${fallbackTotal}`,
+        );
+
+        if (fallbackRows.length === 0) {
+          return {
+            totalHits: fallbackTotal,
+            maxScore: 0,
+            hits: [],
+          };
+        }
+
+        // Rerank fallback candidates
+        const rerankedFallback = await this.bm25Reranking(fallbackRows, searchTerm);
+        this.logger.debug(
+          `executeSearch Fallback: reranked=${rerankedFallback.length} returning=${Math.min(
+            size,
+            rerankedFallback.length,
+          )} from=${from}`,
+        );
+        const paginatedFallback = rerankedFallback.slice(0, size);
+        const fbMax =
+          paginatedFallback.length > 0 ? Math.max(...paginatedFallback.map(h => h.score)) : 0;
         return {
-          totalHits: totalMatches,
-          maxScore: 0,
-          hits: [],
+          totalHits: fallbackTotal,
+          maxScore: fbMax,
+          hits: paginatedFallback,
         };
       }
 
