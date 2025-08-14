@@ -611,6 +611,13 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
     const params = [searchTerm, indexName, candidateLimit];
 
     try {
+      this.logger.debug(
+        `executeSearch: index='${indexName}' term='${searchTerm}' from=${from} size=${size} filter=${JSON.stringify(
+          searchQuery.filter || {},
+        )}`,
+      );
+      this.logger.debug(`executeSearch SQL: ${sqlQuery}`);
+      this.logger.debug(`executeSearch params: ${JSON.stringify(params)}`);
       // Execute in parallel
       const [result, countRows] = await Promise.all([
         this.dataSource.query(sqlQuery, params),
@@ -619,6 +626,9 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
 
       const totalMatches =
         Array.isArray(countRows) && countRows[0]?.count ? Number(countRows[0].count) : 0;
+      this.logger.debug(
+        `executeSearch: candidates=${result.length} totalMatches=${totalMatches} index='${indexName}'`,
+      );
 
       if (result.length === 0) {
         return {
@@ -630,6 +640,12 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
 
       // Stage 2: BM25 re-ranking for improved relevance
       const rerankedHits = await this.bm25Reranking(result, searchTerm);
+      this.logger.debug(
+        `executeSearch: rerankedHits=${rerankedHits.length} returning=${Math.min(
+          size,
+          rerankedHits.length,
+        )} from=${from}`,
+      );
 
       // Apply pagination
       const paginatedHits = rerankedHits.slice(from, from + size);
