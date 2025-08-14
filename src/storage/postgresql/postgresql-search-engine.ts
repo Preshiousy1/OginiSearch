@@ -599,14 +599,30 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
       ORDER BY postgresql_score DESC
       LIMIT $3`;
 
+    // Separate total count query (not limited)
+    const countQuery = `
+      SELECT COUNT(*)::int AS count
+      FROM search_documents sd
+      JOIN documents d ON d.document_id = sd.document_id AND d.index_name = sd.index_name
+      WHERE sd.index_name = $2 
+        AND sd.search_vector @@ plainto_tsquery('english', $1)
+    `;
+
     const params = [searchTerm, indexName, candidateLimit];
 
     try {
-      const result = await this.dataSource.query(sqlQuery, params);
+      // Execute in parallel
+      const [result, countRows] = await Promise.all([
+        this.dataSource.query(sqlQuery, params),
+        this.dataSource.query(countQuery, [searchTerm, indexName]),
+      ]);
+
+      const totalMatches =
+        Array.isArray(countRows) && countRows[0]?.count ? Number(countRows[0].count) : 0;
 
       if (result.length === 0) {
         return {
-          totalHits: 0,
+          totalHits: totalMatches,
           maxScore: 0,
           hits: [],
         };
@@ -621,7 +637,7 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
       const maxScore = paginatedHits.length > 0 ? Math.max(...paginatedHits.map(h => h.score)) : 0;
 
       return {
-        totalHits: rerankedHits.length,
+        totalHits: totalMatches,
         maxScore,
         hits: paginatedHits,
       };
@@ -850,43 +866,39 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
               .map(f => `d.content->>'${f.replace('.keyword', '')}' ILIKE $${paramIndex}::text`)
               .join(' OR ');
             sql += `
-          ${boost}::float as score
-        FROM search_documents sd
-        JOIN documents d ON d.document_id = sd.document_id AND d.index_name = sd.index_name
-        WHERE sd.index_name = $1
+           ${boost}::float as score
+        FROM documents d
+        WHERE d.index_name = $1
           AND (${fieldConditions})`;
           } else {
             // Fallback to searching entire content JSON as text (use contains match)
             sql += `
-          ${boost}::float as score
-        FROM search_documents sd
-        JOIN documents d ON d.document_id = sd.document_id AND d.index_name = sd.index_name
-        WHERE sd.index_name = $1
+           ${boost}::float as score
+        FROM documents d
+        WHERE d.index_name = $1
           AND d.content::text ILIKE '%' || $${paramIndex}::text || '%'`;
           }
         } else {
           // Handle .keyword subfields by extracting the base field name
           const baseField = field.includes('.keyword') ? field.split('.')[0] : field;
           sql += `
-          ${boost}::float as score
-        FROM search_documents sd
-        JOIN documents d ON d.document_id = sd.document_id AND d.index_name = sd.index_name
-        WHERE sd.index_name = $1
+           ${boost}::float as score
+        FROM documents d
+        WHERE d.index_name = $1
           AND d.content->>'${baseField}' ILIKE $${paramIndex}::text`;
         }
         paramIndex++;
       } else if (query.bool) {
         sql += `
         1.0 as score
-      FROM search_documents sd
-      JOIN documents d ON d.document_id = sd.document_id AND d.index_name = sd.index_name
-      WHERE sd.index_name = $1`;
+      FROM documents d
+      WHERE d.index_name = $1`;
 
         if (query.bool.must) {
           query.bool.must.forEach((mustClause: any) => {
             if (mustClause.match) {
               params.push(mustClause.match.value);
-              sql += ` AND d.content->>'${mustClause.match.field}' ILIKE '%' || $${paramIndex}::text || '%'`;
+              sql += ` AND d.content->>'${mustClause.match.field}' ILIKE '%' || $${paramIndex}::text || '%';`;
               paramIndex++;
             }
           });
