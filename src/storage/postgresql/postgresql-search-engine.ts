@@ -32,6 +32,8 @@ import { QueryBuilderFactory } from './query-builders/query-builder-factory';
 import { BM25RankingService } from './bm25-ranking.service';
 import { FilterBuilderService } from './filter-builder.service';
 import { AdaptiveQueryOptimizerService } from './adaptive-query-optimizer.service';
+import { SearchConfigurationService } from './search-configuration.service';
+import { SearchMetricsService } from './search-metrics.service';
 
 export interface PostgreSQLSearchOptions {
   from?: number;
@@ -84,6 +86,8 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
     private readonly bm25RankingService: BM25RankingService,
     private readonly filterBuilderService: FilterBuilderService,
     private readonly adaptiveQueryOptimizer: AdaptiveQueryOptimizerService,
+    private readonly searchConfig: SearchConfigurationService,
+    private readonly searchMetrics: SearchMetricsService,
   ) {}
 
   async onModuleInit() {
@@ -154,7 +158,12 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
       if (cachedResult) {
         metrics.execution = Date.now() - startTime;
         metrics.total = metrics.execution;
-        // Removed debug log for performance
+
+        // Phase 5: Record cache hit metrics (ultra-lightweight, async)
+        setImmediate(() => {
+          this.searchMetrics.recordQuery(indexName, 'cache_hit', metrics.execution, true);
+        });
+
         return { data: cachedResult, metrics };
       }
 
@@ -170,7 +179,13 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
       }
 
       // URGENT: Revert to optimized legacy search until decomposed issues are fixed
+      this.logger.debug(
+        `[DEBUG] Executing search: index=${indexName}, tsquery="${tsquery}", hasFilter=${!!searchQuery.filter}`,
+      );
       const searchResult = await this.executeSearch(indexName, tsquery, searchQuery);
+      this.logger.debug(
+        `[DEBUG] Search result: totalHits=${searchResult.totalHits}, hits=${searchResult.hits.length}`,
+      );
 
       const response = {
         hits: searchResult.hits.map(hit => ({
@@ -197,6 +212,13 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
           response.total,
           true, // success
         );
+
+        // Phase 5: Record search metrics (ultra-lightweight)
+        const queryType =
+          typeof searchQuery.query === 'string'
+            ? 'string'
+            : Object.keys(searchQuery.query || {})[0] || 'unknown';
+        this.searchMetrics.recordQuery(indexName, queryType, metrics.execution, false);
       });
 
       return { data: response, metrics };
@@ -662,9 +684,15 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
   }> {
     const { from = 0, size = 10 } = searchQuery;
 
+    this.logger.debug(`[executeSearch] Starting search for "${tsquery}" in index "${indexName}"`);
+
     // Phase 3 Decomposition: Use QueryBuilder service for search analysis
     const queryInfo = this.queryBuilder.analyzeSearchTerm(searchQuery.query, tsquery);
     const candidateLimit = Math.min(size * 10, 200);
+
+    this.logger.debug(
+      `[executeSearch] Query info: searchTerm="${queryInfo.searchTerm}", candidateLimit=${candidateLimit}`,
+    );
 
     // Phase 3 Decomposition: Use PerformanceMonitor for instrumented execution
     try {
@@ -683,8 +711,14 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
           indexName,
         );
 
+      this.logger.debug(
+        `[executeSearch] Main query results: ${mainResult.length} candidates found`,
+      );
+
       // Check if we need alternative strategies
       const strategy = this.queryBuilder.getQueryStrategy(queryInfo, mainResult.length > 0);
+
+      this.logger.debug(`[executeSearch] Query strategy selected: ${strategy}`);
 
       if (strategy === 'main') {
         // Process main results with BM25 ranking
@@ -761,14 +795,16 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
   private async bm25Reranking(
     candidates: any[],
     searchTerm: string,
+    indexName: string,
   ): Promise<Array<{ id: string; score: number; document: Record<string, any> }>> {
-    // Use the dedicated BM25RankingService with optimized configuration
-    return await this.bm25RankingService.rankDocuments(candidates, searchTerm, this.indexStats, {
-      k1: 1.2,
-      b: 0.75,
-      postgresqlWeight: 0.3,
-      bm25Weight: 0.7,
-    });
+    // Phase 5: Use dynamic configuration instead of hardcoded values
+    return await this.bm25RankingService.rankDocuments(
+      candidates,
+      searchTerm,
+      this.indexStats,
+      {}, // Empty options - will use dynamic config from SearchConfigurationService
+      indexName,
+    );
   }
 
   /**

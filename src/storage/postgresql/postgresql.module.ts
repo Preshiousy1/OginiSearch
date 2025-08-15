@@ -27,6 +27,8 @@ import { MatchAllQueryBuilder } from './query-builders/match-all-query-builder';
 // Phase 3 Services
 import { BM25RankingService } from './bm25-ranking.service';
 import { FilterBuilderService } from './filter-builder.service';
+import { SearchConfigurationService } from './search-configuration.service';
+import { SearchMetricsService } from './search-metrics.service';
 
 @Module({
   imports: [
@@ -83,6 +85,9 @@ import { FilterBuilderService } from './filter-builder.service';
     // Phase 3 Services
     BM25RankingService,
     FilterBuilderService,
+    // Phase 5 Services
+    SearchConfigurationService,
+    SearchMetricsService,
   ],
   exports: [
     PostgreSQLService,
@@ -100,6 +105,9 @@ import { FilterBuilderService } from './filter-builder.service';
     QueryBuilderFactory,
     BM25RankingService,
     FilterBuilderService,
+    // Phase 5 exports
+    SearchConfigurationService,
+    SearchMetricsService,
   ],
 })
 export class PostgreSQLModule {}

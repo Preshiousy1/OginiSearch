@@ -27,8 +27,8 @@ import {
   ApiBody,
   ApiExtraModels,
 } from '@nestjs/swagger';
-import { SearchService } from '../../search/search.service';
 import { Logger } from '@nestjs/common';
+import { SearchService } from 'src/search/search.service';
 
 @ApiTags('Search')
 @ApiExtraModels(SearchQueryDto, SuggestQueryDto)

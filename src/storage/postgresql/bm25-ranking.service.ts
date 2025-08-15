@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { BM25Scorer } from '../../index/bm25-scorer';
+import { SearchConfigurationService } from './search-configuration.service';
 
 export interface BM25RankingOptions {
   k1?: number;
@@ -19,21 +20,7 @@ export interface RankedDocument {
 export class BM25RankingService {
   private readonly logger = new Logger(BM25RankingService.name);
 
-  private readonly defaultFieldWeights = {
-    name: 3.0,
-    title: 3.0,
-    headline: 3.0,
-    subject: 3.0,
-    category: 2.0,
-    type: 2.0,
-    classification: 2.0,
-    description: 1.5,
-    summary: 1.5,
-    content: 1.5,
-    tags: 1.5,
-    keywords: 1.5,
-    labels: 1.5,
-  };
+  constructor(private readonly searchConfig: SearchConfigurationService) {}
 
   /**
    * Re-rank PostgreSQL candidates using BM25 scoring
@@ -43,17 +30,22 @@ export class BM25RankingService {
     searchTerm: string,
     indexStats: any,
     options: BM25RankingOptions = {},
+    indexName: string,
   ): Promise<RankedDocument[]> {
     if (!candidates.length) {
       return [];
     }
 
+    // Get dynamic configuration from SearchConfigurationService
+    const configParams = this.searchConfig.getBM25Parameters(indexName);
+    const configFieldWeights = this.searchConfig.getFieldWeights(indexName);
+
     const {
-      k1 = 1.2,
-      b = 0.75,
-      fieldWeights = this.defaultFieldWeights,
-      postgresqlWeight = 0.3,
-      bm25Weight = 0.7,
+      k1 = configParams.k1,
+      b = configParams.b,
+      fieldWeights = configFieldWeights,
+      postgresqlWeight = configParams.postgresqlWeight,
+      bm25Weight = configParams.bm25Weight,
     } = options;
 
     // Create BM25 scorer with provided options
@@ -122,9 +114,8 @@ export class BM25RankingService {
    * Get dynamic field weights based on index configuration
    */
   getFieldWeights(indexName: string): Record<string, number> {
-    // This could be extended to load index-specific weights from configuration
-    // For now, return default weights but make it configurable
-    return { ...this.defaultFieldWeights };
+    // Now delegated to SearchConfigurationService
+    return this.searchConfig.getFieldWeights(indexName);
   }
 
   /**
