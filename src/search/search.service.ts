@@ -1,7 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { DataSource } from 'typeorm';
 import { QueryProcessorService } from './query-processor.service';
-import { SearchExecutorService } from './search-executor.service';
 import {
   SearchQueryDto,
   SearchResponseDto,
@@ -16,7 +15,6 @@ export class SearchService {
 
   constructor(
     private readonly queryProcessor: QueryProcessorService,
-    private readonly searchExecutor: SearchExecutorService,
     private readonly postgresSearchEngine: PostgreSQLSearchEngine,
     private readonly dataSource: DataSource,
   ) {}
@@ -27,7 +25,7 @@ export class SearchService {
   async search(indexName: string, searchQuery: SearchQueryDto): Promise<SearchResponseDto> {
     const startTime = Date.now();
 
-    // --- START: Keyword field extraction ---
+    // Extract keyword fields for better search targeting
     const keywordFields = await this.extractKeywordFields(indexName);
     if (keywordFields.length > 0) {
       searchQuery.fields = keywordFields;
@@ -46,10 +44,8 @@ export class SearchService {
       }
     }
 
-    // --- END: Keyword field extraction ---
-
     try {
-      // Process query through QueryProcessorService to detect wildcard patterns
+      // Process query to detect wildcard patterns
       const processedQuery = this.queryProcessor.processQuery(searchQuery as any);
 
       // Check if the processed query is a wildcard query that was converted from a match query
@@ -63,7 +59,7 @@ export class SearchService {
         // Convert the processed wildcard query back to the format expected by PostgreSQLSearchEngine
         const wildcardQuery = {
           ...searchQuery,
-          fields: searchQuery.fields, // Ensure fields are passed through
+          fields: searchQuery.fields,
           query: {
             wildcard: {
               field: targetField,
@@ -73,84 +69,26 @@ export class SearchService {
           },
         };
 
-        // Execute search using PostgreSQL engine with the converted wildcard query
+        // Execute search using PostgreSQL engine
         const searchResult = await this.postgresSearchEngine.search(indexName, wildcardQuery);
-
-        // Format response with highlights and facets if requested
-        const hits = await Promise.all(
-          searchResult.data.hits.map(async hit => ({
-            id: hit.id,
-            index: indexName,
-            score: hit.score,
-            source: hit.source,
-            highlights: searchQuery.highlight
-              ? await this.getPostgresHighlights(
-                  hit,
-                  this.getQueryText(wildcardQuery.query),
-                  indexName,
-                )
-              : undefined,
-          })),
+        return this.formatSearchResponse(
+          searchResult,
+          wildcardQuery,
+          searchQuery,
+          indexName,
+          startTime,
         );
-
-        const response: SearchResponseDto = {
-          data: {
-            total: searchResult.data.total,
-            maxScore: hits.length > 0 ? Math.max(...hits.map(h => h.score)) : 0,
-            hits,
-            pagination: this.calculatePaginationMetadata(
-              searchResult.data.total,
-              searchQuery.size || 10,
-              searchQuery.from || 0,
-            ),
-          },
-          took: Date.now() - startTime,
-        };
-
-        // Add facets if requested
-        if (searchQuery.facets) {
-          response.data['facets'] = await this.getPostgresFacets(indexName, searchQuery.facets);
-        }
-
-        return response;
       }
 
       // Execute search using PostgreSQL engine for non-wildcard queries
       const searchResult = await this.postgresSearchEngine.search(indexName, searchQuery);
-
-      // Format response with highlights and facets if requested
-      const hits = await Promise.all(
-        searchResult.data.hits.map(async hit => ({
-          id: hit.id,
-          index: indexName,
-          score: hit.score,
-          source: hit.source,
-          highlights: searchQuery.highlight
-            ? await this.getPostgresHighlights(hit, this.getQueryText(searchQuery.query), indexName)
-            : undefined,
-        })),
+      return this.formatSearchResponse(
+        searchResult,
+        searchQuery,
+        searchQuery,
+        indexName,
+        startTime,
       );
-
-      const response: SearchResponseDto = {
-        data: {
-          total: searchResult.data.total,
-          maxScore: hits.length > 0 ? Math.max(...hits.map(h => h.score)) : 0,
-          hits,
-          pagination: this.calculatePaginationMetadata(
-            searchResult.data.total,
-            searchQuery.size || 10,
-            searchQuery.from || 0,
-          ),
-        },
-        took: Date.now() - startTime,
-      };
-
-      // Add facets if requested
-      if (searchQuery.facets) {
-        response.data['facets'] = await this.getPostgresFacets(indexName, searchQuery.facets);
-      }
-
-      return response;
     } catch (error) {
       this.logger.error(`Search failed: ${error.message}`);
       throw error;
@@ -158,24 +96,68 @@ export class SearchService {
   }
 
   /**
+   * Format search response with highlights and facets
+   */
+  private async formatSearchResponse(
+    searchResult: any,
+    queryForHighlights: any,
+    originalQuery: SearchQueryDto,
+    indexName: string,
+    startTime: number,
+  ): Promise<SearchResponseDto> {
+    // Format response with highlights and facets if requested
+    const hits = await Promise.all(
+      searchResult.data.hits.map(async hit => ({
+        id: hit.id,
+        index: indexName,
+        score: hit.score,
+        source: hit.source,
+        highlights: originalQuery.highlight
+          ? await this.getPostgresHighlights(
+              hit,
+              this.getQueryText(queryForHighlights.query),
+              indexName,
+            )
+          : undefined,
+      })),
+    );
+
+    const response: SearchResponseDto = {
+      data: {
+        total: searchResult.data.total,
+        maxScore: hits.length > 0 ? Math.max(...hits.map(h => h.score)) : 0,
+        hits,
+        pagination: this.calculatePaginationMetadata(
+          searchResult.data.total,
+          originalQuery.size || 10,
+          originalQuery.from || 0,
+        ),
+      },
+      took: Date.now() - startTime,
+    };
+
+    // Add facets if requested
+    if (originalQuery.facets) {
+      response.data['facets'] = await this.getPostgresFacets(indexName, originalQuery.facets);
+    }
+
+    return response;
+  }
+
+  /**
    * Extract keyword fields for an index
    */
   private async extractKeywordFields(indexName: string): Promise<string[]> {
     try {
-      // Fetch index mappings
       const index = await this.postgresSearchEngine.getIndex(indexName);
       const mappings = index.mappings?.properties || {};
 
-      // Collect all base fields that are keyword fields or have a keyword subfield
       const keywordFields: string[] = [];
       for (const [field, mapping] of Object.entries(mappings)) {
         const m = mapping as any;
-        // If the field itself is a keyword field
         if (m.type === 'keyword') {
           keywordFields.push(field);
-        }
-        // If the field is text and has a keyword subfield, add only the base field
-        else if (
+        } else if (
           m.type === 'text' &&
           m.fields &&
           m.fields.keyword &&

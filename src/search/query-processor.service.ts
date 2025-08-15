@@ -16,27 +16,22 @@ import {
   MatchAllQueryStep,
 } from './interfaces/query-processor.interface';
 import { AnalyzerRegistryService } from '../analysis/analyzer-registry.service';
-import { QueryPlannerService } from './query-planner.service';
 
 @Injectable()
 export class QueryProcessorService implements QueryProcessor {
   private readonly logger = new Logger(QueryProcessorService.name);
-  constructor(
-    private readonly analyzerRegistryService: AnalyzerRegistryService,
-    private readonly queryPlanner: QueryPlannerService,
-  ) {}
+  constructor(private readonly analyzerRegistryService: AnalyzerRegistryService) {}
 
   /**
    * Process a raw query into structured query objects
    */
   processQuery(rawQuery: RawQuery): ProcessedQuery {
     const parsedQuery = this.parseQuery(rawQuery);
-    const executionPlan = this.queryPlanner.createPlan(parsedQuery as Query);
 
     return {
       original: rawQuery,
       parsedQuery: parsedQuery as Query,
-      executionPlan,
+      executionPlan: null, // Execution plans removed - direct PostgreSQL execution
     };
   }
 
@@ -100,9 +95,6 @@ export class QueryProcessorService implements QueryProcessor {
 
     // Check for wildcard patterns
     if (this.isWildcardQuery(queryText)) {
-      this.logger.debug(
-        `parseStringQuery: wildcard detected text='${queryText}' fields=${JSON.stringify(fields)}`,
-      );
       return this.createWildcardQuery({ value: queryText }, fields);
     }
 
@@ -138,16 +130,13 @@ export class QueryProcessorService implements QueryProcessor {
     // Handle direct wildcard query format
     if ('value' in wildcardDto) {
       const field = wildcardDto.field || (fields && fields[0]) || '_all';
-      this.logger.debug(
-        `createWildcardQuery: field='${field}' value='${wildcardDto.value}' fields=${JSON.stringify(fields)}`,
-      );
       return {
         type: 'wildcard',
         field,
         pattern: wildcardDto.value,
         value: wildcardDto.value,
         boost: wildcardDto.boost,
-        fields: fields,
+        fields,
       };
     }
 
@@ -157,16 +146,13 @@ export class QueryProcessorService implements QueryProcessor {
       const [field, config] = entries[0];
       const value = typeof config === 'string' ? config : config.value;
       const boost = typeof config === 'object' ? config.boost : undefined;
-      this.logger.debug(
-        `createWildcardQuery(field-specific): field='${field}' value='${value}' fields=${JSON.stringify(fields)}`,
-      );
       return {
         type: 'wildcard',
         field,
         pattern: value,
         value,
         boost,
-        fields: fields,
+        fields,
       };
     }
 
@@ -188,9 +174,6 @@ export class QueryProcessorService implements QueryProcessor {
 
     // Check if the match query value is actually a wildcard pattern
     if (this.isWildcardQuery(text)) {
-      this.logger.debug(
-        `parseMatchQuery: wildcard from match value='${text}' fields=${JSON.stringify(fields)}`,
-      );
       // Create proper wildcard query object
       // If no specific field is provided, use keyword fields from mappings instead of defaulting to 'content'
       const wildcardField =

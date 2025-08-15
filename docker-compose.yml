@@ -24,6 +24,8 @@ services:
       - POSTGRES_PASSWORD=postgres
       - REDIS_HOST=redis
       - REDIS_PORT=6379
+      - MAX_CACHE_SIZE=2000
+      - CACHE_TTL_MS=600000
     depends_on:
       postgres:
         condition: service_healthy

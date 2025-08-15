@@ -1,8 +1,6 @@
 import { forwardRef, Module } from '@nestjs/common';
 import { SearchService } from './search.service';
 import { QueryProcessorService } from './query-processor.service';
-import { SearchExecutorService } from './search-executor.service';
-import { QueryPlannerService } from './query-planner.service';
 import { TypoToleranceService } from './typo-tolerance.service';
 import { PostgreSQLFuzzySearch } from '../storage/postgresql/postgresql-fuzzy-search';
 import { PostgreSQLSchemaManager } from '../storage/postgresql/postgresql-schema-manager';
@@ -24,8 +22,6 @@ import { SearchEngineModule } from 'src/search-engine/search-engine.module';
   providers: [
     SearchService,
     QueryProcessorService,
-    SearchExecutorService,
-    QueryPlannerService,
     TypoToleranceService,
     PostgreSQLFuzzySearch,
     PostgreSQLSchemaManager,

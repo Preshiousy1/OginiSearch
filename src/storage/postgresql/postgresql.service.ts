@@ -179,6 +179,9 @@ export class PostgreSQLService implements OnModuleInit {
           -- Add missing indexes if they don't exist
           CREATE INDEX IF NOT EXISTS idx_documents_metadata ON documents USING GIN (metadata);
 
+          -- Enable trigram extension for ILIKE performance optimization
+          CREATE EXTENSION IF NOT EXISTS pg_trgm;
+
           -- Ensure primary key constraint exists on documents table
           DO $$
           BEGIN

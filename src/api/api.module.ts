@@ -2,9 +2,11 @@ import { Module } from '@nestjs/common';
 import { IndexController } from './controllers/index.controller';
 import { DocumentController } from './controllers/document.controller';
 import { SearchController } from './controllers/search.controller';
+// import { StreamingSearchController } from './controllers/streaming-search.controller';
 import { BulkIndexingController } from './controllers/bulk-indexing.controller';
 import { WorkerManagementController } from './controllers/worker-management.controller';
 import { WorkerManagementService } from './services/worker-management.service';
+
 import { IndexModule } from '../index/index.module';
 import { DocumentModule } from '../document/document.module';
 import { SearchModule } from '../search/search.module';
@@ -32,6 +34,7 @@ import { BullModule } from '@nestjs/bull';
     IndexController,
     DocumentController,
     SearchController,
+    // StreamingSearchController,
     BulkIndexingController,
     WorkerManagementController,
   ],

@@ -5,10 +5,28 @@ import { PostgreSQLService } from './postgresql.service';
 import { PostgreSQLFuzzySearch } from './postgresql-fuzzy-search';
 import { PostgreSQLSchemaManager } from './postgresql-schema-manager';
 import { PostgreSQLIndexStats } from './postgresql-index-stats';
+import { DynamicIndexManagerService } from './dynamic-index-manager.service';
+import { PostgreSQLQueryBuilderService } from './query-builder.service';
+import { PostgreSQLResultProcessorService } from './result-processor.service';
+import { PostgreSQLPerformanceMonitorService } from './performance-monitor.service';
+import { OptimizedQueryCacheService } from './optimized-query-cache.service';
+
+import { AdaptiveQueryOptimizerService } from './adaptive-query-optimizer.service';
+import { TypoToleranceService } from '../../search/typo-tolerance.service';
 import { Document } from './entities/document.entity';
 import { SearchDocument } from './entities/search-document.entity';
 import { Index } from './entities/index.entity';
 import { SchemaModule } from '../../schema/schema.module';
+// Phase 3 Query Builders
+import { QueryBuilderFactory } from './query-builders/query-builder-factory';
+import { MatchQueryBuilder } from './query-builders/match-query-builder';
+import { TermQueryBuilder } from './query-builders/term-query-builder';
+import { WildcardQueryBuilder } from './query-builders/wildcard-query-builder';
+import { BoolQueryBuilder } from './query-builders/bool-query-builder';
+import { MatchAllQueryBuilder } from './query-builders/match-all-query-builder';
+// Phase 3 Services
+import { BM25RankingService } from './bm25-ranking.service';
+import { FilterBuilderService } from './filter-builder.service';
 
 @Module({
   imports: [
@@ -48,13 +66,40 @@ import { SchemaModule } from '../../schema/schema.module';
     PostgreSQLFuzzySearch,
     PostgreSQLSchemaManager,
     PostgreSQLIndexStats,
+    DynamicIndexManagerService,
+    PostgreSQLQueryBuilderService,
+    PostgreSQLResultProcessorService,
+    PostgreSQLPerformanceMonitorService,
+    OptimizedQueryCacheService,
+    AdaptiveQueryOptimizerService,
+    TypoToleranceService,
+    // Phase 3 Query Builders
+    QueryBuilderFactory,
+    MatchQueryBuilder,
+    TermQueryBuilder,
+    WildcardQueryBuilder,
+    BoolQueryBuilder,
+    MatchAllQueryBuilder,
+    // Phase 3 Services
+    BM25RankingService,
+    FilterBuilderService,
   ],
   exports: [
     PostgreSQLService,
     PostgreSQLFuzzySearch,
     PostgreSQLSchemaManager,
     PostgreSQLIndexStats,
+    DynamicIndexManagerService,
+    PostgreSQLQueryBuilderService,
+    PostgreSQLResultProcessorService,
+    PostgreSQLPerformanceMonitorService,
+    OptimizedQueryCacheService,
+    AdaptiveQueryOptimizerService,
     TypeOrmModule,
+    // Phase 3 exports
+    QueryBuilderFactory,
+    BM25RankingService,
+    FilterBuilderService,
   ],
 })
 export class PostgreSQLModule {}

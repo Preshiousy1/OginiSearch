@@ -22,6 +22,16 @@ import { RawQuery } from '../../search/interfaces/query-processor.interface';
 import { SearchEngine } from '../../search/interfaces/search-engine.interface';
 import { BM25Scorer } from '../../index/bm25-scorer';
 import { PostgreSQLIndexStats } from './postgresql-index-stats';
+import { DynamicIndexManagerService } from './dynamic-index-manager.service';
+import { PostgreSQLQueryBuilderService } from './query-builder.service';
+import { PostgreSQLResultProcessorService } from './result-processor.service';
+import { PostgreSQLPerformanceMonitorService } from './performance-monitor.service';
+import { TypoToleranceService } from '../../search/typo-tolerance.service';
+import { OptimizedQueryCacheService, CacheStats } from './optimized-query-cache.service';
+import { QueryBuilderFactory } from './query-builders/query-builder-factory';
+import { BM25RankingService } from './bm25-ranking.service';
+import { FilterBuilderService } from './filter-builder.service';
+import { AdaptiveQueryOptimizerService } from './adaptive-query-optimizer.service';
 
 export interface PostgreSQLSearchOptions {
   from?: number;
@@ -58,19 +68,28 @@ interface SearchMetrics {
 export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
   private readonly logger = new Logger(PostgreSQLSearchEngine.name);
   private readonly indices = new Map<string, IndexConfig>();
-  private readonly queryCache = new Map<string, { results: any; timestamp: number }>();
-  private readonly CACHE_TTL = 5 * 60 * 1000; // 5 minutes
-
   constructor(
     private readonly dataSource: DataSource,
     private readonly documentProcessor: PostgreSQLDocumentProcessor,
     private readonly analysisAdapter: PostgreSQLAnalysisAdapter,
     private readonly queryProcessor: QueryProcessorService,
     private readonly indexStats: PostgreSQLIndexStats,
+    private readonly dynamicIndexManager: DynamicIndexManagerService,
+    private readonly queryBuilder: PostgreSQLQueryBuilderService,
+    private readonly resultProcessor: PostgreSQLResultProcessorService,
+    private readonly performanceMonitor: PostgreSQLPerformanceMonitorService,
+    private readonly typoToleranceService: TypoToleranceService,
+    private readonly optimizedCache: OptimizedQueryCacheService,
+    private readonly queryBuilderFactory: QueryBuilderFactory,
+    private readonly bm25RankingService: BM25RankingService,
+    private readonly filterBuilderService: FilterBuilderService,
+    private readonly adaptiveQueryOptimizer: AdaptiveQueryOptimizerService,
   ) {}
 
   async onModuleInit() {
     await this.loadIndicesFromDatabase();
+    // Initialize dynamic trigram indexes for optimal ILIKE performance
+    await this.dynamicIndexManager.initializeOptimalIndexes();
   }
 
   private async loadIndicesFromDatabase() {
@@ -111,15 +130,32 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
     };
 
     try {
-      // Check cache first
-      const cacheKey = this.generateCacheKey(indexName, searchQuery);
-      const cachedResult = this.queryCache.get(cacheKey);
+      // Phase 4.3: Apply adaptive query optimization (async, non-blocking)
+      let optimizedQuery = searchQuery;
+      const patternKey = `${indexName}:${JSON.stringify(searchQuery.query)}`;
+      const cachedOptimization = this.adaptiveQueryOptimizer['optimizationCache']?.get(patternKey);
 
-      if (cachedResult && Date.now() - cachedResult.timestamp < this.CACHE_TTL) {
+      if (cachedOptimization) {
+        // Use cached optimization (fast path)
+        optimizedQuery = cachedOptimization;
+      } else {
+        // Trigger async optimization for future requests (non-blocking)
+        this.adaptiveQueryOptimizer
+          .optimizeQuery(indexName, searchQuery, { totalDocuments: this.indexStats.totalDocuments })
+          .catch(error => {
+            this.logger.debug(`Async optimization failed: ${error.message}`);
+          });
+      }
+
+      // Check optimized cache first
+      const cacheKey = this.optimizedCache.generateKey(indexName, optimizedQuery);
+      const cachedResult = this.optimizedCache.get(cacheKey);
+
+      if (cachedResult) {
         metrics.execution = Date.now() - startTime;
         metrics.total = metrics.execution;
-        this.logger.debug(`Cache hit for query: ${cacheKey}`);
-        return { data: cachedResult.results, metrics };
+        // Removed debug log for performance
+        return { data: cachedResult, metrics };
       }
 
       // Convert search query to tsquery for PostgreSQL full-text search
@@ -133,7 +169,7 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
         tsquery = typeof wildcardValue === 'string' ? wildcardValue : String(wildcardValue.value);
       }
 
-      // Use the optimized executeSearch method
+      // URGENT: Revert to optimized legacy search until decomposed issues are fixed
       const searchResult = await this.executeSearch(indexName, tsquery, searchQuery);
 
       const response = {
@@ -146,14 +182,22 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
         maxScore: searchResult.maxScore,
       };
 
-      // Cache the result
-      this.queryCache.set(cacheKey, {
-        results: response,
-        timestamp: Date.now(),
-      });
+      // Cache the result using optimized cache
+      this.optimizedCache.set(cacheKey, response);
 
       metrics.execution = Date.now() - startTime;
       metrics.total = metrics.execution;
+
+      // Phase 4.3: Record query execution for learning (async, non-blocking)
+      setImmediate(() => {
+        this.adaptiveQueryOptimizer.recordQueryExecution(
+          indexName,
+          searchQuery, // Use original query for pattern learning
+          metrics.execution,
+          response.total,
+          true, // success
+        );
+      });
 
       return { data: response, metrics };
     } catch (error) {
@@ -204,9 +248,58 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
         results = await this.dataSource.query(substringQuery, [indexName, `%${text}%`, size]);
       }
 
+      // If still no results, use fuzzy matching with TypoToleranceService
+      if (results.length === 0) {
+        try {
+          // Get field terms from database for typo tolerance
+          // Extract individual words from the field values for better fuzzy matching
+          // Order by frequency to get most common words first
+          const fieldTermsQuery = `
+            WITH words AS (
+              SELECT unnest(string_to_array(lower(d.content->>'${field}'), ' ')) as term
+              FROM documents d
+              WHERE d.index_name = $1 
+                AND d.content->>'${field}' IS NOT NULL
+                AND LENGTH(d.content->>'${field}') > 1
+            ),
+            word_counts AS (
+              SELECT term, COUNT(*) as frequency
+              FROM words
+              WHERE LENGTH(term) > 2
+                AND term ~ '^[a-zA-Z]+$'  -- Only alphabetic words
+              GROUP BY term
+            )
+            SELECT term
+            FROM word_counts
+            ORDER BY frequency DESC
+            LIMIT 1000`;
+
+          const fieldTermsResult = await this.dataSource.query(fieldTermsQuery, [indexName]);
+          const fieldTerms = fieldTermsResult.map(row => `${field}:${row.term}`);
+
+          // Get fuzzy suggestions using TypoToleranceService
+          const fuzzySuggestions = await this.typoToleranceService.getSuggestions(
+            fieldTerms,
+            text,
+            size,
+          );
+
+          // Convert fuzzy suggestions to expected format
+          results = fuzzySuggestions.map((suggestion, index) => ({
+            suggestion: suggestion.text,
+            id: `fuzzy_${index}`,
+            category: 'Suggested spelling',
+          }));
+
+          this.logger.debug(`Found ${results.length} fuzzy suggestions for "${text}"`);
+        } catch (fuzzyError) {
+          this.logger.warn(`Fuzzy matching failed: ${fuzzyError.message}`);
+        }
+      }
+
       // Filter and format results
       return results
-        .filter(row => row.suggestion && row.suggestion.toLowerCase().includes(text.toLowerCase()))
+        .filter(row => row.suggestion)
         .slice(0, size)
         .map(row => ({
           text: row.suggestion,
@@ -556,7 +649,7 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
   }
 
   /**
-   * Execute PostgreSQL search
+   * Execute PostgreSQL search using decomposed architecture
    */
   private async executeSearch(
     indexName: string,
@@ -568,233 +661,114 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
     hits: Array<{ id: string; score: number; document: Record<string, any> }>;
   }> {
     const { from = 0, size = 10 } = searchQuery;
-    const query = searchQuery.query;
 
-    // Simplified query processing
-    let searchTerm = '';
-    if (typeof query === 'string') {
-      searchTerm = query;
-    } else if (query?.match?.value) {
-      searchTerm = String(query.match.value);
-    } else if (query?.wildcard?.value) {
-      searchTerm = String(query.wildcard.value);
-    } else if (tsquery && tsquery.trim() !== '') {
-      searchTerm = tsquery;
-    }
+    // Phase 3 Decomposition: Use QueryBuilder service for search analysis
+    const queryInfo = this.queryBuilder.analyzeSearchTerm(searchQuery.query, tsquery);
+    const candidateLimit = Math.min(size * 10, 200);
 
-    // Two-stage search: PostgreSQL candidates → BM25 re-ranking
-    const candidateLimit = Math.min(size * 10, 200); // Get more candidates for better BM25 ranking
-
-    // Stage 1: PostgreSQL full-text search (fast candidates)
-    const sqlQuery = `
-      SELECT 
-        d.document_id,
-        d.content,
-        d.metadata,
-        ts_rank_cd(sd.search_vector, plainto_tsquery('english', $1)) as postgresql_score
-      FROM search_documents sd
-      JOIN documents d ON d.document_id = sd.document_id AND d.index_name = sd.index_name
-      WHERE sd.index_name = $2 
-        AND sd.search_vector @@ plainto_tsquery('english', $1)
-      ORDER BY postgresql_score DESC
-      LIMIT $3`;
-
-    // Separate total count query (not limited)
-    const countQuery = `
-      SELECT COUNT(*)::int AS count
-      FROM search_documents sd
-      JOIN documents d ON d.document_id = sd.document_id AND d.index_name = sd.index_name
-      WHERE sd.index_name = $2 
-        AND sd.search_vector @@ plainto_tsquery('english', $1)
-    `;
-
-    const params = [searchTerm, indexName, candidateLimit];
-
+    // Phase 3 Decomposition: Use PerformanceMonitor for instrumented execution
     try {
-      this.logger.debug(
-        `executeSearch: index='${indexName}' term='${searchTerm}' from=${from} size=${size} filter=${JSON.stringify(
-          searchQuery.filter || {},
-        )}`,
+      // Step 1: Try main PostgreSQL full-text search
+      const mainQuery = this.queryBuilder.buildMainQuery(
+        indexName,
+        queryInfo.searchTerm,
+        candidateLimit,
       );
-      this.logger.debug(`executeSearch SQL: ${sqlQuery}`);
-      this.logger.debug(`executeSearch params: ${JSON.stringify(params)}`);
-      // Execute in parallel
-      const [result, countRows] = await Promise.all([
-        this.dataSource.query(sqlQuery, params),
-        this.dataSource.query(countQuery, [searchTerm, indexName]),
-      ]);
-
-      const totalMatches =
-        Array.isArray(countRows) && countRows[0]?.count ? Number(countRows[0].count) : 0;
-      this.logger.debug(
-        `executeSearch: candidates=${result.length} totalMatches=${totalMatches} index='${indexName}'`,
-      );
-
-      // Fallback: if no candidates from search_documents or wildcard provided, run ILIKE over content fields
-      const hasWildcard = /[\*\?]/.test(searchTerm);
-      let fallbackRows: any[] = [];
-      let fallbackTotal = 0;
-      if (result.length === 0 || hasWildcard) {
-        const likePattern = searchTerm.replace(/\*/g, '%').replace(/\?/g, '_');
-        const fields =
-          Array.isArray(searchQuery.fields) && searchQuery.fields.length > 0
-            ? searchQuery.fields
-            : ['name', 'title', 'description', 'slug', 'tags', 'category_name'];
-        const fieldCondsSelect = fields
-          .map(f => `d.content->>'${f.replace('.keyword', '')}' ILIKE $3`)
-          .join(' OR ');
-        const fieldCondsCount = fields
-          .map(f => `d.content->>'${f.replace('.keyword', '')}' ILIKE $2`)
-          .join(' OR ');
-
-        const fallbackCountSql = `
-          SELECT COUNT(*)::int AS count
-          FROM documents d
-          WHERE d.index_name = $1 AND (${fieldCondsCount})
-        `;
-        const fallbackSql = `
-          SELECT d.document_id, d.content, d.metadata, 1.0::float AS postgresql_score
-          FROM documents d
-          WHERE d.index_name = $1 AND (${fieldCondsSelect})
-          ORDER BY d.document_id
-          LIMIT $2::int OFFSET $4::int
-        `;
-        const fbParams = [indexName, candidateLimit, likePattern, from];
-        const fbCountParams = [indexName, likePattern];
-        this.logger.debug(`executeSearch Fallback SQL: ${fallbackSql}`);
-        this.logger.debug(`executeSearch Fallback params: ${JSON.stringify(fbParams)}`);
-        const [fbRows, fbCountRows] = await Promise.all([
-          this.dataSource.query(fallbackSql, fbParams),
-          this.dataSource.query(fallbackCountSql, fbCountParams),
-        ]);
-        fallbackRows = fbRows;
-        fallbackTotal =
-          Array.isArray(fbCountRows) && fbCountRows[0]?.count ? Number(fbCountRows[0].count) : 0;
-        this.logger.debug(
-          `executeSearch Fallback: rows=${fallbackRows.length} total=${fallbackTotal}`,
+      const { result: mainResult, metrics: mainMetrics } =
+        await this.performanceMonitor.executeWithMonitoring(
+          mainQuery.sql,
+          mainQuery.params,
+          'main_search',
+          queryInfo.searchTerm,
+          indexName,
         );
 
-        if (fallbackRows.length === 0) {
-          return {
-            totalHits: fallbackTotal,
-            maxScore: 0,
-            hits: [],
-          };
-        }
+      // Check if we need alternative strategies
+      const strategy = this.queryBuilder.getQueryStrategy(queryInfo, mainResult.length > 0);
 
-        // Rerank fallback candidates
-        const rerankedFallback = await this.bm25Reranking(fallbackRows, searchTerm);
-        this.logger.debug(
-          `executeSearch Fallback: reranked=${rerankedFallback.length} returning=${Math.min(
-            size,
-            rerankedFallback.length,
-          )} from=${from}`,
+      if (strategy === 'main') {
+        // Process main results with BM25 ranking
+        return await this.resultProcessor.processSearchResults(
+          mainResult,
+          queryInfo.searchTerm,
+          from,
+          size,
         );
-        const paginatedFallback = rerankedFallback.slice(0, size);
-        const fbMax =
-          paginatedFallback.length > 0 ? Math.max(...paginatedFallback.map(h => h.score)) : 0;
-        return {
-          totalHits: fallbackTotal,
-          maxScore: fbMax,
-          hits: paginatedFallback,
-        };
       }
 
-      // Stage 2: BM25 re-ranking for improved relevance
-      const rerankedHits = await this.bm25Reranking(result, searchTerm);
-      this.logger.debug(
-        `executeSearch: rerankedHits=${rerankedHits.length} returning=${Math.min(
-          size,
-          rerankedHits.length,
-        )} from=${from}`,
-      );
+      // Step 2: Try prefix search for simple trailing wildcards
+      if (strategy === 'prefix' && queryInfo.prefixTerm) {
+        const prefixQuery = this.queryBuilder.buildPrefixQuery(
+          indexName,
+          queryInfo.prefixTerm,
+          candidateLimit,
+        );
+        const { result: prefixResult } = await this.performanceMonitor.executeWithMonitoring(
+          prefixQuery.sql,
+          prefixQuery.params,
+          'prefix_search',
+          queryInfo.prefixTerm,
+          indexName,
+        );
 
-      // Apply pagination
-      const paginatedHits = rerankedHits.slice(from, from + size);
+        if (prefixResult.length > 0) {
+          return await this.resultProcessor.processSearchResults(
+            prefixResult,
+            queryInfo.searchTerm,
+            from,
+            size,
+          );
+        }
+      }
 
-      const maxScore = paginatedHits.length > 0 ? Math.max(...paginatedHits.map(h => h.score)) : 0;
+      // Step 3: Fallback to ILIKE search for complex patterns
+      if (strategy === 'fallback') {
+        const fallbackQuery = this.queryBuilder.buildFallbackQuery(
+          indexName,
+          queryInfo.searchTerm,
+          searchQuery,
+          candidateLimit,
+          from,
+        );
+        const { result: fallbackResult } = await this.performanceMonitor.executeWithMonitoring(
+          fallbackQuery.sql,
+          fallbackQuery.params,
+          'fallback_search',
+          queryInfo.searchTerm,
+          indexName,
+        );
 
-      return {
-        totalHits: totalMatches,
-        maxScore,
-        hits: paginatedHits,
-      };
+        if (fallbackResult.length > 0) {
+          return await this.resultProcessor.processFallbackResults(
+            fallbackResult,
+            queryInfo.searchTerm,
+            size,
+          );
+        }
+      }
+
+      // No results found
+      return this.resultProcessor.createEmptyResult();
     } catch (error) {
-      this.logger.error('Search error:', error);
-      throw error;
+      this.logger.error(`Search execution failed: ${error.message}`);
+      return this.resultProcessor.createEmptyResult();
     }
   }
 
   /**
-   * BM25 re-ranking of PostgreSQL candidates
+   * Phase 3 Decomposition: Streamlined BM25 re-ranking using BM25RankingService
    */
   private async bm25Reranking(
     candidates: any[],
     searchTerm: string,
   ): Promise<Array<{ id: string; score: number; document: Record<string, any> }>> {
-    // Create BM25 scorer with generic field weights
-    const bm25Scorer = new BM25Scorer(this.indexStats, {
+    // Use the dedicated BM25RankingService with optimized configuration
+    return await this.bm25RankingService.rankDocuments(candidates, searchTerm, this.indexStats, {
       k1: 1.2,
       b: 0.75,
-      fieldWeights: {
-        name: 3.0,
-        title: 3.0,
-        headline: 3.0,
-        subject: 3.0,
-        category: 2.0,
-        type: 2.0,
-        classification: 2.0,
-        description: 1.5,
-        summary: 1.5,
-        content: 1.5,
-        tags: 1.5,
-        keywords: 1.5,
-        labels: 1.5,
-      },
+      postgresqlWeight: 0.3,
+      bm25Weight: 0.7,
     });
-
-    const queryTerms = searchTerm
-      .toLowerCase()
-      .split(/\s+/)
-      .filter(term => term.length > 0);
-
-    // Calculate BM25 scores for each candidate
-    const rerankedCandidates = candidates.map(candidate => {
-      let bm25Score = 0;
-
-      // Calculate BM25 score for each field
-      for (const [fieldName, fieldWeight] of Object.entries(
-        bm25Scorer.getParameters().fieldWeights,
-      )) {
-        if (candidate.content[fieldName]) {
-          const fieldContent = String(candidate.content[fieldName]).toLowerCase();
-
-          // Calculate term frequency for each query term in this field
-          for (const term of queryTerms) {
-            const termFreq = this.calculateTermFrequency(fieldContent, term);
-            if (termFreq > 0) {
-              const fieldScore = bm25Scorer.score(term, candidate.document_id, fieldName, termFreq);
-              bm25Score += fieldScore * (fieldWeight as number);
-            }
-          }
-        }
-      }
-
-      // Combine PostgreSQL and BM25 scores (weighted average)
-      const postgresqlScore = parseFloat(candidate.postgresql_score) || 0;
-      const postgresqlWeight = 0.3;
-      const bm25Weight = 0.7;
-      const finalScore = postgresqlScore * postgresqlWeight + bm25Score * bm25Weight;
-
-      return {
-        id: candidate.document_id,
-        score: finalScore,
-        document: candidate.content,
-      };
-    });
-
-    // Sort by final combined score
-    return rerankedCandidates.sort((a, b) => b.score - a.score);
   }
 
   /**
@@ -837,30 +811,85 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
   }
 
   /**
-   * Generate cache key for query
-   */
-  private generateCacheKey(indexName: string, searchQuery: SearchQueryDto): string {
-    return `${indexName}:${JSON.stringify(searchQuery)}`;
-  }
-
-  /**
    * Clear query cache
    */
   async clearCache(): Promise<void> {
-    this.queryCache.clear();
+    this.optimizedCache.clear();
     this.logger.log('Query cache cleared');
   }
 
   /**
    * Get cache statistics
    */
-  getCacheStats(): { size: number; hitRate: number } {
-    return {
-      size: this.queryCache.size,
-      hitRate: 0.8, // Placeholder - would need to track actual hits
-    };
+  getCacheStats(): CacheStats {
+    return this.optimizedCache.getStats();
   }
 
+  /**
+   * Warm cache with popular queries for better performance
+   */
+  async warmCache(indexName: string, popularQueries: SearchQueryDto[]): Promise<void> {
+    await this.optimizedCache.warmCache(indexName, popularQueries, (idx, query) =>
+      this.search(idx, query),
+    );
+  }
+
+  /**
+   * Get optimization recommendations for an index
+   */
+  getOptimizationRecommendations(indexName: string) {
+    return this.adaptiveQueryOptimizer.getOptimizationRecommendations(indexName);
+  }
+
+  /**
+   * Phase 3 Decomposed Search: SQL-level limiting with proper filtering
+   */
+  private async executeDecomposedSearch(
+    indexName: string,
+    searchQuery: SearchQueryDto,
+  ): Promise<{
+    totalHits: number;
+    maxScore: number;
+    hits: Array<{ id: string; score: number; document: Record<string, any> }>;
+  }> {
+    // Build optimized SQL query with SQL-level LIMIT and filtering
+    const { sql, params } = await this.buildSearchQuery(indexName, searchQuery);
+
+    this.logger.debug(`Decomposed Search SQL: ${sql}`);
+    this.logger.debug(`Decomposed Search Params: ${JSON.stringify(params)}`);
+
+    // Execute with performance monitoring
+    const { result: rows } = await this.performanceMonitor.executeWithMonitoring(
+      sql,
+      params,
+      'decomposed_search',
+      JSON.stringify(searchQuery.query),
+      indexName,
+    );
+
+    if (rows.length === 0) {
+      return { totalHits: 0, maxScore: 0, hits: [] };
+    }
+
+    // Extract total from first row (using SQL window function)
+    const totalHits = rows[0]?.total_count || rows.length;
+
+    // Calculate max score
+    const maxScore = rows.length > 0 ? Math.max(...rows.map(row => row.score || 0)) : 0;
+
+    // Transform results
+    const hits = rows.map(row => ({
+      id: row.document_id,
+      score: row.score || 0,
+      document: row.content,
+    }));
+
+    return { totalHits, maxScore, hits };
+  }
+
+  /**
+   * Phase 3 Decomposition: Streamlined buildSearchQuery using QueryBuilderFactory
+   */
   private async buildSearchQuery(
     indexName: string,
     searchQuery: SearchQueryDto,
@@ -869,168 +898,51 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
     const params: any[] = [indexName];
     let paramIndex = 2;
 
-    // Base query structure
+    // Use QueryBuilderFactory to get appropriate builder
+    const queryBuilder = this.queryBuilderFactory.create(query);
+    const queryResult = queryBuilder.build(
+      indexName,
+      query,
+      params,
+      paramIndex,
+      searchQuery.fields,
+    );
+
+    // Base query structure with builder result and total count
     let sql = `
       SELECT 
         d.document_id,
         d.content,
-        d.metadata,`;
+        d.metadata,
+        COUNT(*) OVER() as total_count,
+        ${queryResult.sql}`;
 
-    if (typeof query === 'string') {
-      // Simple text query
-      params.push(query);
-      sql += `
-        ts_rank_cd(sd.search_vector, plainto_tsquery('english', $${paramIndex}::text)) as score
-      FROM search_documents sd
-      JOIN documents d ON d.document_id = sd.document_id AND d.index_name = sd.index_name
-      WHERE sd.index_name = $1
-        AND sd.search_vector @@ plainto_tsquery('english', $${paramIndex}::text)`;
-      paramIndex++;
-    } else {
-      // Complex query object
-      if (query.match_all) {
-        sql += `
-        1.0 * ${query.match_all.boost || 1.0} as score
-      FROM search_documents sd
-      JOIN documents d ON d.document_id = sd.document_id AND d.index_name = sd.index_name
-      WHERE sd.index_name = $1`;
-      } else if (query.match) {
-        params.push(query.match.value);
-        sql += `
-        ts_rank_cd(sd.search_vector, plainto_tsquery('english', $${paramIndex}::text)) as score
-      FROM search_documents sd
-      JOIN documents d ON d.document_id = sd.document_id AND d.index_name = sd.index_name
-      WHERE sd.index_name = $1
-        AND sd.search_vector @@ plainto_tsquery('english', $${paramIndex}::text)`;
-        paramIndex++;
-      } else if (query.term) {
-        const [field, value] = Object.entries(query.term)[0];
-        params.push(value);
-        sql += `
-        1.0 as score
-      FROM search_documents sd
-      JOIN documents d ON d.document_id = sd.document_id AND d.index_name = sd.index_name
-      WHERE sd.index_name = $1
-        AND d.metadata->>'${field}' = $${paramIndex}::text`;
-        paramIndex++;
-      } else if (query.wildcard) {
-        let field: string;
-        let wildcardValue: string;
-        let boost = 1.0;
-
-        if ('field' in query.wildcard && 'value' in query.wildcard) {
-          field = query.wildcard.field as string;
-          wildcardValue = String(query.wildcard.value);
-          boost = typeof query.wildcard.boost === 'number' ? query.wildcard.boost : 1.0;
-        } else {
-          const [f, pattern] = Object.entries(query.wildcard)[0];
-          field = f;
-          if (typeof pattern === 'object' && 'value' in pattern) {
-            wildcardValue = String(pattern.value);
-            boost = typeof pattern.boost === 'number' ? pattern.boost : 1.0;
-          } else {
-            wildcardValue = String(pattern);
-          }
-        }
-
-        const likePattern = wildcardValue.replace(/\*/g, '%').replace(/\?/g, '_');
-        params.push(likePattern);
-
-        // Handle _all field by searching across specified fields or entire content
-        if (field === '_all') {
-          // If searchQuery.fields is provided, search across those specific fields
-          if (searchQuery.fields && searchQuery.fields.length > 0) {
-            const fieldConditions = searchQuery.fields
-              .map(f => `d.content->>'${f.replace('.keyword', '')}' ILIKE $${paramIndex}::text`)
-              .join(' OR ');
-            sql += `
-           ${boost}::float as score
-        FROM documents d
-        WHERE d.index_name = $1
-          AND (${fieldConditions})`;
-          } else {
-            // Fallback to searching entire content JSON as text (use contains match)
-            sql += `
-           ${boost}::float as score
-        FROM documents d
-        WHERE d.index_name = $1
-          AND d.content::text ILIKE '%' || $${paramIndex}::text || '%'`;
-          }
-        } else {
-          // Handle .keyword subfields by extracting the base field name
-          const baseField = field.includes('.keyword') ? field.split('.')[0] : field;
-          sql += `
-           ${boost}::float as score
-        FROM documents d
-        WHERE d.index_name = $1
-          AND d.content->>'${baseField}' ILIKE $${paramIndex}::text`;
-        }
-        paramIndex++;
-      } else if (query.bool) {
-        sql += `
-        1.0 as score
-      FROM documents d
-      WHERE d.index_name = $1`;
-
-        if (query.bool.must) {
-          query.bool.must.forEach((mustClause: any) => {
-            if (mustClause.match) {
-              params.push(mustClause.match.value);
-              sql += ` AND d.content->>'${mustClause.match.field}' ILIKE '%' || $${paramIndex}::text || '%';`;
-              paramIndex++;
-            }
-          });
-        }
-
-        if (query.bool.should) {
-          const shouldClauses: string[] = [];
-          query.bool.should.forEach((shouldClause: any) => {
-            if (shouldClause.match) {
-              params.push(shouldClause.match.value);
-              shouldClauses.push(
-                `d.content->>'${shouldClause.match.field}' ILIKE '%' || $${paramIndex}::text || '%'`,
-              );
-              paramIndex++;
-            }
-          });
-          if (shouldClauses.length > 0) {
-            sql += ` AND (${shouldClauses.join(' OR ')})`;
-          }
-        }
-
-        if (query.bool.must_not) {
-          query.bool.must_not.forEach((mustNotClause: any) => {
-            if (mustNotClause.match) {
-              params.push(mustNotClause.match.value);
-              sql += ` AND NOT (d.content->>'${mustNotClause.match.field}' ILIKE '%' || $${paramIndex}::text || '%')`;
-              paramIndex++;
-            }
-          });
-        }
-      }
-    }
-
-    // Add filters if present
+    // Add filters using FilterBuilderService
     if (searchQuery.filter) {
-      const filterSql = this.buildFilterConditions(searchQuery.filter, params, paramIndex);
-      sql += filterSql;
-      // Update paramIndex based on the number of parameters added by the filter
-      paramIndex = params.length + 1;
+      const filterResult = this.filterBuilderService.buildConditions(
+        searchQuery.filter,
+        queryResult.params,
+        queryResult.nextParamIndex,
+      );
+      sql += filterResult.sql;
+      paramIndex = filterResult.nextParamIndex;
+    } else {
+      paramIndex = queryResult.nextParamIndex;
     }
 
-    // Add pagination parameters at the end
-    params.push(size);
-    params.push(from);
+    // Add pagination parameters
+    queryResult.params.push(size);
+    queryResult.params.push(from);
 
-    // Add ORDER BY, LIMIT, and OFFSET with the correct parameter numbers
+    // Add ORDER BY, LIMIT, and OFFSET
     sql += `
       ORDER BY score DESC, document_id
-      LIMIT $${params.length - 1} OFFSET $${params.length}`;
+      LIMIT $${queryResult.params.length - 1} OFFSET $${queryResult.params.length}`;
 
-    this.logger.debug(`Final SQL: ${sql}`);
-    this.logger.debug(`Final params: ${JSON.stringify(params)}`);
+    this.logger.debug(`Phase 3 Decomposed SQL: ${sql}`);
+    this.logger.debug(`Phase 3 Decomposed params: ${JSON.stringify(queryResult.params)}`);
 
-    return { sql, params };
+    return { sql: sql, params: queryResult.params };
   }
 
   private buildFilterConditions(filter: any, params: any[], startIndex: number): string {
@@ -1726,6 +1638,33 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
         `,
         params: [values],
       };
+    }
+  }
+
+  /**
+   * Log query execution plan for performance analysis (Phase 2.3)
+   */
+  private async logQueryPlan(sql: string, params: any[], queryType: string): Promise<void> {
+    try {
+      const explainQuery = `EXPLAIN (FORMAT JSON, ANALYZE) ${sql}`;
+      const planResult = await this.dataSource.query(explainQuery, params);
+
+      if (planResult && planResult[0] && planResult[0]['QUERY PLAN']) {
+        const plan = planResult[0]['QUERY PLAN'][0];
+        const executionTime = plan['Execution Time'];
+        const planningTime = plan['Planning Time'];
+
+        this.logger.warn(`Query Plan Analysis (${queryType}):`, {
+          executionTime: `${executionTime}ms`,
+          planningTime: `${planningTime}ms`,
+          totalTime: `${executionTime + planningTime}ms`,
+          nodeType: plan.Plan['Node Type'],
+          actualRows: plan.Plan['Actual Rows'],
+          actualLoops: plan.Plan['Actual Loops'],
+        });
+      }
+    } catch (error) {
+      this.logger.debug(`Failed to get query plan: ${error.message}`);
     }
   }
 }

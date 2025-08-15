@@ -1,6 +1,4 @@
-import { Injectable, Logger, BadRequestException, Inject } from '@nestjs/common';
-import { TermDictionary } from '../index/term-dictionary';
-import { SimplePostingList } from '../index/posting-list';
+import { Injectable, Logger, BadRequestException } from '@nestjs/common';
 
 export interface Suggestion {
   text: string;
@@ -13,10 +11,8 @@ export interface Suggestion {
 export class TypoToleranceService {
   private readonly logger = new Logger(TypoToleranceService.name);
 
-  constructor(@Inject('TERM_DICTIONARY') private readonly termDictionary: TermDictionary) {}
-
   /**
-   * Get suggestions for a given input text
+   * Get suggestions for a given input text from provided field terms
    */
   async getSuggestions(fieldTerms: string[], inputText: string, size = 5): Promise<Suggestion[]> {
     try {
@@ -24,7 +20,7 @@ export class TypoToleranceService {
 
       // Process each term
       for (const term of fieldTerms) {
-        const actualTerm = term.split(':')[1];
+        const actualTerm = term.includes(':') ? term.split(':')[1] : term;
 
         // Skip if the term is too short
         if (actualTerm.length < 2) continue;
@@ -37,20 +33,19 @@ export class TypoToleranceService {
         // 1. Start with the input text (prefix match)
         // 2. Are within acceptable edit distance (fuzzy match)
         // 3. Contain the input text (substring match)
-        if (
-          actualTerm.startsWith(inputText) ||
-          distance <= maxDistance ||
-          actualTerm.includes(inputText)
-        ) {
-          const postings = this.termDictionary.getPostings(term);
-          let postingList: SimplePostingList | undefined;
-          if (postings) {
-            postingList = new SimplePostingList();
-            for (const [docId, positions] of postings.entries()) {
-              postingList.addEntry({ docId, positions, frequency: positions.length });
-            }
+        const prefixMatch = actualTerm.startsWith(inputText);
+        const fuzzyMatch = distance <= maxDistance;
+        const substringMatch = actualTerm.includes(inputText);
+
+        if (prefixMatch || fuzzyMatch || substringMatch) {
+          if (suggestions.size < 3) {
+            // Debug first few matches
+            this.logger.debug(
+              `Match found: "${actualTerm}" (distance: ${distance}, maxDistance: ${maxDistance}, prefix: ${prefixMatch}, fuzzy: ${fuzzyMatch}, substring: ${substringMatch})`,
+            );
           }
-          const freq = postingList ? postingList.size() : 0;
+          // For simplified version, we'll use a frequency estimate based on term length and commonality
+          const freq = this.estimateTermFrequency(actualTerm);
 
           // Calculate score based on multiple factors
           let score = 0;
@@ -73,7 +68,7 @@ export class TypoToleranceService {
           // Adjust score based on edit distance (closer = better)
           score += maxDistance - distance;
 
-          // Adjust score based on term frequency (more frequent = better)
+          // Adjust score based on estimated frequency (more common = better)
           score += Math.log1p(freq) * 10;
 
           // Adjust score based on length difference (closer to input length = better)
@@ -145,13 +140,75 @@ export class TypoToleranceService {
   }
 
   /**
+   * Estimate term frequency based on common patterns and length
+   */
+  private estimateTermFrequency(term: string): number {
+    // Simple heuristic: shorter common words are more frequent
+    const commonWords = [
+      'the',
+      'and',
+      'for',
+      'are',
+      'but',
+      'not',
+      'you',
+      'all',
+      'can',
+      'had',
+      'was',
+      'one',
+      'our',
+      'out',
+      'day',
+      'get',
+      'has',
+      'him',
+      'his',
+      'how',
+      'its',
+      'may',
+      'new',
+      'now',
+      'old',
+      'see',
+      'two',
+      'way',
+      'who',
+      'boy',
+      'did',
+      'man',
+      'put',
+      'say',
+      'she',
+      'too',
+      'use',
+    ];
+
+    const lowerTerm = term.toLowerCase();
+
+    if (commonWords.includes(lowerTerm)) {
+      return 1000; // High frequency for common words
+    }
+
+    if (term.length <= 3) {
+      return 500; // Short terms are often common
+    }
+
+    if (term.length <= 6) {
+      return 100; // Medium length terms
+    }
+
+    return 10; // Longer terms are typically less frequent
+  }
+
+  /**
    * Correct a query by suggesting the most likely correct terms
    */
-  async correctQuery(query: string, indexName: string): Promise<string> {
+  async correctQuery(query: string, fieldTerms: string[]): Promise<string> {
     const terms = query.toLowerCase().split(/\s+/);
     const correctedTerms = await Promise.all(
       terms.map(async term => {
-        const suggestions = await this.getSuggestions(this.termDictionary.getTerms(), term, 1);
+        const suggestions = await this.getSuggestions(fieldTerms, term, 1);
         return suggestions.length > 0 ? suggestions[0].text : term;
       }),
     );
