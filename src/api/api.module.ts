@@ -7,6 +7,7 @@ import { BulkIndexingController } from './controllers/bulk-indexing.controller';
 import { WorkerManagementController } from './controllers/worker-management.controller';
 import { WorkerManagementService } from './services/worker-management.service';
 import { MetricsController } from './controllers/metrics.controller';
+import { DebugController } from './controllers/debug.controller';
 
 import { IndexModule } from '../index/index.module';
 import { DocumentModule } from '../document/document.module';
@@ -39,6 +40,7 @@ import { BullModule } from '@nestjs/bull';
     BulkIndexingController,
     WorkerManagementController,
     MetricsController,
+    DebugController,
   ],
   providers: [WorkerManagementService],
 })

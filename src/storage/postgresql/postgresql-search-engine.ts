@@ -686,6 +686,25 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
 
     this.logger.debug(`[executeSearch] Starting search for "${tsquery}" in index "${indexName}"`);
 
+    // Check document count for debugging empty results
+    try {
+      const docCountQuery = `SELECT COUNT(*) as total_docs FROM documents WHERE index_name = $1`;
+      const searchDocCountQuery = `SELECT COUNT(*) as search_docs FROM search_documents WHERE index_name = $1`;
+
+      const [docCountResult, searchDocCountResult] = await Promise.all([
+        this.dataSource.query(docCountQuery, [indexName]),
+        this.dataSource.query(searchDocCountQuery, [indexName]),
+      ]);
+
+      this.logger.debug(
+        `[executeSearch] Document counts: documents=${
+          docCountResult[0]?.total_docs || 0
+        }, search_documents=${searchDocCountResult[0]?.search_docs || 0}`,
+      );
+    } catch (error) {
+      this.logger.warn(`[executeSearch] Failed to check document counts: ${error.message}`);
+    }
+
     // Phase 3 Decomposition: Use QueryBuilder service for search analysis
     const queryInfo = this.queryBuilder.analyzeSearchTerm(searchQuery.query, tsquery);
     const candidateLimit = Math.min(size * 10, 200);
@@ -702,6 +721,9 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
         queryInfo.searchTerm,
         candidateLimit,
       );
+
+      this.logger.debug(`[executeSearch] Main query SQL: ${mainQuery.sql}`);
+      this.logger.debug(`[executeSearch] Main query params: ${JSON.stringify(mainQuery.params)}`);
       const { result: mainResult, metrics: mainMetrics } =
         await this.performanceMonitor.executeWithMonitoring(
           mainQuery.sql,
@@ -715,8 +737,14 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
         `[executeSearch] Main query results: ${mainResult.length} candidates found`,
       );
 
+      this.logger.debug(
+        `[executeSearch] Main query results: ${mainResult.length} candidates found`,
+      );
+
       // Check if we need alternative strategies
       const strategy = this.queryBuilder.getQueryStrategy(queryInfo, mainResult.length > 0);
+
+      this.logger.debug(`[executeSearch] Query strategy selected: ${strategy}`);
 
       this.logger.debug(`[executeSearch] Query strategy selected: ${strategy}`);
 
