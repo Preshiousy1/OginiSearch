@@ -510,4 +510,96 @@ export class DebugController {
       };
     }
   }
+
+  @Get('reindex-search-vectors/:indexName')
+  @ApiOperation({
+    summary: 'Reindex all documents to populate search vectors',
+    description: 'Fix empty search vectors by reindexing all documents in batches',
+  })
+  async reindexSearchVectors(@Param('indexName') indexName: string) {
+    try {
+      // First, check how many documents need reindexing
+      const emptyVectorCountQuery = `
+        SELECT COUNT(*) as empty_count
+        FROM search_documents sd
+        WHERE sd.index_name = $1 AND (sd.search_vector IS NULL OR length(sd.search_vector::text) < 10)
+      `;
+      const emptyCount = await this.dataSource.query(emptyVectorCountQuery, [indexName]);
+
+      const totalDocumentsQuery = `
+        SELECT COUNT(*) as total FROM search_documents WHERE index_name = $1
+      `;
+      const totalCount = await this.dataSource.query(totalDocumentsQuery, [indexName]);
+
+      // Update documents in batches to populate search vectors
+      const batchSize = 1000;
+      const updateQuery = `
+        UPDATE search_documents sd
+        SET search_vector = setweight(
+          to_tsvector('english', 
+            COALESCE(d.content->>'name', '') || ' ' ||
+            COALESCE(d.content->>'description', '') || ' ' ||
+            COALESCE(d.content->>'category_name', '') || ' ' ||
+            COALESCE(d.content->>'tags', '')
+          ), 'A'
+        )
+        FROM documents d
+        WHERE sd.document_id = d.document_id 
+          AND sd.index_name = d.index_name 
+          AND sd.index_name = $1
+          AND (sd.search_vector IS NULL OR length(sd.search_vector::text) < 10)
+          AND sd.document_id IN (
+            SELECT document_id FROM search_documents 
+            WHERE index_name = $1 AND (search_vector IS NULL OR length(search_vector::text) < 10)
+            LIMIT $2
+          )
+      `;
+
+      // Process in batches
+      let updatedTotal = 0;
+      let batchCount = 0;
+      const maxBatches = 20; // Limit to prevent timeout
+
+      while (batchCount < maxBatches) {
+        const result = await this.dataSource.query(updateQuery, [indexName, batchSize]);
+        const updatedInBatch = result[1] || 0; // Number of affected rows
+
+        updatedTotal += updatedInBatch;
+        batchCount++;
+
+        // Stop if no more documents to update
+        if (updatedInBatch < batchSize) {
+          break;
+        }
+      }
+
+      // Check results after reindexing
+      const finalEmptyCount = await this.dataSource.query(emptyVectorCountQuery, [indexName]);
+
+      return {
+        status: 'success',
+        indexName,
+        results: {
+          totalDocuments: parseInt(totalCount[0]?.total || '0'),
+          emptyVectorsBefore: parseInt(emptyCount[0]?.empty_count || '0'),
+          emptyVectorsAfter: parseInt(finalEmptyCount[0]?.empty_count || '0'),
+          documentsUpdated: updatedTotal,
+          batchesProcessed: batchCount,
+          maxBatchesReached: batchCount >= maxBatches,
+        },
+        recommendation:
+          batchCount >= maxBatches
+            ? 'Run this endpoint multiple times to complete reindexing'
+            : 'Reindexing completed successfully',
+        timestamp: new Date().toISOString(),
+      };
+    } catch (error) {
+      return {
+        status: 'error',
+        error: error.message,
+        indexName,
+        timestamp: new Date().toISOString(),
+      };
+    }
+  }
 }
