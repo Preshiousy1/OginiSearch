@@ -128,11 +128,13 @@ export class PostgreSQLQueryBuilderService {
   ): QueryResult {
     const likePattern = searchTerm.replace(/\*/g, '%').replace(/\?/g, '_');
 
-    // Optimize fallback scope for better performance
-    const fields =
-      Array.isArray(searchQuery.fields) && searchQuery.fields.length > 0
-        ? searchQuery.fields.slice(0, 1) // Limit to first 1 field for speed
-        : ['name']; // Only search the most important field by default
+    // EMERGENCY FIX: Force fallback to always search 'name' field for relevance
+    const fields = ['name'];
+    this.logger.debug(
+      `[buildFallbackQuery] EMERGENCY: Forcing 'name' field for fallback search. Original fields: [${
+        searchQuery.fields?.join(', ') || 'none'
+      }]`,
+    );
 
     const fieldCondsSelect = fields
       .map(f => `d.content->>'${f.replace('.keyword', '')}' ILIKE $3`)
