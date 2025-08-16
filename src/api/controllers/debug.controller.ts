@@ -381,4 +381,64 @@ export class DebugController {
       };
     }
   }
+
+  @Get('raw-fts-test/:term')
+  @ApiOperation({
+    summary: 'Test raw PostgreSQL FTS functions',
+    description: 'Test if basic PostgreSQL FTS functions work at all',
+  })
+  async testRawFTS(@Param('term') term: string) {
+    try {
+      // Test 1: Basic tsquery creation
+      const queryCreationTests = await Promise.all([
+        this.dataSource.query(`SELECT plainto_tsquery('english', $1)::text as result`, [term]),
+        this.dataSource.query(`SELECT to_tsquery('english', $1)::text as result`, [`${term}:*`]),
+        this.dataSource.query(`SELECT websearch_to_tsquery('english', $1)::text as result`, [term]),
+      ]);
+
+      // Test 2: Check if search_vector has any content at all
+      const vectorContentQuery = `
+        SELECT COUNT(*) as total_vectors,
+               COUNT(CASE WHEN search_vector IS NOT NULL THEN 1 END) as non_null_count,
+               COUNT(CASE WHEN length(search_vector::text) > 10 THEN 1 END) as substantial_count
+        FROM search_documents 
+        WHERE index_name = 'businesses'
+      `;
+      const vectorStats = await this.dataSource.query(vectorContentQuery);
+
+      // Test 3: Sample search vector content
+      const vectorSampleQuery = `
+        SELECT document_id,
+               substring(search_vector::text, 1, 100) as vector_sample,
+               substring(d.content->>'name', 1, 50) as name_sample
+        FROM search_documents sd
+        JOIN documents d ON d.document_id = sd.document_id AND d.index_name = sd.index_name
+        WHERE sd.index_name = 'businesses'
+        LIMIT 3
+      `;
+      const vectorSamples = await this.dataSource.query(vectorSampleQuery);
+
+      return {
+        status: 'success',
+        term,
+        tests: {
+          queryCreation: {
+            plainto_tsquery: queryCreationTests[0][0]?.result || 'null',
+            to_tsquery: queryCreationTests[1][0]?.result || 'null',
+            websearch_to_tsquery: queryCreationTests[2][0]?.result || 'null',
+          },
+          vectorStats: vectorStats[0] || {},
+          vectorSamples: vectorSamples || [],
+        },
+        timestamp: new Date().toISOString(),
+      };
+    } catch (error) {
+      return {
+        status: 'error',
+        error: error.message,
+        term,
+        timestamp: new Date().toISOString(),
+      };
+    }
+  }
 }
