@@ -746,9 +746,16 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
 
       this.logger.debug(`[executeSearch] Query strategy selected: ${strategy}`);
 
-      this.logger.debug(`[executeSearch] Query strategy selected: ${strategy}`);
+      // EMERGENCY FIX: Force fallback strategy if FTS returns 0 results in production
+      let finalStrategy = strategy;
+      if (mainResult.length === 0 && process.env.NODE_ENV === 'production') {
+        finalStrategy = 'fallback';
+        this.logger.debug(
+          `[executeSearch] Forcing fallback strategy due to FTS failure in production`,
+        );
+      }
 
-      if (strategy === 'main') {
+      if (finalStrategy === 'main') {
         // Process main results with BM25 ranking
         return await this.resultProcessor.processSearchResults(
           mainResult,
@@ -759,7 +766,7 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
       }
 
       // Step 2: Try prefix search for simple trailing wildcards
-      if (strategy === 'prefix' && queryInfo.prefixTerm) {
+      if (finalStrategy === 'prefix' && queryInfo.prefixTerm) {
         const prefixQuery = this.queryBuilder.buildPrefixQuery(
           indexName,
           queryInfo.prefixTerm,
@@ -784,7 +791,7 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
       }
 
       // Step 3: Fallback to ILIKE search for complex patterns
-      if (strategy === 'fallback') {
+      if (finalStrategy === 'fallback') {
         const fallbackQuery = this.queryBuilder.buildFallbackQuery(
           indexName,
           queryInfo.searchTerm,

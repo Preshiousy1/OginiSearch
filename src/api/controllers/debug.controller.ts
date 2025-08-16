@@ -135,4 +135,97 @@ export class DebugController {
       };
     }
   }
+
+  @Get('fts-debug/:indexName/:term')
+  @ApiOperation({
+    summary: 'Debug PostgreSQL Full-Text Search',
+    description: 'Deep dive into FTS issues with actual search vector content and query analysis',
+  })
+  async debugFTS(@Param('indexName') indexName: string, @Param('term') term: string) {
+    try {
+      // Check actual search vector content
+      const vectorQuery = `
+        SELECT document_id, 
+               search_vector IS NOT NULL as has_vector,
+               length(search_vector::text) as vector_length,
+               search_vector::text as vector_preview
+        FROM search_documents 
+        WHERE index_name = $1 
+        LIMIT 3
+      `;
+      const vectorResult = await this.dataSource.query(vectorQuery, [indexName]);
+
+      // Test different tsquery functions
+      const testQueries = [
+        {
+          name: 'plainto_tsquery',
+          query: `SELECT plainto_tsquery('english', $1) as result`,
+          param: term,
+        },
+        {
+          name: 'to_tsquery',
+          query: `SELECT to_tsquery('english', $1) as result`,
+          param: `${term}:*`,
+        },
+        {
+          name: 'websearch_to_tsquery',
+          query: `SELECT websearch_to_tsquery('english', $1) as result`,
+          param: term,
+        },
+      ];
+
+      const queryResults = {};
+      for (const test of testQueries) {
+        try {
+          const result = await this.dataSource.query(test.query, [test.param]);
+          queryResults[test.name] = result[0]?.result || null;
+        } catch (error) {
+          queryResults[test.name] = `ERROR: ${error.message}`;
+        }
+      }
+
+      // Test a manual FTS query with specific vector
+      const manualFTSQuery = `
+        SELECT document_id,
+               search_vector @@ plainto_tsquery('english', $2) as matches_plainto,
+               search_vector @@ to_tsquery('english', $3) as matches_to_tsquery,
+               ts_rank_cd(search_vector, plainto_tsquery('english', $2)) as rank_score
+        FROM search_documents 
+        WHERE index_name = $1 
+        LIMIT 5
+      `;
+      const manualFTSResult = await this.dataSource.query(manualFTSQuery, [
+        indexName,
+        term,
+        `${term}:*`,
+      ]);
+
+      // Check PostgreSQL FTS configuration
+      const configQuery = `
+        SELECT cfgname, cfgparser, cfgdict 
+        FROM pg_ts_config 
+        WHERE cfgname = 'english'
+      `;
+      const configResult = await this.dataSource.query(configQuery);
+
+      return {
+        status: 'success',
+        indexName,
+        term,
+        vectorSamples: vectorResult,
+        tsqueryTests: queryResults,
+        manualFTSTests: manualFTSResult,
+        ftsConfig: configResult,
+        timestamp: new Date().toISOString(),
+      };
+    } catch (error) {
+      return {
+        status: 'error',
+        error: error.message,
+        indexName,
+        term,
+        timestamp: new Date().toISOString(),
+      };
+    }
+  }
 }
