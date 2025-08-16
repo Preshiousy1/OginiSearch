@@ -178,13 +178,13 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
         tsquery = typeof wildcardValue === 'string' ? wildcardValue : String(wildcardValue.value);
       }
 
-      // URGENT: Revert to optimized legacy search until decomposed issues are fixed
-      this.logger.debug(
-        `[DEBUG] Executing search: index=${indexName}, tsquery="${tsquery}", hasFilter=${!!searchQuery.filter}`,
+      // Log essential query information for monitoring
+      this.logger.log(
+        `Search query: index="${indexName}", term="${tsquery}", filter=${!!searchQuery.filter}`,
       );
       const searchResult = await this.executeSearch(indexName, tsquery, searchQuery);
-      this.logger.debug(
-        `[DEBUG] Search result: totalHits=${searchResult.totalHits}, hits=${searchResult.hits.length}`,
+      this.logger.log(
+        `Search result: totalHits=${searchResult.totalHits}, hits=${searchResult.hits.length}`,
       );
 
       const response = {
@@ -684,34 +684,13 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
   }> {
     const { from = 0, size = 10 } = searchQuery;
 
-    this.logger.debug(`[executeSearch] Starting search for "${tsquery}" in index "${indexName}"`);
-
-    // Check document count for debugging empty results
-    try {
-      const docCountQuery = `SELECT COUNT(*) as total_docs FROM documents WHERE index_name = $1`;
-      const searchDocCountQuery = `SELECT COUNT(*) as search_docs FROM search_documents WHERE index_name = $1`;
-
-      const [docCountResult, searchDocCountResult] = await Promise.all([
-        this.dataSource.query(docCountQuery, [indexName]),
-        this.dataSource.query(searchDocCountQuery, [indexName]),
-      ]);
-
-      this.logger.debug(
-        `[executeSearch] Document counts: documents=${
-          docCountResult[0]?.total_docs || 0
-        }, search_documents=${searchDocCountResult[0]?.search_docs || 0}`,
-      );
-    } catch (error) {
-      this.logger.warn(`[executeSearch] Failed to check document counts: ${error.message}`);
-    }
+    // Document count checks removed for performance - only used for debugging
 
     // Phase 3 Decomposition: Use QueryBuilder service for search analysis
     const queryInfo = this.queryBuilder.analyzeSearchTerm(searchQuery.query, tsquery);
     const candidateLimit = Math.min(size * 10, 200);
 
-    this.logger.debug(
-      `[executeSearch] Query info: searchTerm="${queryInfo.searchTerm}", candidateLimit=${candidateLimit}`,
-    );
+    // Query analysis logging removed for performance
 
     // Phase 3 Decomposition: Use PerformanceMonitor for instrumented execution
     try {
@@ -722,8 +701,7 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
         candidateLimit,
       );
 
-      this.logger.debug(`[executeSearch] Main query SQL: ${mainQuery.sql}`);
-      this.logger.debug(`[executeSearch] Main query params: ${JSON.stringify(mainQuery.params)}`);
+      // SQL logging removed for performance - only log on errors
       const { result: mainResult, metrics: mainMetrics } =
         await this.performanceMonitor.executeWithMonitoring(
           mainQuery.sql,
@@ -733,24 +711,18 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
           indexName,
         );
 
-      this.logger.debug(
-        `[executeSearch] Main query results: ${mainResult.length} candidates found`,
-      );
-
-      this.logger.debug(
-        `[executeSearch] Main query results: ${mainResult.length} candidates found`,
-      );
+      // Result count logging removed for performance
 
       // Check if we need alternative strategies
       const strategy = this.queryBuilder.getQueryStrategy(queryInfo, mainResult.length > 0);
 
-      this.logger.debug(`[executeSearch] Query strategy selected: ${strategy}`);
+      // Strategy logging removed for performance
 
-      // TEMPORARY: Keep emergency fallback until FTS fix is confirmed working
+      // Use fallback strategy if main search returns no results in production
       let finalStrategy = strategy;
       if (mainResult.length === 0 && process.env.NODE_ENV === 'production') {
         finalStrategy = 'fallback';
-        this.logger.debug(`[executeSearch] Using fallback strategy (FTS fix being tested)`);
+        // Fallback strategy logging removed for performance
       }
 
       if (finalStrategy === 'main') {

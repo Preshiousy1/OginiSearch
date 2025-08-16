@@ -65,9 +65,7 @@ export class PostgreSQLQueryBuilderService {
       // For wildcards: use to_tsquery with proper prefix syntax
       tsqueryFunction = 'to_tsquery';
       processedTerm = searchTerm.replace(/\*/g, ':*').replace(/\?/g, '');
-      this.logger.debug(
-        `[buildMainQuery] Wildcard detected: "${searchTerm}" -> "${processedTerm}"`,
-      );
+      // Wildcard detection logging removed for performance
     } else {
       // For regular terms: use plainto_tsquery
       tsqueryFunction = 'plainto_tsquery';
@@ -130,11 +128,7 @@ export class PostgreSQLQueryBuilderService {
 
     // EMERGENCY FIX: Force fallback to always search 'name' field for relevance
     const fields = ['name'];
-    this.logger.debug(
-      `[buildFallbackQuery] EMERGENCY: Forcing 'name' field for fallback search. Original fields: [${
-        searchQuery.fields?.join(', ') || 'none'
-      }]`,
-    );
+    // Fallback field selection logging removed for performance
 
     const fieldCondsSelect = fields
       .map(f => `d.content->>'${f.replace('.keyword', '')}' ILIKE $3`)
