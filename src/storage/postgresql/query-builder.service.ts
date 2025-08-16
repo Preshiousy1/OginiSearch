@@ -56,21 +56,39 @@ export class PostgreSQLQueryBuilderService {
    * Build main PostgreSQL full-text search query
    */
   buildMainQuery(indexName: string, searchTerm: string, candidateLimit: number): QueryResult {
+    // Fix: Use appropriate tsquery function based on search term
+    const hasWildcard = /[\*\?]/.test(searchTerm);
+    let tsqueryFunction: string;
+    let processedTerm: string;
+
+    if (hasWildcard) {
+      // For wildcards: use to_tsquery with proper prefix syntax
+      tsqueryFunction = 'to_tsquery';
+      processedTerm = searchTerm.replace(/\*/g, ':*').replace(/\?/g, '');
+      this.logger.debug(
+        `[buildMainQuery] Wildcard detected: "${searchTerm}" -> "${processedTerm}"`,
+      );
+    } else {
+      // For regular terms: use plainto_tsquery
+      tsqueryFunction = 'plainto_tsquery';
+      processedTerm = searchTerm;
+    }
+
     const sql = `
       SELECT 
         d.document_id,
         d.content,
         d.metadata,
-        ts_rank_cd(sd.search_vector, plainto_tsquery('english', $1)) as postgresql_score,
+        ts_rank_cd(sd.search_vector, ${tsqueryFunction}('english', $1)) as postgresql_score,
         COUNT(*) OVER() as total_count
       FROM search_documents sd
       JOIN documents d ON d.document_id = sd.document_id AND d.index_name = sd.index_name
       WHERE sd.index_name = $2 
-        AND sd.search_vector @@ plainto_tsquery('english', $1)
+        AND sd.search_vector @@ ${tsqueryFunction}('english', $1)
       ORDER BY postgresql_score DESC
       LIMIT $3`;
 
-    const params = [searchTerm, indexName, candidateLimit];
+    const params = [processedTerm, indexName, candidateLimit];
 
     return { sql, params, type: 'main' };
   }
@@ -110,11 +128,11 @@ export class PostgreSQLQueryBuilderService {
   ): QueryResult {
     const likePattern = searchTerm.replace(/\*/g, '%').replace(/\?/g, '_');
 
-    // Limit fallback scope to only the most important fields for better performance
+    // Optimize fallback scope for better performance
     const fields =
       Array.isArray(searchQuery.fields) && searchQuery.fields.length > 0
-        ? searchQuery.fields.slice(0, 2) // Limit to first 2 fields if provided
-        : ['name', 'slug']; // Only search most important fields by default
+        ? searchQuery.fields.slice(0, 1) // Limit to first 1 field for speed
+        : ['name']; // Only search the most important field by default
 
     const fieldCondsSelect = fields
       .map(f => `d.content->>'${f.replace('.keyword', '')}' ILIKE $3`)

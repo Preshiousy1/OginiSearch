@@ -174,7 +174,7 @@ export class DebugController {
         },
       ];
 
-      const queryResults = {};
+      const queryResults: any = {};
       for (const test of testQueries) {
         try {
           const result = await this.dataSource.query(test.query, [test.param]);
@@ -224,6 +224,159 @@ export class DebugController {
         error: error.message,
         indexName,
         term,
+        timestamp: new Date().toISOString(),
+      };
+    }
+  }
+
+  @Get('fts-diagnosis/:indexName')
+  @ApiOperation({
+    summary: 'Diagnose PostgreSQL Full-Text Search issues',
+    description: 'Deep analysis of FTS failure - search vectors, configurations, and query testing',
+  })
+  async diagnoseFTS(@Param('indexName') indexName: string) {
+    try {
+      // 1. Check search vector samples and their content
+      const vectorSampleQuery = `
+        SELECT 
+          document_id,
+          search_vector IS NOT NULL as has_vector,
+          length(search_vector::text) as vector_length,
+          substring(search_vector::text, 1, 200) as vector_preview,
+          substring(d.content::text, 1, 200) as content_preview
+        FROM search_documents sd
+        JOIN documents d ON d.document_id = sd.document_id AND d.index_name = sd.index_name
+        WHERE sd.index_name = $1 
+        LIMIT 5
+      `;
+      const vectorSamples = await this.dataSource.query(vectorSampleQuery, [indexName]);
+
+      // 2. Test different PostgreSQL FTS functions
+      const ftsTests: any = {};
+      const testTerm = 'business';
+
+      try {
+        // Test basic tsquery functions
+        const queryTests = [
+          {
+            name: 'plainto_tsquery',
+            sql: `SELECT plainto_tsquery('english', $1)::text as result`,
+            param: testTerm,
+          },
+          {
+            name: 'to_tsquery',
+            sql: `SELECT to_tsquery('english', $1)::text as result`,
+            param: `${testTerm}:*`,
+          },
+          {
+            name: 'websearch_to_tsquery',
+            sql: `SELECT websearch_to_tsquery('english', $1)::text as result`,
+            param: testTerm,
+          },
+        ];
+
+        for (const test of queryTests) {
+          try {
+            const result = await this.dataSource.query(test.sql, [test.param]);
+            ftsTests[test.name] = result[0]?.result || 'NULL';
+          } catch (error) {
+            ftsTests[test.name] = `ERROR: ${error.message}`;
+          }
+        }
+      } catch (error) {
+        ftsTests['error'] = error.message;
+      }
+
+      // 3. Test search vector matching with sample data
+      const matchingTests: any = {};
+      try {
+        const matchTestQuery = `
+          SELECT 
+            document_id,
+            search_vector @@ plainto_tsquery('english', $2) as matches_plainto,
+            search_vector @@ to_tsquery('english', $3) as matches_to_tsquery,
+            ts_rank_cd(search_vector, plainto_tsquery('english', $2)) as rank_plainto,
+            ts_rank_cd(search_vector, to_tsquery('english', $3)) as rank_to_tsquery
+          FROM search_documents 
+          WHERE index_name = $1 
+          LIMIT 3
+        `;
+        const matchResults = await this.dataSource.query(matchTestQuery, [
+          indexName,
+          testTerm,
+          `${testTerm}:*`,
+        ]);
+        matchingTests.results = matchResults;
+        matchingTests.totalMatches = matchResults.filter(r => r.matches_plainto).length;
+      } catch (error) {
+        matchingTests.error = error.message;
+      }
+
+      // 4. Check PostgreSQL text search configuration
+      const configTests: any = {};
+      try {
+        const configQueries = [
+          {
+            name: 'text_search_configs',
+            sql: `SELECT cfgname FROM pg_ts_config WHERE cfgname = 'english'`,
+          },
+          { name: 'dictionaries', sql: `SELECT dictname FROM pg_ts_dict LIMIT 5` },
+          { name: 'parsers', sql: `SELECT prsname FROM pg_ts_parser LIMIT 3` },
+          { name: 'current_config', sql: `SELECT current_setting('default_text_search_config')` },
+        ];
+
+        for (const test of configQueries) {
+          try {
+            const result = await this.dataSource.query(test.sql);
+            configTests[test.name] = result;
+          } catch (error) {
+            configTests[test.name] = `ERROR: ${error.message}`;
+          }
+        }
+      } catch (error) {
+        configTests.error = error.message;
+      }
+
+      // 5. Test raw search vector content analysis
+      let vectorAnalysis: any = {};
+      try {
+        const analysisQuery = `
+          SELECT 
+            COUNT(*) as total_vectors,
+            COUNT(CASE WHEN search_vector IS NOT NULL THEN 1 END) as non_null_vectors,
+            COUNT(CASE WHEN length(search_vector::text) > 10 THEN 1 END) as substantial_vectors,
+            AVG(length(search_vector::text)) as avg_vector_length
+          FROM search_documents 
+          WHERE index_name = $1
+        `;
+        const analysis = await this.dataSource.query(analysisQuery, [indexName]);
+        vectorAnalysis = analysis[0] || {};
+      } catch (error) {
+        vectorAnalysis.error = error.message;
+      }
+
+      return {
+        status: 'success',
+        indexName,
+        diagnosis: {
+          vectorSamples: vectorSamples || [],
+          ftsQueryTests: ftsTests,
+          vectorMatchingTests: matchingTests,
+          postgresqlConfig: configTests,
+          vectorAnalysis: vectorAnalysis,
+        },
+        summary: {
+          hasVectors: vectorSamples?.length > 0,
+          ftsConfigured: configTests.text_search_configs?.length > 0,
+          canCreateQueries: Object.keys(ftsTests).length > 0,
+        },
+        timestamp: new Date().toISOString(),
+      };
+    } catch (error) {
+      return {
+        status: 'error',
+        error: error.message,
+        indexName,
         timestamp: new Date().toISOString(),
       };
     }

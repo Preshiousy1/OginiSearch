@@ -746,13 +746,11 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
 
       this.logger.debug(`[executeSearch] Query strategy selected: ${strategy}`);
 
-      // EMERGENCY FIX: Force fallback strategy if FTS returns 0 results in production
+      // TEMPORARY: Keep emergency fallback until FTS fix is confirmed working
       let finalStrategy = strategy;
       if (mainResult.length === 0 && process.env.NODE_ENV === 'production') {
         finalStrategy = 'fallback';
-        this.logger.debug(
-          `[executeSearch] Forcing fallback strategy due to FTS failure in production`,
-        );
+        this.logger.debug(`[executeSearch] Using fallback strategy (FTS fix being tested)`);
       }
 
       if (finalStrategy === 'main') {
@@ -799,6 +797,12 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
           candidateLimit,
           from,
         );
+
+        this.logger.debug(`[executeSearch] Fallback query SQL: ${fallbackQuery.sql}`);
+        this.logger.debug(
+          `[executeSearch] Fallback query params: ${JSON.stringify(fallbackQuery.params)}`,
+        );
+
         const { result: fallbackResult } = await this.performanceMonitor.executeWithMonitoring(
           fallbackQuery.sql,
           fallbackQuery.params,
