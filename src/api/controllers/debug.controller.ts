@@ -602,4 +602,94 @@ export class DebugController {
       };
     }
   }
+
+  @Get('bulk-reindex/:indexName/:batchCount')
+  @ApiOperation({
+    summary: 'Bulk reindex multiple batches at once',
+    description: 'Process multiple reindexing batches in a single request for faster completion',
+  })
+  async bulkReindex(
+    @Param('indexName') indexName: string,
+    @Param('batchCount') batchCount: string,
+  ) {
+    try {
+      const numBatches = Math.min(parseInt(batchCount) || 10, 50); // Limit to 50 batches max
+      const batchSize = 5000; // Larger batch size
+
+      let totalUpdated = 0;
+      let finalRemaining = 0;
+
+      for (let i = 0; i < numBatches; i++) {
+        // Process larger batch
+        const updateQuery = `
+          UPDATE search_documents sd
+          SET search_vector = setweight(
+            to_tsvector('english', 
+              COALESCE(d.content->>'name', '') || ' ' ||
+              COALESCE(d.content->>'description', '') || ' ' ||
+              COALESCE(d.content->>'category_name', '') || ' ' ||
+              COALESCE(d.content->>'tags', '')
+            ), 'A'
+          )
+          FROM documents d
+          WHERE sd.document_id = d.document_id 
+            AND sd.index_name = d.index_name 
+            AND sd.index_name = $1
+            AND (sd.search_vector IS NULL OR length(sd.search_vector::text) < 10)
+            AND sd.document_id IN (
+              SELECT document_id FROM search_documents 
+              WHERE index_name = $1 AND (search_vector IS NULL OR length(search_vector::text) < 10)
+              LIMIT $2
+            )
+        `;
+
+        const result = await this.dataSource.query(updateQuery, [indexName, batchSize]);
+        const batchUpdated = result[1] || 0;
+        totalUpdated += batchUpdated;
+
+        // Check remaining after this batch
+        const remainingQuery = `
+          SELECT COUNT(*) as count FROM search_documents 
+          WHERE index_name = $1 AND (search_vector IS NULL OR length(search_vector::text) < 10)
+        `;
+        const remainingResult = await this.dataSource.query(remainingQuery, [indexName]);
+        finalRemaining = parseInt(remainingResult[0]?.count || '0');
+
+        // Stop if no more documents to process
+        if (batchUpdated === 0 || finalRemaining === 0) {
+          break;
+        }
+      }
+
+      // Get final statistics
+      const totalQuery = `SELECT COUNT(*) as total FROM search_documents WHERE index_name = $1`;
+      const totalResult = await this.dataSource.query(totalQuery, [indexName]);
+      const totalDocs = parseInt(totalResult[0]?.total || '0');
+      const completed = totalDocs - finalRemaining;
+      const percentComplete = totalDocs > 0 ? (completed * 100) / totalDocs : 0;
+
+      return {
+        status: 'success',
+        indexName,
+        results: {
+          batchesProcessed: numBatches,
+          totalUpdated,
+          completed,
+          remaining: finalRemaining,
+          totalDocuments: totalDocs,
+          percentComplete: Math.round(percentComplete * 100) / 100,
+        },
+        recommendation:
+          finalRemaining > 0 ? 'Continue with more bulk reindexing' : 'Reindexing complete',
+        timestamp: new Date().toISOString(),
+      };
+    } catch (error) {
+      return {
+        status: 'error',
+        error: error.message,
+        indexName,
+        timestamp: new Date().toISOString(),
+      };
+    }
+  }
 }
