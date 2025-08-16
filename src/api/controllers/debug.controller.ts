@@ -408,8 +408,8 @@ export class DebugController {
 
       // Test 3: Sample search vector content
       const vectorSampleQuery = `
-        SELECT document_id,
-               substring(search_vector::text, 1, 100) as vector_sample,
+        SELECT sd.document_id,
+               substring(sd.search_vector::text, 1, 100) as vector_sample,
                substring(d.content->>'name', 1, 50) as name_sample
         FROM search_documents sd
         JOIN documents d ON d.document_id = sd.document_id AND d.index_name = sd.index_name
