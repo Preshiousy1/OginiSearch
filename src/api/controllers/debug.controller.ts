@@ -441,4 +441,73 @@ export class DebugController {
       };
     }
   }
+
+  @Get('test-vector-generation/:term')
+  @ApiOperation({
+    summary: 'Test search vector generation',
+    description: 'Manually test creating a search vector and see if it works',
+  })
+  async testVectorGeneration(@Param('term') term: string) {
+    try {
+      // Test 1: Create a simple tsvector manually
+      const simpleVectorQuery = `SELECT to_tsvector('english', $1)::text as vector`;
+      const simpleVector = await this.dataSource.query(simpleVectorQuery, [term]);
+
+      // Test 2: Create weighted tsvector manually
+      const weightedVectorQuery = `SELECT setweight(to_tsvector('english', $1), 'A')::text as vector`;
+      const weightedVector = await this.dataSource.query(weightedVectorQuery, [term]);
+
+      // Test 3: Test if we can search against a manually created vector
+      const testSearchQuery = `
+        SELECT 
+          setweight(to_tsvector('english', $1), 'A') @@ plainto_tsquery('english', $2) as matches_plainto,
+          setweight(to_tsvector('english', $1), 'A') @@ to_tsquery('english', $3) as matches_to_tsquery
+      `;
+      const searchTest = await this.dataSource.query(testSearchQuery, [
+        `${term} business technology`, // Sample content
+        term, // Search term (plainto)
+        `${term}:*`, // Search term (to_tsquery)
+      ]);
+
+      // Test 4: Create and insert a test document with proper vector
+      const testDocId = `test-${Date.now()}`;
+      const insertTestQuery = `
+        INSERT INTO search_documents (document_id, index_name, search_vector, field_weights)
+        VALUES ($1, 'businesses', setweight(to_tsvector('english', $2), 'A'), '{}')
+        ON CONFLICT (document_id, index_name) 
+        DO UPDATE SET search_vector = EXCLUDED.search_vector
+      `;
+      await this.dataSource.query(insertTestQuery, [testDocId, `${term} test business`]);
+
+      // Test 5: Search for the test document we just created
+      const findTestQuery = `
+        SELECT 
+          sd.search_vector::text as stored_vector,
+          sd.search_vector @@ plainto_tsquery('english', $2) as matches
+        FROM search_documents sd
+        WHERE sd.document_id = $1 AND sd.index_name = 'businesses'
+      `;
+      const findResult = await this.dataSource.query(findTestQuery, [testDocId, term]);
+
+      return {
+        status: 'success',
+        term,
+        tests: {
+          simpleVector: simpleVector[0]?.vector || 'null',
+          weightedVector: weightedVector[0]?.vector || 'null',
+          searchTest: searchTest[0] || {},
+          testDocumentId: testDocId,
+          testDocumentVector: findResult[0] || {},
+        },
+        timestamp: new Date().toISOString(),
+      };
+    } catch (error) {
+      return {
+        status: 'error',
+        error: error.message,
+        term,
+        timestamp: new Date().toISOString(),
+      };
+    }
+  }
 }
