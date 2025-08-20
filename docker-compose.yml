@@ -17,8 +17,9 @@ services:
     environment:
       - NODE_ENV=development
       - PORT=3000
-      - POSTGRES_HOST=postgres
-      - POSTGRES_PORT=5432
+      # Connect to PgBouncer instead of direct Postgres
+      - POSTGRES_HOST=pgbouncer
+      - POSTGRES_PORT=6432
       - POSTGRES_DB=ogini_search_dev
       - POSTGRES_USER=postgres
       - POSTGRES_PASSWORD=postgres
@@ -29,6 +30,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      pgbouncer:
+        condition: service_healthy
       redis:
         condition: service_healthy
     command: npm run dev:start
@@ -38,6 +41,39 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
+
+  pgbouncer:
+    image: edoburu/pgbouncer
+    container_name: ogini-pgbouncer-dev
+    networks:
+      - ogini-network
+    ports:
+      - '6432:6432'
+    volumes:
+      - ./config/pgbouncer.ini:/etc/pgbouncer/pgbouncer.ini
+      - ./config/userlist.txt:/etc/pgbouncer/userlist.txt
+    environment:
+      - DATABASES_HOST=postgres
+      - DATABASES_PORT=5432
+      - DATABASES_USER=postgres
+      - DATABASES_PASSWORD=postgres
+      - DATABASES_DBNAME=ogini_search_dev
+      - POOL_MODE=transaction
+      - LISTEN_PORT=6432
+      - LISTEN_ADDR=0.0.0.0
+      - AUTH_TYPE=md5
+      - AUTH_FILE=/etc/pgbouncer/userlist.txt
+      - ADMIN_USERS=postgres
+      - STATS_USERS=postgres
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ['CMD', 'nc', '-z', 'localhost', '6432']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
 
   postgres:
     image: postgres:16-alpine

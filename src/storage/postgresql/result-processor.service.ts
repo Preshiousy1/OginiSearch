@@ -6,7 +6,8 @@ export interface RawSearchResult {
   document_id: string;
   content: any;
   metadata?: any;
-  postgresql_score: number;
+  postgresql_score?: number;
+  rank?: number;
   total_count?: number;
 }
 
@@ -48,7 +49,7 @@ export class PostgreSQLResultProcessorService {
       const documents = postgresqlResults.map(row => ({
         id: row.document_id,
         document: row.content,
-        score: row.postgresql_score, // Keep original PostgreSQL score as reference
+        score: row.postgresql_score || row.rank || 0, // Handle both score formats
       }));
 
       // Create BM25 scorer with generic field weights
@@ -73,19 +74,37 @@ export class PostgreSQLResultProcessorService {
       const rerankedCandidates = documents.map(doc => {
         let bm25Score = 0;
 
+        // Safety check for document structure
+        if (!doc.document || typeof doc.document !== 'object') {
+          return {
+            id: doc.id,
+            score: doc.score,
+            document: doc.document,
+          };
+        }
+
         // Calculate BM25 score for each field
         for (const [fieldName, fieldWeight] of Object.entries(
           bm25Scorer.getParameters().fieldWeights,
         )) {
-          if (doc.document[fieldName]) {
-            const fieldContent = String(doc.document[fieldName]).toLowerCase();
+          // Safe field access with proper null checks
+          const fieldValue = doc.document[fieldName];
+          if (fieldValue && typeof fieldValue === 'string') {
+            const fieldContent = fieldValue.toLowerCase();
 
             // Calculate term frequency for each query term in this field
             for (const term of queryTerms) {
               const termFreq = this.calculateTermFrequency(fieldContent, term);
               if (termFreq > 0) {
-                const fieldScore = bm25Scorer.score(term, doc.id, fieldName, termFreq);
-                bm25Score += fieldScore * (fieldWeight as number);
+                try {
+                  const fieldScore = bm25Scorer.score(term, doc.id, fieldName, termFreq);
+                  bm25Score += fieldScore * (fieldWeight as number);
+                } catch (scoreError) {
+                  // Skip this field if scoring fails
+                  this.logger.debug(
+                    `BM25 scoring failed for field ${fieldName}: ${scoreError.message}`,
+                  );
+                }
               }
             }
           }
@@ -104,12 +123,16 @@ export class PostgreSQLResultProcessorService {
         };
       });
 
-      // Sort by final combined score
+      // Sort by final score (descending)
       return rerankedCandidates.sort((a, b) => b.score - a.score);
     } catch (error) {
       this.logger.error(`BM25 re-ranking failed: ${error.message}`);
-      // Fallback: return results with PostgreSQL scores
-      return this.fallbackToPostgreSQLScores(postgresqlResults);
+      // Return original results if BM25 fails
+      return postgresqlResults.map(row => ({
+        id: row.document_id,
+        score: row.postgresql_score || row.rank || 0,
+        document: row.content,
+      }));
     }
   }
 
@@ -156,31 +179,54 @@ export class PostgreSQLResultProcessorService {
   }
 
   /**
-   * Process complete search results with ranking and pagination
+   * Process search results with optimized performance
    */
   async processSearchResults(
-    postgresqlResults: RawSearchResult[],
+    results: RawSearchResult[],
     searchTerm: string,
     from: number,
     size: number,
   ): Promise<SearchResultSummary> {
-    // Extract total count before processing
-    const totalHits = this.extractTotalCount(postgresqlResults);
+    if (!results || results.length === 0) {
+      return {
+        totalHits: 0,
+        maxScore: 0,
+        hits: [],
+      };
+    }
 
-    // Apply BM25 re-ranking
-    const rankedResults = await this.bm25Rerank(postgresqlResults, searchTerm);
+    try {
+      // Skip BM25 re-ranking for performance optimization
+      // Use PostgreSQL scores directly for faster results
+      const processedHits: ProcessedSearchHit[] = results.map(row => ({
+        id: row.document_id,
+        score: row.rank || row.postgresql_score || 0, // Use rank from our query
+        document: row.content,
+      }));
 
-    // Apply pagination
-    const paginatedHits = this.applyPagination(rankedResults, from, size);
+      // Sort by PostgreSQL score (descending)
+      processedHits.sort((a, b) => b.score - a.score);
 
-    // Calculate max score
-    const maxScore = this.calculateMaxScore(paginatedHits);
+      // Apply pagination
+      const paginatedHits = processedHits.slice(from, from + size);
 
-    return {
-      totalHits,
-      maxScore,
-      hits: paginatedHits,
-    };
+      // Calculate max score
+      const maxScore =
+        processedHits.length > 0 ? Math.max(...processedHits.map(hit => hit.score)) : 0;
+
+      return {
+        totalHits: results[0]?.total_count || results.length,
+        maxScore,
+        hits: paginatedHits,
+      };
+    } catch (error) {
+      this.logger.error(`Result processing failed: ${error.message}`);
+      return {
+        totalHits: 0,
+        maxScore: 0,
+        hits: [],
+      };
+    }
   }
 
   /**

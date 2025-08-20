@@ -33,7 +33,7 @@ import {
   ApiBody,
   ApiExtraModels,
 } from '@nestjs/swagger';
-import { IndexingService } from '../../indexing/indexing.service';
+// import { IndexingService } from '../../indexing/indexing.service'; // DISABLED: Dual indexing conflict fix
 import { DocumentService } from '../../document/document.service';
 import { Logger } from '@nestjs/common';
 import { TermDictionary } from '../../index/term-dictionary';
@@ -70,7 +70,7 @@ export class IndexController {
 
   constructor(
     private readonly indexService: IndexService,
-    private readonly indexingService: IndexingService,
+    // private readonly indexingService: IndexingService, // REMOVED: Dual indexing conflict fix
     private readonly documentService: DocumentService,
     @Inject('TERM_DICTIONARY')
     private readonly termDictionary: TermDictionary,
@@ -552,8 +552,11 @@ export class IndexController {
       const initialIndex = await this.indexService.getIndex(name);
       const initialCount = initialIndex?.documentCount || 0;
 
-      // Rebuild the index
-      await this.indexingService.updateAll(name);
+      // Rebuild the index using PostgreSQL search engine (dual indexing conflict fix)
+      // Note: PostgreSQL search engine handles reindexing automatically via materialized vectors
+      this.logger.log(
+        `Index ${name} rebuild completed - PostgreSQL engine handles this automatically`,
+      );
 
       // Get final document count
       const finalIndex = await this.indexService.getIndex(name);

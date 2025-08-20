@@ -46,13 +46,13 @@ export class MatchQueryBuilder extends BaseQueryBuilder {
       WHERE d.index_name = $1
         AND (${fieldConditions})`;
     } else {
-      // Full-text search using search_vector (default)
+      // Full-text search using materialized_vector (optimized) with fallback
       sql = `
-        ts_rank_cd(sd.search_vector, plainto_tsquery('english', $${paramIdx}::text)) * ${boost} as score
+        ts_rank_cd(COALESCE(sd.materialized_vector, sd.search_vector), plainto_tsquery('english', $${paramIdx}::text)) * ${boost} as score
       FROM search_documents sd
       JOIN documents d ON d.document_id = sd.document_id AND d.index_name = sd.index_name
       WHERE sd.index_name = $1
-        AND sd.search_vector @@ plainto_tsquery('english', $${paramIdx}::text)`;
+        AND COALESCE(sd.materialized_vector, sd.search_vector) @@ plainto_tsquery('english', $${paramIdx}::text)`;
     }
 
     return {

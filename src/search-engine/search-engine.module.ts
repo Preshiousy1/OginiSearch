@@ -6,6 +6,8 @@ import { PostgreSQLAnalysisAdapter } from '../storage/postgresql/postgresql-anal
 import { PostgreSQLDocumentProcessor } from '../storage/postgresql/postgresql-document-processor';
 import { SearchModule } from '../search/search.module';
 import { AnalysisModule } from '../analysis/analysis.module';
+import { ParallelSearchExecutor } from '../storage/postgresql/parallel-search-executor.service';
+import { EnterpriseSearchCache } from '../storage/postgresql/enterprise-search-cache.service';
 
 @Module({
   imports: [ConfigModule, PostgreSQLModule, SearchModule, AnalysisModule],
@@ -13,6 +15,8 @@ import { AnalysisModule } from '../analysis/analysis.module';
     PostgreSQLAnalysisAdapter,
     PostgreSQLDocumentProcessor,
     PostgreSQLSearchEngine,
+    ParallelSearchExecutor,
+    EnterpriseSearchCache,
     {
       provide: 'SEARCH_ENGINE',
       useFactory: (configService: ConfigService, postgresEngine: PostgreSQLSearchEngine) => {
@@ -34,6 +38,8 @@ import { AnalysisModule } from '../analysis/analysis.module';
     PostgreSQLSearchEngine,
     PostgreSQLAnalysisAdapter,
     PostgreSQLDocumentProcessor,
+    ParallelSearchExecutor,
+    EnterpriseSearchCache,
   ],
 })
 export class SearchEngineModule {}

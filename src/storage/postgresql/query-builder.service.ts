@@ -77,12 +77,12 @@ export class PostgreSQLQueryBuilderService {
         d.document_id,
         d.content,
         d.metadata,
-        ts_rank_cd(sd.search_vector, ${tsqueryFunction}('english', $1)) as postgresql_score,
+        ts_rank_cd(COALESCE(sd.materialized_vector, sd.search_vector), ${tsqueryFunction}('english', $1)) as postgresql_score,
         COUNT(*) OVER() as total_count
       FROM search_documents sd
       JOIN documents d ON d.document_id = sd.document_id AND d.index_name = sd.index_name
       WHERE sd.index_name = $2 
-        AND sd.search_vector @@ ${tsqueryFunction}('english', $1)
+        AND COALESCE(sd.materialized_vector, sd.search_vector) @@ ${tsqueryFunction}('english', $1)
       ORDER BY postgresql_score DESC
       LIMIT $3`;
 

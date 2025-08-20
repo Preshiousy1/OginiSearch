@@ -35,17 +35,17 @@ export class PostgreSQLQueryBuilder {
       SELECT 
         sd.id, sd.doc_id, sd.index_name, sd.content, sd.field_lengths, sd.boost_factor,
         sd.created_at, sd.updated_at,
-        ts_rank_cd(sd.search_vector, plainto_tsquery('english', $2)) as pg_rank,
-        (ts_rank_cd(sd.search_vector, plainto_tsquery('english', $2)) * sd.boost_factor * $4) as final_score
+        ts_rank_cd(COALESCE(sd.materialized_vector, sd.search_vector), plainto_tsquery('english', $2)) as pg_rank,
+        (ts_rank_cd(COALESCE(sd.materialized_vector, sd.search_vector), plainto_tsquery('english', $2)) * sd.boost_factor * $4) as final_score
       FROM search_documents sd
-      WHERE sd.index_name = $1 AND sd.search_vector @@ plainto_tsquery('english', $2)
+      WHERE sd.index_name = $1 AND COALESCE(sd.materialized_vector, sd.search_vector) @@ plainto_tsquery('english', $2)
       ORDER BY final_score DESC, sd.created_at DESC
       LIMIT $3 OFFSET $5
     `;
 
     const countQuery = `
       SELECT COUNT(*) as total FROM search_documents sd
-      WHERE sd.index_name = $1 AND sd.search_vector @@ plainto_tsquery('english', $2)
+      WHERE sd.index_name = $1 AND COALESCE(sd.materialized_vector, sd.search_vector) @@ plainto_tsquery('english', $2)
     `;
 
     return {

@@ -34,6 +34,8 @@ import { FilterBuilderService } from './filter-builder.service';
 import { AdaptiveQueryOptimizerService } from './adaptive-query-optimizer.service';
 import { SearchConfigurationService } from './search-configuration.service';
 import { SearchMetricsService } from './search-metrics.service';
+import { ParallelSearchExecutor } from './parallel-search-executor.service';
+import { EnterpriseSearchCache } from './enterprise-search-cache.service';
 
 export interface PostgreSQLSearchOptions {
   from?: number;
@@ -70,6 +72,7 @@ interface SearchMetrics {
 export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
   private readonly logger = new Logger(PostgreSQLSearchEngine.name);
   private readonly indices = new Map<string, IndexConfig>();
+
   constructor(
     private readonly dataSource: DataSource,
     private readonly documentProcessor: PostgreSQLDocumentProcessor,
@@ -88,6 +91,8 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
     private readonly adaptiveQueryOptimizer: AdaptiveQueryOptimizerService,
     private readonly searchConfig: SearchConfigurationService,
     private readonly searchMetrics: SearchMetricsService,
+    private readonly parallelExecutor: ParallelSearchExecutor,
+    private readonly enterpriseCache: EnterpriseSearchCache,
   ) {}
 
   async onModuleInit() {
@@ -117,7 +122,7 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
   }
 
   /**
-   * Search documents using PostgreSQL full-text search
+   * Search documents using PostgreSQL full-text search with enterprise optimizations
    */
   async search(
     indexName: string,
@@ -134,97 +139,92 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
     };
 
     try {
-      // Phase 4.3: Apply adaptive query optimization (async, non-blocking)
-      let optimizedQuery = searchQuery;
-      const patternKey = `${indexName}:${JSON.stringify(searchQuery.query)}`;
-      const cachedOptimization = this.adaptiveQueryOptimizer['optimizationCache']?.get(patternKey);
+      // Generate semantic cache key for enterprise cache
+      const enterpriseCacheKey = this.enterpriseCache.generateSemanticKey(
+        indexName,
+        searchQuery,
+        searchQuery.size || 10,
+        searchQuery.from || 0,
+      );
 
-      if (cachedOptimization) {
-        // Use cached optimization (fast path)
-        optimizedQuery = cachedOptimization;
-      } else {
-        // Trigger async optimization for future requests (non-blocking)
-        this.adaptiveQueryOptimizer
-          .optimizeQuery(indexName, searchQuery, { totalDocuments: this.indexStats.totalDocuments })
-          .catch(error => {
-            this.logger.debug(`Async optimization failed: ${error.message}`);
-          });
-      }
-
-      // Check optimized cache first
-      const cacheKey = this.optimizedCache.generateKey(indexName, optimizedQuery);
-      const cachedResult = this.optimizedCache.get(cacheKey);
-
+      // Check enterprise cache first (multi-level caching)
+      const cachedResult = await this.enterpriseCache.get(enterpriseCacheKey);
       if (cachedResult) {
         metrics.execution = Date.now() - startTime;
         metrics.total = metrics.execution;
 
-        // Phase 5: Record cache hit metrics (ultra-lightweight, async)
+        setImmediate(() => {
+          this.searchMetrics.recordQuery(
+            indexName,
+            'enterprise_cache_hit',
+            metrics.execution,
+            true,
+          );
+        });
+
+        this.logger.log(
+          `Enterprise cache hit for index '${indexName}': Found ${cachedResult.data.total} results in ${metrics.execution}ms`,
+        );
+        return { data: cachedResult.data, metrics };
+      }
+
+      // Check optimized cache second
+      const cacheKey = this.optimizedCache.generateKey(indexName, searchQuery);
+      const optimizedCachedResult = this.optimizedCache.get(cacheKey);
+      if (optimizedCachedResult) {
+        metrics.execution = Date.now() - startTime;
+        metrics.total = metrics.execution;
+
         setImmediate(() => {
           this.searchMetrics.recordQuery(indexName, 'cache_hit', metrics.execution, true);
         });
 
-        return { data: cachedResult, metrics };
+        return { data: optimizedCachedResult, metrics };
       }
 
-      // Convert search query to tsquery for PostgreSQL full-text search
-      let tsquery = '';
-      if (typeof searchQuery.query === 'string') {
-        tsquery = searchQuery.query;
-      } else if (searchQuery.query?.match?.value) {
-        tsquery = String(searchQuery.query.match.value);
-      } else if (searchQuery.query?.wildcard?.value) {
-        const wildcardValue = searchQuery.query.wildcard.value;
-        tsquery = typeof wildcardValue === 'string' ? wildcardValue : String(wildcardValue.value);
+      // Determine if we should use parallel search
+      const shouldUseParallel = this.shouldUseParallelSearch(searchQuery, searchQuery.size || 10);
+
+      let searchResult;
+      if (shouldUseParallel) {
+        searchResult = await this.parallelExecutor.executeParallelSearch(
+          indexName,
+          searchQuery,
+          searchQuery.size || 10,
+          searchQuery.from || 0,
+        );
+      } else {
+        // Use standard search with optimizations
+        searchResult = await this.executeStandardSearch(indexName, searchQuery);
       }
 
-      // Log essential query information for monitoring
-      this.logger.log(
-        `Search query: index="${indexName}", term="${tsquery}", filter=${!!searchQuery.filter}`,
-      );
-      const searchResult = await this.executeSearch(indexName, tsquery, searchQuery);
-      this.logger.log(
-        `Search result: totalHits=${searchResult.totalHits}, hits=${searchResult.hits.length}`,
-      );
-
-      const response = {
-        hits: searchResult.hits.map(hit => ({
-          id: hit.id,
-          score: hit.score,
-          source: hit.document,
-        })),
-        total: searchResult.totalHits,
-        maxScore: searchResult.maxScore,
-      };
-
-      // Cache the result using optimized cache
-      this.optimizedCache.set(cacheKey, response);
+      // Cache results in both enterprise and optimized caches
+      this.optimizedCache.set(cacheKey, searchResult.data);
+      await this.enterpriseCache.set(enterpriseCacheKey, searchResult);
 
       metrics.execution = Date.now() - startTime;
       metrics.total = metrics.execution;
 
-      // Phase 4.3: Record query execution for learning (async, non-blocking)
+      // Record metrics
       setImmediate(() => {
+        this.searchMetrics.recordQuery(indexName, 'search', metrics.execution, false);
         this.adaptiveQueryOptimizer.recordQueryExecution(
           indexName,
-          searchQuery, // Use original query for pattern learning
+          searchQuery,
           metrics.execution,
-          response.total,
-          true, // success
+          searchResult.data.total,
+          true,
         );
-
-        // Phase 5: Record search metrics (ultra-lightweight)
-        const queryType =
-          typeof searchQuery.query === 'string'
-            ? 'string'
-            : Object.keys(searchQuery.query || {})[0] || 'unknown';
-        this.searchMetrics.recordQuery(indexName, queryType, metrics.execution, false);
       });
 
-      return { data: response, metrics };
+      this.logger.log(
+        `Search completed for index '${indexName}': Found ${searchResult.data.total} results in ${metrics.execution}ms`,
+      );
+
+      return { data: searchResult.data, metrics };
     } catch (error) {
-      this.logger.error('Search error:', error);
-      throw new BadRequestException(`Search error: ${error.message}`);
+      this.logger.error(`Search failed for index '${indexName}': ${error.message}`);
+      throw error;
     }
   }
 
@@ -313,7 +313,7 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
             category: 'Suggested spelling',
           }));
 
-          this.logger.debug(`Found ${results.length} fuzzy suggestions for "${text}"`);
+          // Debug log removed for performance optimization
         } catch (fuzzyError) {
           this.logger.warn(`Fuzzy matching failed: ${fuzzyError.message}`);
         }
@@ -770,10 +770,7 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
           from,
         );
 
-        this.logger.debug(`[executeSearch] Fallback query SQL: ${fallbackQuery.sql}`);
-        this.logger.debug(
-          `[executeSearch] Fallback query params: ${JSON.stringify(fallbackQuery.params)}`,
-        );
+        // Debug logs removed for performance optimization
 
         const { result: fallbackResult } = await this.performanceMonitor.executeWithMonitoring(
           fallbackQuery.sql,
@@ -902,8 +899,7 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
     // Build optimized SQL query with SQL-level LIMIT and filtering
     const { sql, params } = await this.buildSearchQuery(indexName, searchQuery);
 
-    this.logger.debug(`Decomposed Search SQL: ${sql}`);
-    this.logger.debug(`Decomposed Search Params: ${JSON.stringify(params)}`);
+    // Debug logs removed for performance optimization
 
     // Execute with performance monitoring
     const { result: rows } = await this.performanceMonitor.executeWithMonitoring(
@@ -986,8 +982,7 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
       ORDER BY score DESC, document_id
       LIMIT $${queryResult.params.length - 1} OFFSET $${queryResult.params.length}`;
 
-    this.logger.debug(`Phase 3 Decomposed SQL: ${sql}`);
-    this.logger.debug(`Phase 3 Decomposed params: ${JSON.stringify(queryResult.params)}`);
+    // Debug logs removed for performance optimization
 
     return { sql: sql, params: queryResult.params };
   }
@@ -1701,17 +1696,146 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
         const executionTime = plan['Execution Time'];
         const planningTime = plan['Planning Time'];
 
-        this.logger.warn(`Query Plan Analysis (${queryType}):`, {
-          executionTime: `${executionTime}ms`,
-          planningTime: `${planningTime}ms`,
-          totalTime: `${executionTime + planningTime}ms`,
-          nodeType: plan.Plan['Node Type'],
-          actualRows: plan.Plan['Actual Rows'],
-          actualLoops: plan.Plan['Actual Loops'],
-        });
+        // Query plan analysis logging disabled for performance
       }
     } catch (error) {
       this.logger.debug(`Failed to get query plan: ${error.message}`);
     }
+  }
+
+  /**
+   * Determine if parallel search should be used
+   */
+  private shouldUseParallelSearch(query: SearchQueryDto, size: number): boolean {
+    // Use parallel search only for:
+    // 1. Very large result sets (size > 100)
+    // 2. Complex wildcard queries with multiple wildcards
+    // 3. Boolean queries with multiple conditions
+
+    if (size > 100) return true;
+
+    const searchTerm = this.extractSearchTerm(query);
+
+    // Complex wildcard patterns (multiple wildcards)
+    const wildcardCount = (searchTerm.match(/\*/g) || []).length;
+    if (wildcardCount > 1) return true;
+
+    // Boolean queries
+    if (typeof query.query === 'object' && 'bool' in query.query) return true;
+
+    // Very high-frequency terms that might return massive results
+    const massiveTerms = ['a', 'the', 'and', 'or', 'in', 'on', 'at'];
+    if (massiveTerms.includes(searchTerm.toLowerCase())) return true;
+
+    // Default to standard search for better performance
+    return false;
+  }
+
+  /**
+   * Execute standard search with optimizations
+   */
+  private async executeStandardSearch(
+    indexName: string,
+    searchQuery: SearchQueryDto,
+  ): Promise<any> {
+    const searchTerm = this.extractSearchTerm(searchQuery);
+
+    // Build optimized query with parallel execution hints
+    const mainQuery = this.buildOptimizedSearchQuery(
+      indexName,
+      searchTerm,
+      searchQuery.size || 10,
+      searchQuery.from || 0,
+      searchQuery.filter,
+    );
+
+    // Build parameters array
+    const params = [searchTerm, indexName, searchQuery.size || 10, searchQuery.from || 0];
+
+    // Execute query directly without parallel optimization overhead
+    const results = await this.dataSource.query(mainQuery, params);
+
+    // Process results
+    const processedResults = await this.resultProcessor.processSearchResults(
+      results,
+      searchTerm,
+      searchQuery.from || 0,
+      searchQuery.size || 10,
+    );
+
+    return {
+      data: {
+        hits: processedResults.hits,
+        total: processedResults.totalHits,
+        maxScore: processedResults.maxScore,
+        pagination: {
+          currentPage: Math.floor((searchQuery.from || 0) / (searchQuery.size || 10)) + 1,
+          totalPages: Math.ceil(processedResults.totalHits / (searchQuery.size || 10)),
+          pageSize: searchQuery.size || 10,
+          hasNext: (searchQuery.from || 0) + (searchQuery.size || 10) < processedResults.totalHits,
+          hasPrevious: (searchQuery.from || 0) > 0,
+          totalResults: processedResults.totalHits,
+        },
+      },
+      took: 0, // Will be set by caller
+    };
+  }
+
+  /**
+   * Extract search term from query
+   */
+  private extractSearchTerm(query: SearchQueryDto): string {
+    if (typeof query.query === 'string') {
+      return query.query;
+    }
+    if (query.query?.match?.value) {
+      return query.query.match.value;
+    }
+    if (
+      typeof query.query === 'object' &&
+      'wildcard' in query.query &&
+      typeof query.query.wildcard === 'object' &&
+      'value' in query.query.wildcard
+    ) {
+      return (query.query.wildcard as { value: string }).value;
+    }
+    return '';
+  }
+
+  /**
+   * Build optimized search query with parallel execution hints
+   */
+  private buildOptimizedSearchQuery(
+    indexName: string,
+    searchTerm: string,
+    size: number,
+    from: number,
+    filter?: any,
+  ): string {
+    const filterResult = filter
+      ? this.filterBuilderService.buildConditions(filter, [], 1)
+      : { sql: '', nextParamIndex: 1 };
+    const filterClause = filterResult.sql;
+
+    // Check if documents table has search vectors
+    return `
+      WITH search_results AS (
+        SELECT 
+          document_id,
+          content,
+          metadata,
+          field_weights,
+          ts_rank_cd(COALESCE(materialized_vector, search_vector), to_tsquery('english', $1)) as rank,
+          COUNT(*) OVER() as total_count
+        FROM documents
+        WHERE index_name = $2
+          AND search_vector IS NOT NULL
+          AND COALESCE(materialized_vector, search_vector) @@ to_tsquery('english', $1)
+          ${filterClause ? `AND ${filterClause}` : ''}
+      )
+      SELECT * FROM search_results
+      ORDER BY rank DESC
+      LIMIT $3 OFFSET $4
+    `;
   }
 }

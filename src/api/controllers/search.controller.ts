@@ -319,6 +319,15 @@ export class SearchController {
     }
 
     // Removed verbose logging for performance - only log errors and completion
+    console.log('search payload', searchDto, 'filter', searchDto.filter?.bool?.must);
+
+    // Convert to appropriate SearchQueryDto format if necessary
+    // This handles both string and object formats for backward compatibility
+    if (typeof searchDto.query === 'string') {
+      this.logger.log(`Processing string query: ${searchDto.query}`);
+    } else {
+      this.logger.log(`Processing object query: ${JSON.stringify(searchDto.query)}`);
+    }
 
     try {
       const result = await this.searchService.search(index, searchDto);

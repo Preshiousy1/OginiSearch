@@ -30,6 +30,9 @@ import { FilterBuilderService } from './filter-builder.service';
 import { SearchConfigurationService } from './search-configuration.service';
 import { SearchMetricsService } from './search-metrics.service';
 
+import { ParallelSearchExecutor } from './parallel-search-executor.service';
+import { EnterpriseSearchCache } from './enterprise-search-cache.service';
+
 @Module({
   imports: [
     ConfigModule,
@@ -50,12 +53,19 @@ import { SearchMetricsService } from './search-metrics.service';
             ? { rejectUnauthorized: false }
             : false,
         extra: {
-          max: 20,
-          min: 5,
-          poolSize: 20,
+          // Optimized connection pooling for search workload (Priority 1 Fix)
+          max: 25, // CPU cores * 2-4 (enterprise recommendation)
+          min: 10, // Keep minimum connections ready
+          poolSize: 25,
           idleTimeoutMillis: 30000,
           connectTimeoutMS: 2000,
-          acquireTimeoutMillis: 30000,
+          acquireTimeoutMillis: 5000, // Faster timeout for search responsiveness
+          // PostgreSQL specific optimizations
+          statement_timeout: 30000, // 30 second query timeout
+          query_timeout: 10000, // 10 second individual query timeout
+          // Connection optimization
+          keepAlive: true,
+          keepAliveInitialDelayMillis: 0,
         },
       }),
       inject: [ConfigService],
@@ -88,6 +98,9 @@ import { SearchMetricsService } from './search-metrics.service';
     // Phase 5 Services
     SearchConfigurationService,
     SearchMetricsService,
+    // Enterprise Optimizations
+    ParallelSearchExecutor,
+    EnterpriseSearchCache,
   ],
   exports: [
     PostgreSQLService,
