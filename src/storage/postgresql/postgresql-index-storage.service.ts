@@ -9,7 +9,6 @@ import {
 import { ProcessedDocument } from '../../document/interfaces/document-processor.interface';
 import { IndexStorage } from '../../index/interfaces/index-storage.interface';
 import { PostgreSQLProcessedDocument } from './interfaces/postgresql-document.interface';
-import { SearchDocument } from './entities/search-document.entity';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Document } from './entities/document.entity';
 import { Index as IndexEntity } from './entities/index.entity';
@@ -24,8 +23,6 @@ export class PostgreSQLIndexStorageService implements IndexStorage {
     private readonly dataSource: DataSource,
     @InjectRepository(Document)
     private readonly documentRepository: Repository<Document>,
-    @InjectRepository(SearchDocument)
-    private readonly searchDocumentRepository: Repository<SearchDocument>,
     @InjectRepository(IndexEntity)
     private readonly indexRepository: Repository<IndexEntity>,
   ) {}
@@ -225,16 +222,23 @@ export class PostgreSQLIndexStorageService implements IndexStorage {
         .filter(([_, fieldData]) => fieldData.terms && fieldData.terms.length > 0)
         .map(([_, fieldData]) => fieldData.terms.join(' '));
 
-      // Store search document with generated tsvector
+      // Store document with generated tsvector
       await this.dataSource.query(
-        `INSERT INTO search_documents (document_id, index_name, search_vector, field_weights)
-         VALUES ($${params.length + 1}, $${params.length + 2}, ${searchVectorExpr}, $${
-          params.length + 3
-        })
+        `INSERT INTO documents (document_id, index_name, content, metadata, search_vector, field_weights)
+         VALUES ($${params.length + 1}, $${params.length + 2}, $${params.length + 3}, $${
+          params.length + 4
+        }, ${searchVectorExpr}, $${params.length + 5})
          ON CONFLICT (document_id, index_name)
          DO UPDATE SET search_vector = EXCLUDED.search_vector,
                       field_weights = EXCLUDED.field_weights`,
-        [document.id, indexName, ...params, fieldWeights],
+        [
+          document.id,
+          indexName,
+          JSON.stringify(document.fields),
+          JSON.stringify({}),
+          ...params,
+          fieldWeights,
+        ],
       );
     } catch (error) {
       this.logger.error(
@@ -245,7 +249,7 @@ export class PostgreSQLIndexStorageService implements IndexStorage {
   }
 
   async getProcessedDocument(indexName: string, documentId: string): Promise<any> {
-    const doc = await this.searchDocumentRepository.findOne({
+    const doc = await this.documentRepository.findOne({
       where: { indexName, documentId },
     });
 
@@ -260,7 +264,7 @@ export class PostgreSQLIndexStorageService implements IndexStorage {
   }
 
   async deleteProcessedDocument(indexName: string, documentId: string): Promise<void> {
-    await this.searchDocumentRepository.delete({ indexName, documentId });
+    await this.documentRepository.delete({ indexName, documentId });
   }
 
   async storeIndexStats(indexName: string, stats: Record<string, any>): Promise<void> {
@@ -293,7 +297,7 @@ export class PostgreSQLIndexStorageService implements IndexStorage {
   }
 
   async getAllDocuments(indexName: string): Promise<Array<{ id: string; source: any }>> {
-    const entities = await this.searchDocumentRepository.find({
+    const entities = await this.documentRepository.find({
       where: { indexName },
       select: ['documentId', 'searchVector'],
     });
@@ -309,7 +313,7 @@ export class PostgreSQLIndexStorageService implements IndexStorage {
       await this.dataSource.query('BEGIN');
 
       // Delete all documents for this index
-      await this.searchDocumentRepository.delete({ indexName });
+      await this.documentRepository.delete({ indexName });
 
       // Reset document count in index metadata
       await this.dataSource.query('UPDATE indices SET document_count = 0 WHERE index_name = $1', [
@@ -347,7 +351,7 @@ export class PostgreSQLIndexStorageService implements IndexStorage {
     positions: number[],
   ): Promise<void> {
     try {
-      const searchDoc = await this.searchDocumentRepository.findOne({
+      const searchDoc = await this.documentRepository.findOne({
         where: { indexName, documentId },
       });
 
@@ -356,7 +360,7 @@ export class PostgreSQLIndexStorageService implements IndexStorage {
       }
 
       // Update the tsvector with the new term
-      await this.searchDocumentRepository
+      await this.documentRepository
         .createQueryBuilder()
         .update()
         .set({
@@ -373,7 +377,7 @@ export class PostgreSQLIndexStorageService implements IndexStorage {
 
   async removeTermFromIndex(indexName: string, term: string, documentId: string): Promise<void> {
     try {
-      const searchDoc = await this.searchDocumentRepository.findOne({
+      const searchDoc = await this.documentRepository.findOne({
         where: { indexName, documentId },
       });
 
@@ -382,7 +386,7 @@ export class PostgreSQLIndexStorageService implements IndexStorage {
       }
 
       // Remove the term from tsvector
-      await this.searchDocumentRepository
+      await this.documentRepository
         .createQueryBuilder()
         .update()
         .set({

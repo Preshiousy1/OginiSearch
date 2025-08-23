@@ -3,7 +3,6 @@ import { SearchService } from './search.service';
 import { QueryProcessorService } from './query-processor.service';
 import { TypoToleranceService } from './typo-tolerance.service';
 import { PostgreSQLFuzzySearch } from '../storage/postgresql/postgresql-fuzzy-search';
-import { PostgreSQLSchemaManager } from '../storage/postgresql/postgresql-schema-manager';
 import { SchemaModule } from '../schema/schema.module';
 import { StorageModule } from '../storage/storage.module';
 import { IndexModule } from '../index/index.module';
@@ -15,23 +14,11 @@ import { SearchEngineModule } from 'src/search-engine/search-engine.module';
   imports: [
     SchemaModule,
     StorageModule,
-    IndexModule,
+    forwardRef(() => IndexModule),
     AnalysisModule,
     forwardRef(() => SearchEngineModule),
   ],
-  providers: [
-    SearchService,
-    QueryProcessorService,
-    TypoToleranceService,
-    PostgreSQLFuzzySearch,
-    PostgreSQLSchemaManager,
-  ],
-  exports: [
-    SearchService,
-    QueryProcessorService,
-    TypoToleranceService,
-    PostgreSQLFuzzySearch,
-    PostgreSQLSchemaManager,
-  ],
+  providers: [SearchService, QueryProcessorService, TypoToleranceService, PostgreSQLFuzzySearch],
+  exports: [SearchService, QueryProcessorService, TypoToleranceService, PostgreSQLFuzzySearch],
 })
 export class SearchModule {}

@@ -24,71 +24,25 @@ export class SearchService {
    */
   async search(indexName: string, searchQuery: SearchQueryDto): Promise<SearchResponseDto> {
     const startTime = Date.now();
-
-    // Extract keyword fields for better search targeting
-    const keywordFields = await this.extractKeywordFields(indexName);
-    if (keywordFields.length > 0) {
-      searchQuery.fields = keywordFields;
-    }
-
-    // Check if this is a wildcard pattern in a match query
-    if (
-      searchQuery.query?.match &&
-      typeof searchQuery.query.match === 'object' &&
-      'value' in searchQuery.query.match &&
-      typeof searchQuery.query.match.value === 'string' &&
-      (searchQuery.query.match.value.includes('*') || searchQuery.query.match.value.includes('?'))
-    ) {
-      if (keywordFields.length > 0) {
-        searchQuery.fields = keywordFields;
-      }
-    }
+    console.log(`[PROFILE] Search started for: ${JSON.stringify(searchQuery.query)}`);
 
     try {
-      // Process query to detect wildcard patterns
-      const processedQuery = this.queryProcessor.processQuery(searchQuery as any);
-
-      // Check if the processed query is a wildcard query that was converted from a match query
-      if (processedQuery.parsedQuery.type === 'wildcard') {
-        // If we set fields for wildcard search, use the first field as the target field
-        let targetField = processedQuery.parsedQuery.field;
-        if (searchQuery.fields && searchQuery.fields.length > 0 && targetField === '_all') {
-          targetField = searchQuery.fields[0];
-        }
-
-        // Convert the processed wildcard query back to the format expected by PostgreSQLSearchEngine
-        const wildcardQuery = {
-          ...searchQuery,
-          fields: searchQuery.fields,
-          query: {
-            wildcard: {
-              field: targetField,
-              value: processedQuery.parsedQuery.pattern,
-              boost: processedQuery.parsedQuery.boost,
-            },
-          },
-        };
-
-        // Execute search using PostgreSQL engine
-        const searchResult = await this.postgresSearchEngine.search(indexName, wildcardQuery);
-        return this.formatSearchResponse(
-          searchResult,
-          wildcardQuery,
-          searchQuery,
-          indexName,
-          startTime,
-        );
-      }
-
-      // Execute search using PostgreSQL engine for non-wildcard queries
+      // Skip all the complex query processing and go directly to PostgreSQL engine
+      const searchStart = Date.now();
       const searchResult = await this.postgresSearchEngine.search(indexName, searchQuery);
-      return this.formatSearchResponse(
+      console.log(`[PROFILE] PostgreSQL search took: ${Date.now() - searchStart}ms`);
+
+      const formatStart = Date.now();
+      const result = this.formatSearchResponse(
         searchResult,
         searchQuery,
         searchQuery,
         indexName,
         startTime,
       );
+      console.log(`[PROFILE] Format response took: ${Date.now() - formatStart}ms`);
+      console.log(`[PROFILE] Total search took: ${Date.now() - startTime}ms`);
+      return result;
     } catch (error) {
       this.logger.error(`Search failed: ${error.message}`);
       throw error;
@@ -111,7 +65,7 @@ export class SearchService {
         id: hit.id,
         index: indexName,
         score: hit.score,
-        source: hit.source,
+        source: hit.document || hit.source, // Handle both field names
         highlights: originalQuery.highlight
           ? await this.getPostgresHighlights(
               hit,

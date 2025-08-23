@@ -1,45 +1,49 @@
-import { Module } from '@nestjs/common';
-import { ConfigModule, ConfigService } from '@nestjs/config';
-import { PostgreSQLModule } from '../storage/postgresql/postgresql.module';
+import { forwardRef, Module } from '@nestjs/common';
+import { TypeOrmModule } from '@nestjs/typeorm';
 import { PostgreSQLSearchEngine } from '../storage/postgresql/postgresql-search-engine';
-import { PostgreSQLAnalysisAdapter } from '../storage/postgresql/postgresql-analysis.adapter';
+import { PostgreSQLService } from '../storage/postgresql/postgresql.service';
+import { PostgreSQLFuzzySearch } from '../storage/postgresql/postgresql-fuzzy-search';
+import { PostgreSQLIndexStats } from '../storage/postgresql/postgresql-index-stats';
+import { PostgreSQLResultProcessorService } from '../storage/postgresql/result-processor.service';
+import { PostgreSQLPerformanceMonitorService } from '../storage/postgresql/performance-monitor.service';
+import { OptimizedQueryCacheService } from '../storage/postgresql/optimized-query-cache.service';
+import { TypoToleranceService } from '../search/typo-tolerance.service';
+import { QueryProcessorService } from '../search/query-processor.service';
+import { Document } from '../storage/postgresql/entities/document.entity';
+import { Index } from '../storage/postgresql/entities/index.entity';
 import { PostgreSQLDocumentProcessor } from '../storage/postgresql/postgresql-document-processor';
-import { SearchModule } from '../search/search.module';
-import { AnalysisModule } from '../analysis/analysis.module';
-import { ParallelSearchExecutor } from '../storage/postgresql/parallel-search-executor.service';
-import { EnterpriseSearchCache } from '../storage/postgresql/enterprise-search-cache.service';
+import { PostgreSQLModule } from 'src/storage/postgresql/postgresql.module';
+import { SearchModule } from 'src/search/search.module';
+import { AnalysisModule } from 'src/analysis/analysis.module';
 
 @Module({
-  imports: [ConfigModule, PostgreSQLModule, SearchModule, AnalysisModule],
+  imports: [
+    TypeOrmModule.forFeature([Document, Index]),
+    forwardRef(() => PostgreSQLModule),
+    forwardRef(() => SearchModule),
+    AnalysisModule,
+  ],
   providers: [
-    PostgreSQLAnalysisAdapter,
-    PostgreSQLDocumentProcessor,
     PostgreSQLSearchEngine,
-    ParallelSearchExecutor,
-    EnterpriseSearchCache,
-    {
-      provide: 'SEARCH_ENGINE',
-      useFactory: (configService: ConfigService, postgresEngine: PostgreSQLSearchEngine) => {
-        // Use PostgreSQL as the primary search engine
-        const searchEngine = configService.get<string>('SEARCH_ENGINE', 'postgresql');
-
-        if (searchEngine === 'postgresql') {
-          return postgresEngine;
-        }
-
-        // Default to PostgreSQL if no specific engine is configured
-        return postgresEngine;
-      },
-      inject: [ConfigService, PostgreSQLSearchEngine],
-    },
+    PostgreSQLService,
+    PostgreSQLFuzzySearch,
+    PostgreSQLIndexStats,
+    PostgreSQLResultProcessorService,
+    PostgreSQLPerformanceMonitorService,
+    OptimizedQueryCacheService,
+    TypoToleranceService,
+    QueryProcessorService,
   ],
   exports: [
-    'SEARCH_ENGINE',
     PostgreSQLSearchEngine,
-    PostgreSQLAnalysisAdapter,
-    PostgreSQLDocumentProcessor,
-    ParallelSearchExecutor,
-    EnterpriseSearchCache,
+    PostgreSQLService,
+    PostgreSQLFuzzySearch,
+    PostgreSQLIndexStats,
+    PostgreSQLResultProcessorService,
+    PostgreSQLPerformanceMonitorService,
+    OptimizedQueryCacheService,
+    TypoToleranceService,
+    QueryProcessorService,
   ],
 })
 export class SearchEngineModule {}

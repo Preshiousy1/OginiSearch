@@ -1,6 +1,6 @@
 import { Controller, Get, Query } from '@nestjs/common';
 import { ApiOperation, ApiResponse, ApiTags, ApiQuery } from '@nestjs/swagger';
-import { SearchMetricsService } from '../../storage/postgresql/search-metrics.service';
+import { PostgreSQLService } from '../../storage/postgresql/postgresql.service';
 
 /**
  * Lightweight Metrics API Controller
@@ -9,7 +9,7 @@ import { SearchMetricsService } from '../../storage/postgresql/search-metrics.se
 @ApiTags('metrics')
 @Controller('metrics')
 export class MetricsController {
-  constructor(private readonly searchMetrics: SearchMetricsService) {}
+  constructor(private readonly postgresqlService: PostgreSQLService) {}
 
   @Get('search')
   @ApiOperation({
@@ -21,10 +21,15 @@ export class MetricsController {
     status: 200,
     description: 'Search metrics data',
   })
-  getSearchMetrics() {
+  async getSearchMetrics() {
+    const dbStats = await this.postgresqlService.getDatabaseStats();
     return {
       status: 'success',
-      data: this.searchMetrics.getMetrics(),
+      data: {
+        totalDocuments: dbStats.totalDocuments,
+        indexes: dbStats.indexes,
+        indexSizes: dbStats.indexSizes,
+      },
       timestamp: new Date().toISOString(),
     };
   }
@@ -41,7 +46,9 @@ export class MetricsController {
   getPerformanceTrends() {
     return {
       status: 'success',
-      data: this.searchMetrics.getPerformanceTrends(),
+      data: {
+        message: 'Performance trends not available in simplified version',
+      },
       timestamp: new Date().toISOString(),
     };
   }
@@ -62,10 +69,11 @@ export class MetricsController {
     description: 'Recent slow queries',
   })
   getSlowQueries(@Query('limit') limit?: string) {
-    const queryLimit = limit ? parseInt(limit, 10) : 10;
     return {
       status: 'success',
-      data: this.searchMetrics.getRecentSlowQueries(queryLimit),
+      data: {
+        message: 'Slow query tracking not available in simplified version',
+      },
       timestamp: new Date().toISOString(),
     };
   }
@@ -82,7 +90,9 @@ export class MetricsController {
   getMemoryUsage() {
     return {
       status: 'success',
-      data: this.searchMetrics.getMemoryUsage(),
+      data: {
+        message: 'Memory usage tracking not available in simplified version',
+      },
       timestamp: new Date().toISOString(),
     };
   }
