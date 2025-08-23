@@ -286,7 +286,7 @@ export class PostgreSQLService implements OnModuleInit {
   }
 
   /**
-   * Efficient bulk document storage using transaction and batch inserts
+   * Efficient bulk document storage with individual error handling
    */
   async bulkStoreDocuments(
     documents: SourceDocument[],
@@ -301,66 +301,47 @@ export class PostgreSQLService implements OnModuleInit {
     const batches = chunk(documents, batchSize);
 
     for (const batch of batches) {
-      const queryRunner = this.dataSource.createQueryRunner();
-      await queryRunner.connect();
+      // Process each document individually to avoid transaction abortion
+      for (const doc of batch) {
+        const { documentId, indexName, content, metadata = {} } = doc;
 
-      try {
-        await queryRunner.startTransaction();
+        // Ensure content is a valid JSON object
+        const safeContent = typeof content === 'object' ? content : { content };
+        const safeMetadata = typeof metadata === 'object' ? metadata : {};
 
-        // First store documents
-        for (const doc of batch) {
-          const { documentId, indexName, content, metadata = {} } = doc;
+        try {
+          // Check if document already exists
+          const existing = await this.dataSource.query(
+            `SELECT document_id FROM documents WHERE document_id = $1 AND index_name = $2`,
+            [documentId, indexName],
+          );
 
-          // Ensure content is a valid JSON object
-          const safeContent = typeof content === 'object' ? content : { content };
-          const safeMetadata = typeof metadata === 'object' ? metadata : {};
-
-          try {
-            // Check if document already exists
-            const existing = await queryRunner.query(
-              `SELECT document_id FROM documents WHERE document_id = $1 AND index_name = $2`,
-              [documentId, indexName],
+          if (existing.length > 0) {
+            // Update existing document
+            await this.dataSource.query(
+              `UPDATE documents SET content = $3::jsonb, metadata = $4::jsonb, updated_at = CURRENT_TIMESTAMP
+               WHERE document_id = $1 AND index_name = $2`,
+              [documentId, indexName, JSON.stringify(safeContent), JSON.stringify(safeMetadata)],
             );
-
-            if (existing.length > 0) {
-              // Update existing document
-              await queryRunner.query(
-                `UPDATE documents SET content = $3::jsonb, metadata = $4::jsonb, updated_at = CURRENT_TIMESTAMP
-                 WHERE document_id = $1 AND index_name = $2`,
-                [documentId, indexName, JSON.stringify(safeContent), JSON.stringify(safeMetadata)],
-              );
-            } else {
-              // Insert new document
-              await queryRunner.query(
-                `INSERT INTO documents (document_id, index_name, content, metadata)
-                 VALUES ($1, $2, $3::jsonb, $4::jsonb)`,
-                [documentId, indexName, JSON.stringify(safeContent), JSON.stringify(safeMetadata)],
-              );
-            }
-
-            successCount++;
-          } catch (error) {
-            this.logger.error(`Error processing document ${documentId}: ${error.message}`);
-            errors.push({
-              documentId,
-              error: error.message,
-            });
+          } else {
+            // Insert new document
+            await this.dataSource.query(
+              `INSERT INTO documents (document_id, index_name, content, metadata)
+               VALUES ($1, $2, $3::jsonb, $4::jsonb)`,
+              [documentId, indexName, JSON.stringify(safeContent), JSON.stringify(safeMetadata)],
+            );
           }
-        }
 
-        await queryRunner.commitTransaction();
-      } catch (error) {
-        await queryRunner.rollbackTransaction();
-        this.logger.error(`Error in bulk store batch: ${error.message}`);
-        batch.forEach(doc => {
+          successCount++;
+        } catch (error) {
+          this.logger.error(`Error processing document ${documentId}: ${error.message}`);
           errors.push({
-            documentId: doc.documentId,
+            documentId,
             error: error.message,
           });
-        });
-        successCount -= batch.length;
-      } finally {
-        await queryRunner.release();
+          // Continue processing other documents instead of aborting
+          continue;
+        }
       }
     }
 
