@@ -1,125 +1,138 @@
-import axios from 'axios';
-import { generateTestDocuments } from './generate-bulk-data';
+import { NestFactory } from '@nestjs/core';
+import { AppModule } from '../../src/app.module';
+import { PostgreSQLSearchEngine } from '../../src/storage/postgresql/postgresql-search-engine';
+import { PostgreSQLService } from '../../src/storage/postgresql/postgresql.service';
 
-const API_URL = 'http://localhost:3000/api';
-const INDEX_NAME = 'third-index-10000';
-const BATCH_SIZE = 1000;
+async function measureBulkIndexing() {
+  const app = await NestFactory.createApplicationContext(AppModule);
+  const searchEngine = app.get(PostgreSQLSearchEngine);
+  const postgresService = app.get(PostgreSQLService);
 
-async function waitForIndexing(startCount: number) {
-  let currentCount = startCount;
-  let attempts = 0;
-  const maxAttempts = 30;
-
-  while (attempts < maxAttempts) {
-    const response = await axios.get(`${API_URL}/indices/${INDEX_NAME}`);
-    const newCount = response.data.documentCount || 0;
-
-    if (newCount > currentCount) {
-      const progress = ((newCount - startCount) / 10000) * 100;
-      console.log(`Indexing progress: ${progress.toFixed(2)}% (${newCount} documents)`);
-      currentCount = newCount;
-    }
-
-    if (currentCount >= startCount + 10000) {
-      break;
-    }
-
-    await new Promise(resolve => setTimeout(resolve, 1000));
-    attempts++;
-  }
-
-  return currentCount;
-}
-
-async function main() {
   try {
-    console.log('Starting bulk indexing of 10000 documents...');
+    console.log('🚀 Starting bulk indexing performance measurement...\n');
 
-    // Delete existing index if it exists
-    try {
-      await axios.delete(`${API_URL}/indices/${INDEX_NAME}`);
-      console.log('Deleted existing index');
-    } catch (error) {
-      // Ignore 404 errors
-      if (error.response?.status !== 404) {
-        throw error;
-      }
-    }
+    const testSizes = [100, 500, 1000, 5000, 10000];
+    const results: Array<{
+      documentCount: number;
+      indexingTime: number;
+      documentsPerSecond: number;
+      memoryUsage: number;
+    }> = [];
 
-    // Create new index
-    await axios.post(`${API_URL}/indices`, {
-      name: INDEX_NAME,
-      mappings: {
-        properties: {
-          title: { type: 'text', analyzer: 'standard' },
-          content: { type: 'text', analyzer: 'standard' },
-          tags: { type: 'keyword' },
+    for (const size of testSizes) {
+      console.log(`📊 Testing with ${size} documents...`);
+
+      // Generate test data
+      const documents = [];
+      for (let i = 0; i < size; i++) {
+        documents.push({
+          id: `test-doc-${i}`,
+          content: {
+            title: `Test Business ${i}`,
+            description: `This is a test business description for business ${i}. It provides various services and products.`,
+            name: `Business ${i}`,
+            category: `Category ${i % 10}`,
+            tags: [`tag${i}`, `business${i}`, `test${i}`],
+          },
           metadata: {
-            type: 'object',
-            properties: {
-              author: { type: 'keyword' },
-              createdAt: { type: 'date' },
-              views: { type: 'integer' },
-              score: { type: 'float' },
-            },
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
           },
-        },
-      },
-    });
-    console.log('Created new index');
+        });
+      }
 
-    // Generate test documents
-    const documents = generateTestDocuments(10000);
-    console.log(`Generated ${documents.length} test documents`);
+      // Measure indexing performance
+      const startTime = Date.now();
+      const startMemory = process.memoryUsage().heapUsed;
 
-    // Split documents into batches
-    const batches = [];
-    for (let i = 0; i < documents.length; i += BATCH_SIZE) {
-      batches.push(documents.slice(i, i + BATCH_SIZE));
-    }
+      // Index documents in batches
+      const batchSize = 100;
+      for (let i = 0; i < documents.length; i += batchSize) {
+        const batch = documents.slice(i, i + batchSize);
+        await Promise.all(
+          batch.map(doc =>
+            searchEngine.indexDocument('businesses', doc.id, {
+              ...doc.content,
+              ...doc.metadata,
+            }),
+          ),
+        );
+      }
 
-    // Index documents in batches
-    const startTime = Date.now();
-    let totalIndexed = 0;
+      const endTime = Date.now();
+      const endMemory = process.memoryUsage().heapUsed;
+      const indexingTime = endTime - startTime;
+      const memoryUsage = endMemory - startMemory;
+      const documentsPerSecond = Math.round((size / indexingTime) * 1000);
 
-    for (const batch of batches) {
-      const batchStartTime = Date.now();
-
-      // Submit batch for indexing
-      const response = await axios.post(`${API_URL}/indices/${INDEX_NAME}/documents/_bulk`, {
-        documents: batch.map(doc => ({
-          id: doc.id,
-          document: {
-            title: doc.title,
-            content: doc.content,
-            tags: doc.tags,
-            metadata: doc.metadata,
-          },
-        })),
+      results.push({
+        documentCount: size,
+        indexingTime,
+        documentsPerSecond,
+        memoryUsage: Math.round(memoryUsage / 1024 / 1024), // MB
       });
 
-      console.log('bulk indexing response.data', response.data);
-
-      const batchEndTime = Date.now();
-      const batchDuration = batchEndTime - batchStartTime;
-      totalIndexed += batch.length;
-
-      console.log(`Indexed batch of ${batch.length} documents in ${batchDuration}ms`);
-      console.log(`Progress: ${((totalIndexed / documents.length) * 100).toFixed(2)}%`);
+      console.log(
+        `✅ ${size} documents indexed in ${indexingTime}ms (${documentsPerSecond} docs/sec)`,
+      );
+      console.log(`💾 Memory usage: ${Math.round(memoryUsage / 1024 / 1024)}MB\n`);
     }
 
-    const endTime = Date.now();
-    const totalDuration = endTime - startTime;
-    const docsPerSecond = (documents.length / totalDuration) * 1000;
+    // Print summary
+    console.log('📈 BULK INDEXING PERFORMANCE SUMMARY');
+    console.log('=====================================');
+    console.log('Documents | Time (ms) | Docs/sec | Memory (MB)');
+    console.log('----------|-----------|----------|------------');
 
-    console.log('\nBulk indexing completed:');
-    console.log(`Total documents indexed: ${documents.length}`);
-    console.log(`Total time: ${totalDuration}ms`);
-    console.log(`Average speed: ${docsPerSecond.toFixed(2)} documents/second`);
+    results.forEach(result => {
+      console.log(
+        `${result.documentCount.toString().padStart(9)} | ${result.indexingTime
+          .toString()
+          .padStart(9)} | ${result.documentsPerSecond.toString().padStart(8)} | ${result.memoryUsage
+          .toString()
+          .padStart(10)}`,
+      );
+    });
+
+    // Calculate averages
+    const avgDocsPerSecond = Math.round(
+      results.reduce((sum, r) => sum + r.documentsPerSecond, 0) / results.length,
+    );
+    const avgMemoryUsage = Math.round(
+      results.reduce((sum, r) => sum + r.memoryUsage, 0) / results.length,
+    );
+
+    console.log('\n📊 AVERAGES:');
+    console.log(`Average documents per second: ${avgDocsPerSecond}`);
+    console.log(`Average memory usage: ${avgMemoryUsage}MB`);
+
+    // Performance recommendations
+    console.log('\n💡 PERFORMANCE RECOMMENDATIONS:');
+    if (avgDocsPerSecond < 100) {
+      console.log('⚠️  Indexing speed is slow. Consider:');
+      console.log('   - Increasing batch sizes');
+      console.log('   - Optimizing database indexes');
+      console.log('   - Using connection pooling');
+    } else if (avgDocsPerSecond > 500) {
+      console.log('✅ Indexing speed is excellent!');
+    } else {
+      console.log('👍 Indexing speed is good. Room for optimization.');
+    }
+
+    if (avgMemoryUsage > 100) {
+      console.log('⚠️  High memory usage. Consider:');
+      console.log('   - Reducing batch sizes');
+      console.log('   - Implementing garbage collection');
+      console.log('   - Monitoring memory leaks');
+    } else {
+      console.log('✅ Memory usage is acceptable.');
+    }
   } catch (error) {
-    console.error('Error during bulk indexing:', error.response?.data || error.message);
-    process.exit(1);
+    console.error('❌ Error during bulk indexing measurement:', error);
+  } finally {
+    await app.close();
   }
 }
 
-main();
+// Run the measurement
+measureBulkIndexing().catch(console.error);

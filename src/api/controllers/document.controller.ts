@@ -35,12 +35,15 @@ import {
 import { DocumentService } from '../../document/document.service';
 import { BulkIndexingService } from '../../indexing/services/bulk-indexing.service';
 import { v4 as uuidv4 } from 'uuid';
+import { Logger } from '@nestjs/common';
 
 @ApiTags('Documents')
 @ApiExtraModels(IndexDocumentDto, BulkIndexDocumentsDto, DeleteByQueryDto)
 @ApiBearerAuth('JWT-auth')
 @Controller('api/indices/:index/documents')
 export class DocumentController {
+  private readonly logger = new Logger(DocumentController.name);
+
   constructor(
     private readonly documentService: DocumentService,
     private readonly bulkIndexingService: BulkIndexingService,

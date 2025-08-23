@@ -20,6 +20,15 @@ export class Document {
   @Column('jsonb', { default: '{}' })
   metadata: Record<string, any>;
 
+  @Column('tsvector', { name: 'search_vector' })
+  searchVector: any;
+
+  @Column('tsvector', { name: 'materialized_vector', nullable: true })
+  materializedVector: any;
+
+  @Column('jsonb', { name: 'field_weights', default: '{}' })
+  fieldWeights: Record<string, number>;
+
   @CreateDateColumn({
     name: 'created_at',
     transformer: { from: value => value, to: value => value },

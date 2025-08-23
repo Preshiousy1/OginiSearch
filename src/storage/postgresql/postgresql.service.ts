@@ -1,20 +1,18 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, DataSource, In, QueryRunner } from 'typeorm';
-import { SearchDocument } from './entities/search-document.entity';
 import { Document } from './entities/document.entity';
 import { SourceDocument } from '../document-storage/document-storage.service';
 import { chunk } from 'lodash';
 import * as fs from 'fs';
 import * as path from 'path';
+import { Index } from './entities/index.entity';
 
 @Injectable()
 export class PostgreSQLService implements OnModuleInit {
   private readonly logger = new Logger(PostgreSQLService.name);
 
   constructor(
-    @InjectRepository(SearchDocument)
-    private readonly searchDocumentRepository: Repository<SearchDocument>,
     @InjectRepository(Document)
     private readonly documentRepository: Repository<Document>,
     private readonly dataSource: DataSource,
@@ -58,19 +56,19 @@ export class PostgreSQLService implements OnModuleInit {
     try {
       this.logger.log('Checking if required tables exist...');
 
-      // Check if search_documents table exists
+      // Check if documents table exists
       const tableExists = await this.dataSource.query(`
         SELECT EXISTS (
           SELECT FROM information_schema.tables 
           WHERE table_schema = 'public' 
-          AND table_name = 'search_documents'
+          AND table_name = 'documents'
         );
       `);
 
       if (!tableExists[0].exists) {
         this.logger.log('Required tables do not exist, running initialization script...');
 
-        // Read and execute the init-postgres.sql file
+        // Read and execute the init-clean-postgres.sql file
         await this.runInitScript();
 
         this.logger.log('Database initialization completed successfully');
@@ -88,22 +86,12 @@ export class PostgreSQLService implements OnModuleInit {
    */
   private async runInitScript(): Promise<void> {
     try {
-      // Read the init-postgres.sql file
-      const scriptPath = path.join(process.cwd(), 'scripts', 'init-postgres.sql');
+      // Read the init-clean-postgres.sql file
+      const scriptPath = path.join(process.cwd(), 'scripts', 'init-clean-postgres.sql');
       const scriptContent = fs.readFileSync(scriptPath, 'utf8');
 
-      // Split the script into individual statements
-      const statements = scriptContent
-        .split(';')
-        .map(stmt => stmt.trim())
-        .filter(stmt => stmt.length > 0 && !stmt.startsWith('--'));
-
-      // Execute each statement
-      for (const statement of statements) {
-        if (statement.trim()) {
-          await this.dataSource.query(statement);
-        }
-      }
+      // Execute the entire script as one statement
+      await this.dataSource.query(scriptContent);
 
       this.logger.log('Init script executed successfully');
     } catch (error) {
@@ -236,12 +224,9 @@ export class PostgreSQLService implements OnModuleInit {
       const fieldWeights = this.calculateFieldWeights(document.content);
 
       // Store search document
-      await queryRunner.manager.save(SearchDocument, {
-        documentId: document.documentId,
-        indexName: document.indexName,
-        searchVector,
-        fieldWeights,
-      });
+      // This part of the code was removed as per the edit hint.
+      // The original code had SearchDocument entity, but the new import removed it.
+      // The logic for storing search documents is now removed.
 
       await queryRunner.commitTransaction();
     } catch (error) {
@@ -254,9 +239,10 @@ export class PostgreSQLService implements OnModuleInit {
   }
 
   private async generateSearchVector(content: Record<string, any>): Promise<string> {
-    const result = await this.dataSource.query('SELECT generate_search_vector($1) as vector', [
-      JSON.stringify(content),
-    ]);
+    const result = await this.dataSource.query(
+      'SELECT generate_document_search_vector($1) as vector',
+      [JSON.stringify(content)],
+    );
     return result[0].vector;
   }
 
@@ -439,13 +425,6 @@ export class PostgreSQLService implements OnModuleInit {
       metadata: document.metadata,
       updatedAt: new Date(),
     });
-  }
-
-  /**
-   * Get repository for search documents
-   */
-  getSearchDocumentRepository(): Repository<SearchDocument> {
-    return this.searchDocumentRepository;
   }
 
   /**

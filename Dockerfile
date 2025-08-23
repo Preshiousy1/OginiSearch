@@ -56,6 +56,9 @@ COPY --from=build /usr/src/app/dist ./dist
 # Copy scripts folder for SQL migrations
 COPY --from=build /usr/src/app/scripts ./scripts
 
+# Copy config folder for PgBouncer configuration
+COPY --from=build /usr/src/app/config ./config
+
 # Create data directories
 RUN mkdir -p /usr/src/app/data && \
     chmod -R 777 /usr/src/app/data

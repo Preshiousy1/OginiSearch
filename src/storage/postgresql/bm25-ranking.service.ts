@@ -1,6 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { BM25Scorer } from '../../index/bm25-scorer';
-import { SearchConfigurationService } from './search-configuration.service';
 
 export interface BM25RankingOptions {
   k1?: number;
@@ -20,7 +19,22 @@ export interface RankedDocument {
 export class BM25RankingService {
   private readonly logger = new Logger(BM25RankingService.name);
 
-  constructor(private readonly searchConfig: SearchConfigurationService) {}
+  // Default field weights that work for any document type
+  private readonly defaultFieldWeights: Record<string, number> = {
+    name: 3.0,
+    title: 3.0,
+    description: 1.5,
+    tags: 1.5,
+    content: 1.0,
+  };
+
+  // Default BM25 parameters
+  private readonly defaultBM25Params = {
+    k1: 1.2,
+    b: 0.75,
+    postgresqlWeight: 0.3,
+    bm25Weight: 0.7,
+  };
 
   /**
    * Re-rank PostgreSQL candidates using BM25 scoring
@@ -36,16 +50,12 @@ export class BM25RankingService {
       return [];
     }
 
-    // Get dynamic configuration from SearchConfigurationService
-    const configParams = this.searchConfig.getBM25Parameters(indexName);
-    const configFieldWeights = this.searchConfig.getFieldWeights(indexName);
-
     const {
-      k1 = configParams.k1,
-      b = configParams.b,
-      fieldWeights = configFieldWeights,
-      postgresqlWeight = configParams.postgresqlWeight,
-      bm25Weight = configParams.bm25Weight,
+      k1 = this.defaultBM25Params.k1,
+      b = this.defaultBM25Params.b,
+      fieldWeights = this.defaultFieldWeights,
+      postgresqlWeight = this.defaultBM25Params.postgresqlWeight,
+      bm25Weight = this.defaultBM25Params.bm25Weight,
     } = options;
 
     // Create BM25 scorer with provided options
@@ -114,8 +124,7 @@ export class BM25RankingService {
    * Get dynamic field weights based on index configuration
    */
   getFieldWeights(indexName: string): Record<string, number> {
-    // Now delegated to SearchConfigurationService
-    return this.searchConfig.getFieldWeights(indexName);
+    return this.defaultFieldWeights;
   }
 
   /**

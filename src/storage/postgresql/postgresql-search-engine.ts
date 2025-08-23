@@ -8,7 +8,7 @@ import {
 import { DataSource } from 'typeorm';
 import { PostgreSQLDocumentProcessor } from './postgresql-document-processor';
 import { PostgreSQLAnalysisAdapter } from './postgresql-analysis.adapter';
-import { SearchDocument } from './entities/search-document.entity';
+
 import { QueryProcessorService } from '../../search/query-processor.service';
 import { IndexConfig } from '../../common/interfaces/index.interface';
 import {
@@ -22,20 +22,13 @@ import { RawQuery } from '../../search/interfaces/query-processor.interface';
 import { SearchEngine } from '../../search/interfaces/search-engine.interface';
 import { BM25Scorer } from '../../index/bm25-scorer';
 import { PostgreSQLIndexStats } from './postgresql-index-stats';
-import { DynamicIndexManagerService } from './dynamic-index-manager.service';
-import { PostgreSQLQueryBuilderService } from './query-builder.service';
 import { PostgreSQLResultProcessorService } from './result-processor.service';
 import { PostgreSQLPerformanceMonitorService } from './performance-monitor.service';
 import { TypoToleranceService } from '../../search/typo-tolerance.service';
 import { OptimizedQueryCacheService, CacheStats } from './optimized-query-cache.service';
-import { QueryBuilderFactory } from './query-builders/query-builder-factory';
 import { BM25RankingService } from './bm25-ranking.service';
 import { FilterBuilderService } from './filter-builder.service';
-import { AdaptiveQueryOptimizerService } from './adaptive-query-optimizer.service';
-import { SearchConfigurationService } from './search-configuration.service';
-import { SearchMetricsService } from './search-metrics.service';
-import { ParallelSearchExecutor } from './parallel-search-executor.service';
-import { EnterpriseSearchCache } from './enterprise-search-cache.service';
+import { RedisCacheService } from './redis-cache.service';
 
 export interface PostgreSQLSearchOptions {
   from?: number;
@@ -75,30 +68,14 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
 
   constructor(
     private readonly dataSource: DataSource,
-    private readonly documentProcessor: PostgreSQLDocumentProcessor,
-    private readonly analysisAdapter: PostgreSQLAnalysisAdapter,
-    private readonly queryProcessor: QueryProcessorService,
-    private readonly indexStats: PostgreSQLIndexStats,
-    private readonly dynamicIndexManager: DynamicIndexManagerService,
-    private readonly queryBuilder: PostgreSQLQueryBuilderService,
-    private readonly resultProcessor: PostgreSQLResultProcessorService,
-    private readonly performanceMonitor: PostgreSQLPerformanceMonitorService,
-    private readonly typoToleranceService: TypoToleranceService,
     private readonly optimizedCache: OptimizedQueryCacheService,
-    private readonly queryBuilderFactory: QueryBuilderFactory,
-    private readonly bm25RankingService: BM25RankingService,
-    private readonly filterBuilderService: FilterBuilderService,
-    private readonly adaptiveQueryOptimizer: AdaptiveQueryOptimizerService,
-    private readonly searchConfig: SearchConfigurationService,
-    private readonly searchMetrics: SearchMetricsService,
-    private readonly parallelExecutor: ParallelSearchExecutor,
-    private readonly enterpriseCache: EnterpriseSearchCache,
-  ) {}
+    private readonly redisCache: RedisCacheService,
+  ) {
+    this.logger.log('PostgreSQLSearchEngine initialized');
+  }
 
   async onModuleInit() {
     await this.loadIndicesFromDatabase();
-    // Initialize dynamic trigram indexes for optimal ILIKE performance
-    await this.dynamicIndexManager.initializeOptimalIndexes();
   }
 
   private async loadIndicesFromDatabase() {
@@ -122,13 +99,15 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
   }
 
   /**
-   * Search documents using PostgreSQL full-text search with enterprise optimizations
+   * Search documents using PostgreSQL full-text search
    */
   async search(
     indexName: string,
     searchQuery: SearchQueryDto,
   ): Promise<{ data: any; metrics: SearchMetrics }> {
     const startTime = Date.now();
+    console.log(`[PROFILE] PostgreSQL search started`);
+
     const metrics: SearchMetrics = {
       queryParsing: 0,
       execution: 0,
@@ -139,83 +118,56 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
     };
 
     try {
-      // Generate semantic cache key for enterprise cache
-      const enterpriseCacheKey = this.enterpriseCache.generateSemanticKey(
-        indexName,
-        searchQuery,
-        searchQuery.size || 10,
-        searchQuery.from || 0,
-      );
+      // Check Redis cache first (primary cache)
+      const cacheStart = Date.now();
+      const cacheKey = this.redisCache.generateKey(indexName, searchQuery);
+      const cachedResult = await this.redisCache.get(cacheKey);
+      console.log(`[PROFILE] Redis cache check took: ${Date.now() - cacheStart}ms`);
 
-      // Check enterprise cache first (multi-level caching)
-      const cachedResult = await this.enterpriseCache.get(enterpriseCacheKey);
       if (cachedResult) {
         metrics.execution = Date.now() - startTime;
         metrics.total = metrics.execution;
-
-        setImmediate(() => {
-          this.searchMetrics.recordQuery(
-            indexName,
-            'enterprise_cache_hit',
-            metrics.execution,
-            true,
-          );
-        });
-
-        this.logger.log(
-          `Enterprise cache hit for index '${indexName}': Found ${cachedResult.data.total} results in ${metrics.execution}ms`,
-        );
-        return { data: cachedResult.data, metrics };
+        console.log(`[PROFILE] Redis cache hit, returning in: ${metrics.execution}ms`);
+        return { data: cachedResult, metrics };
       }
 
-      // Check optimized cache second
-      const cacheKey = this.optimizedCache.generateKey(indexName, searchQuery);
-      const optimizedCachedResult = this.optimizedCache.get(cacheKey);
-      if (optimizedCachedResult) {
+      // Fallback to in-memory cache
+      const memoryCacheStart = Date.now();
+      const memoryCacheKey = this.optimizedCache.generateKey(indexName, searchQuery);
+      const memoryCachedResult = this.optimizedCache.get(memoryCacheKey);
+      console.log(`[PROFILE] Memory cache check took: ${Date.now() - memoryCacheStart}ms`);
+
+      if (memoryCachedResult) {
         metrics.execution = Date.now() - startTime;
         metrics.total = metrics.execution;
-
-        setImmediate(() => {
-          this.searchMetrics.recordQuery(indexName, 'cache_hit', metrics.execution, true);
-        });
-
-        return { data: optimizedCachedResult, metrics };
+        console.log(`[PROFILE] Memory cache hit, returning in: ${metrics.execution}ms`);
+        return { data: memoryCachedResult, metrics };
       }
 
-      // Determine if we should use parallel search
-      const shouldUseParallel = this.shouldUseParallelSearch(searchQuery, searchQuery.size || 10);
+      // Execute standard search
+      const searchStart = Date.now();
+      const searchResult = await this.executeStandardSearch(indexName, searchQuery);
+      console.log(`[PROFILE] Execute standard search took: ${Date.now() - searchStart}ms`);
 
-      let searchResult;
-      if (shouldUseParallel) {
-        searchResult = await this.parallelExecutor.executeParallelSearch(
-          indexName,
-          searchQuery,
-          searchQuery.size || 10,
-          searchQuery.from || 0,
-        );
-      } else {
-        // Use standard search with optimizations
-        searchResult = await this.executeStandardSearch(indexName, searchQuery);
-      }
+      // Cache results in both Redis and memory
+      const cacheSetStart = Date.now();
+      const isPopularQuery = this.isPopularQuery(searchQuery);
+      const ttl = isPopularQuery ? 600 : 60; // 10 minutes for popular, 1 minute for others
 
-      // Cache results in both enterprise and optimized caches
-      this.optimizedCache.set(cacheKey, searchResult.data);
-      await this.enterpriseCache.set(enterpriseCacheKey, searchResult);
+      // Cache in Redis (primary)
+      await this.redisCache.set(cacheKey, searchResult.data, ttl);
+
+      // Cache in memory (fallback)
+      this.optimizedCache.set(memoryCacheKey, searchResult.data);
+
+      console.log(
+        `[PROFILE] Cache set took: ${
+          Date.now() - cacheSetStart
+        }ms (Redis TTL: ${ttl}s, Popular: ${isPopularQuery})`,
+      );
 
       metrics.execution = Date.now() - startTime;
       metrics.total = metrics.execution;
-
-      // Record metrics
-      setImmediate(() => {
-        this.searchMetrics.recordQuery(indexName, 'search', metrics.execution, false);
-        this.adaptiveQueryOptimizer.recordQueryExecution(
-          indexName,
-          searchQuery,
-          metrics.execution,
-          searchResult.data.total,
-          true,
-        );
-      });
 
       this.logger.log(
         `Search completed for index '${indexName}': Found ${searchResult.data.total} results in ${metrics.execution}ms`,
@@ -270,53 +222,21 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
         results = await this.dataSource.query(substringQuery, [indexName, `%${text}%`, size]);
       }
 
-      // If still no results, use fuzzy matching with TypoToleranceService
+      // If still no results, use simple substring matching as fallback
       if (results.length === 0) {
-        try {
-          // Get field terms from database for typo tolerance
-          // Extract individual words from the field values for better fuzzy matching
-          // Order by frequency to get most common words first
-          const fieldTermsQuery = `
-            WITH words AS (
-              SELECT unnest(string_to_array(lower(d.content->>'${field}'), ' ')) as term
-              FROM documents d
-              WHERE d.index_name = $1 
-                AND d.content->>'${field}' IS NOT NULL
-                AND LENGTH(d.content->>'${field}') > 1
-            ),
-            word_counts AS (
-              SELECT term, COUNT(*) as frequency
-              FROM words
-              WHERE LENGTH(term) > 2
-                AND term ~ '^[a-zA-Z]+$'  -- Only alphabetic words
-              GROUP BY term
-            )
-            SELECT term
-            FROM word_counts
-            ORDER BY frequency DESC
-            LIMIT 1000`;
+        const fallbackQuery = `
+          SELECT DISTINCT ON (d.content->>'${field}')
+            d.content->>'${field}' as suggestion,
+            d.document_id as id,
+            d.content->>'category_name' as category
+          FROM documents d
+          WHERE d.index_name = $1 
+            AND d.content->>'${field}' IS NOT NULL
+            AND LENGTH(d.content->>'${field}') > 2
+          ORDER BY d.content->>'${field}', d.document_id
+          LIMIT $2`;
 
-          const fieldTermsResult = await this.dataSource.query(fieldTermsQuery, [indexName]);
-          const fieldTerms = fieldTermsResult.map(row => `${field}:${row.term}`);
-
-          // Get fuzzy suggestions using TypoToleranceService
-          const fuzzySuggestions = await this.typoToleranceService.getSuggestions(
-            fieldTerms,
-            text,
-            size,
-          );
-
-          // Convert fuzzy suggestions to expected format
-          results = fuzzySuggestions.map((suggestion, index) => ({
-            suggestion: suggestion.text,
-            id: `fuzzy_${index}`,
-            category: 'Suggested spelling',
-          }));
-
-          // Debug log removed for performance optimization
-        } catch (fuzzyError) {
-          this.logger.warn(`Fuzzy matching failed: ${fuzzyError.message}`);
-        }
+        results = await this.dataSource.query(fallbackQuery, [indexName, size]);
       }
 
       // Filter and format results
@@ -429,7 +349,7 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
   }
 
   /**
-   * Add a single document to PostgreSQL index
+   * Add a single document to PostgreSQL index with individual transaction
    */
   async addDocument(
     indexName: string,
@@ -438,43 +358,51 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
   ): Promise<void> {
     this.logger.debug(`Adding document ${documentId} to PostgreSQL index ${indexName}`);
 
+    // Use a query runner for individual transaction management
+    const queryRunner = this.dataSource.createQueryRunner();
+    await queryRunner.connect();
+    await queryRunner.startTransaction();
+
     try {
       await this.validateIndexExists(indexName);
 
-      // Process document for PostgreSQL
-      const processed = await this.documentProcessor.processForPostgreSQL(
-        { id: documentId, source: document },
-        { indexName, indexConfig: this.indices.get(indexName) },
-      );
+      // Generate search vector from document content
+      const searchVector = this.generateSearchVector(document);
 
-      // Create entity for database storage
-      const entity = this.documentProcessor.createSearchDocumentEntity(processed, { indexName });
-
-      // Insert or update document
-      await this.dataSource.query(
-        `INSERT INTO search_documents (index_name, doc_id, content, search_vector, field_lengths, boost_factor)
-         VALUES ($1, $2, $3, $4, $5, $6)
-         ON CONFLICT (index_name, doc_id) 
+      // Insert or update document using the query runner
+      await queryRunner.query(
+        `INSERT INTO documents (index_name, document_id, content, metadata, search_vector, materialized_vector, field_weights)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
+         ON CONFLICT (document_id, index_name) 
          DO UPDATE SET 
            content = $3, 
-           search_vector = $4, 
-           field_lengths = $5, 
-           boost_factor = $6, 
+           metadata = $4,
+           search_vector = $5, 
+           materialized_vector = $6,
+           field_weights = $7, 
            updated_at = NOW()`,
         [
-          entity.indexName,
-          entity.docId,
-          JSON.stringify(entity.content),
-          entity.searchVector,
-          JSON.stringify(entity.fieldLengths),
-          entity.boostFactor,
+          indexName,
+          documentId,
+          JSON.stringify(document),
+          JSON.stringify({}), // Default empty metadata
+          searchVector,
+          searchVector, // Use searchVector as materializedVector
+          JSON.stringify({}), // Default empty field weights
         ],
       );
 
+      // Commit the transaction
+      await queryRunner.commitTransaction();
       this.logger.debug(`Document ${documentId} added successfully`);
     } catch (error) {
+      // Rollback the transaction on error
+      await queryRunner.rollbackTransaction();
       this.logger.error(`Failed to add document ${documentId}: ${error.message}`);
       throw error;
+    } finally {
+      // Release the query runner
+      await queryRunner.release();
     }
   }
 
@@ -671,7 +599,7 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
   }
 
   /**
-   * Execute PostgreSQL search using decomposed architecture
+   * Execute PostgreSQL search using simplified architecture
    */
   private async executeSearch(
     indexName: string,
@@ -683,136 +611,46 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
     hits: Array<{ id: string; score: number; document: Record<string, any> }>;
   }> {
     const { from = 0, size = 10 } = searchQuery;
-
-    // Document count checks removed for performance - only used for debugging
-
-    // Phase 3 Decomposition: Use QueryBuilder service for search analysis
-    const queryInfo = this.queryBuilder.analyzeSearchTerm(searchQuery.query, tsquery);
     const candidateLimit = Math.min(size * 10, 200);
 
-    // Query analysis logging removed for performance
-
-    // Phase 3 Decomposition: Use PerformanceMonitor for instrumented execution
     try {
-      // Step 1: Try main PostgreSQL full-text search
-      const mainQuery = this.queryBuilder.buildMainQuery(
-        indexName,
-        queryInfo.searchTerm,
-        candidateLimit,
-      );
+      // Simple PostgreSQL full-text search
+      const sql = `
+        SELECT 
+          d.document_id,
+          d.content,
+          d.metadata,
+          ts_rank_cd(COALESCE(d.materialized_vector, d.search_vector), to_tsquery('english', $1)) as postgresql_score,
+          COUNT(*) OVER() as total_count
+        FROM documents d
+        WHERE d.index_name = $2 
+          AND COALESCE(d.materialized_vector, d.search_vector) @@ to_tsquery('english', $1)
+        ORDER BY postgresql_score DESC
+        LIMIT $3`;
 
-      // SQL logging removed for performance - only log on errors
-      const { result: mainResult, metrics: mainMetrics } =
-        await this.performanceMonitor.executeWithMonitoring(
-          mainQuery.sql,
-          mainQuery.params,
-          'main_search',
-          queryInfo.searchTerm,
-          indexName,
-        );
+      const params = [tsquery, indexName, candidateLimit];
 
-      // Result count logging removed for performance
+      const mainResult = await this.dataSource.query(sql, params);
 
-      // Check if we need alternative strategies
-      const strategy = this.queryBuilder.getQueryStrategy(queryInfo, mainResult.length > 0);
+      if (mainResult.length > 0) {
+        // Process main results
+        const totalHits = mainResult[0]?.total_count || mainResult.length;
+        const maxScore = Math.max(...mainResult.map(row => row.postgresql_score || 0));
+        const hits = mainResult.slice(from, from + size).map(row => ({
+          id: row.document_id,
+          score: row.postgresql_score || 0,
+          document: row.content,
+        }));
 
-      // Strategy logging removed for performance
-
-      // Use fallback strategy if main search returns no results in production
-      let finalStrategy = strategy;
-      if (mainResult.length === 0 && process.env.NODE_ENV === 'production') {
-        finalStrategy = 'fallback';
-        // Fallback strategy logging removed for performance
-      }
-
-      if (finalStrategy === 'main') {
-        // Process main results with BM25 ranking
-        return await this.resultProcessor.processSearchResults(
-          mainResult,
-          queryInfo.searchTerm,
-          from,
-          size,
-        );
-      }
-
-      // Step 2: Try prefix search for simple trailing wildcards
-      if (finalStrategy === 'prefix' && queryInfo.prefixTerm) {
-        const prefixQuery = this.queryBuilder.buildPrefixQuery(
-          indexName,
-          queryInfo.prefixTerm,
-          candidateLimit,
-        );
-        const { result: prefixResult } = await this.performanceMonitor.executeWithMonitoring(
-          prefixQuery.sql,
-          prefixQuery.params,
-          'prefix_search',
-          queryInfo.prefixTerm,
-          indexName,
-        );
-
-        if (prefixResult.length > 0) {
-          return await this.resultProcessor.processSearchResults(
-            prefixResult,
-            queryInfo.searchTerm,
-            from,
-            size,
-          );
-        }
-      }
-
-      // Step 3: Fallback to ILIKE search for complex patterns
-      if (finalStrategy === 'fallback') {
-        const fallbackQuery = this.queryBuilder.buildFallbackQuery(
-          indexName,
-          queryInfo.searchTerm,
-          searchQuery,
-          candidateLimit,
-          from,
-        );
-
-        // Debug logs removed for performance optimization
-
-        const { result: fallbackResult } = await this.performanceMonitor.executeWithMonitoring(
-          fallbackQuery.sql,
-          fallbackQuery.params,
-          'fallback_search',
-          queryInfo.searchTerm,
-          indexName,
-        );
-
-        if (fallbackResult.length > 0) {
-          return await this.resultProcessor.processFallbackResults(
-            fallbackResult,
-            queryInfo.searchTerm,
-            size,
-          );
-        }
+        return { totalHits, maxScore, hits };
       }
 
       // No results found
-      return this.resultProcessor.createEmptyResult();
+      return { totalHits: 0, maxScore: 0, hits: [] };
     } catch (error) {
       this.logger.error(`Search execution failed: ${error.message}`);
-      return this.resultProcessor.createEmptyResult();
+      return { totalHits: 0, maxScore: 0, hits: [] };
     }
-  }
-
-  /**
-   * Phase 3 Decomposition: Streamlined BM25 re-ranking using BM25RankingService
-   */
-  private async bm25Reranking(
-    candidates: any[],
-    searchTerm: string,
-    indexName: string,
-  ): Promise<Array<{ id: string; score: number; document: Record<string, any> }>> {
-    // Phase 5: Use dynamic configuration instead of hardcoded values
-    return await this.bm25RankingService.rankDocuments(
-      candidates,
-      searchTerm,
-      this.indexStats,
-      {}, // Empty options - will use dynamic config from SearchConfigurationService
-      indexName,
-    );
   }
 
   /**
@@ -831,14 +669,44 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
   }
 
   /**
-   * Process a batch of documents
+   * Process a batch of documents with individual error handling
    */
   private async processBatch(
     indexName: string,
     documents: Array<{ id: string; document: Record<string, any> }>,
   ): Promise<void> {
+    const results = {
+      success: 0,
+      failed: 0,
+      errors: [] as string[],
+    };
+
+    // Process each document individually to avoid transaction abortion
     for (const doc of documents) {
-      await this.addDocument(indexName, doc.id, doc.document);
+      try {
+        await this.addDocument(indexName, doc.id, doc.document);
+        results.success++;
+      } catch (error) {
+        results.failed++;
+        const errorMessage = `Document ${doc.id}: ${error.message}`;
+        results.errors.push(errorMessage);
+        this.logger.error(errorMessage);
+
+        // Continue processing other documents instead of aborting
+        continue;
+      }
+    }
+
+    // Log batch results
+    if (results.failed > 0) {
+      this.logger.warn(
+        `Batch processing completed with ${results.success} successes and ${results.failed} failures`,
+      );
+      if (results.errors.length > 0) {
+        this.logger.debug(`First few errors: ${results.errors.slice(0, 3).join(', ')}`);
+      }
+    } else {
+      this.logger.debug(`Batch processing completed successfully: ${results.success} documents`);
     }
   }
 
@@ -879,13 +747,6 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
   }
 
   /**
-   * Get optimization recommendations for an index
-   */
-  getOptimizationRecommendations(indexName: string) {
-    return this.adaptiveQueryOptimizer.getOptimizationRecommendations(indexName);
-  }
-
-  /**
    * Phase 3 Decomposed Search: SQL-level limiting with proper filtering
    */
   private async executeDecomposedSearch(
@@ -899,16 +760,8 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
     // Build optimized SQL query with SQL-level LIMIT and filtering
     const { sql, params } = await this.buildSearchQuery(indexName, searchQuery);
 
-    // Debug logs removed for performance optimization
-
-    // Execute with performance monitoring
-    const { result: rows } = await this.performanceMonitor.executeWithMonitoring(
-      sql,
-      params,
-      'decomposed_search',
-      JSON.stringify(searchQuery.query),
-      indexName,
-    );
+    // Execute query directly
+    const rows = await this.dataSource.query(sql, params);
 
     if (rows.length === 0) {
       return { totalHits: 0, maxScore: 0, hits: [] };
@@ -931,879 +784,314 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
   }
 
   /**
-   * Phase 3 Decomposition: Streamlined buildSearchQuery using QueryBuilderFactory
+   * Build simple search query without complex query builders
    */
   private async buildSearchQuery(
     indexName: string,
     searchQuery: SearchQueryDto,
   ): Promise<{ sql: string; params: any[] }> {
     const { query, size = 10, from = 0 } = searchQuery;
-    const params: any[] = [indexName];
-    let paramIndex = 2;
+    const searchTerm = this.extractSearchTerm(searchQuery);
 
-    // Use QueryBuilderFactory to get appropriate builder
-    const queryBuilder = this.queryBuilderFactory.create(query);
-    const queryResult = queryBuilder.build(
-      indexName,
-      query,
-      params,
-      paramIndex,
-      searchQuery.fields,
-    );
-
-    // Base query structure with builder result and total count
-    let sql = `
+    const sql = `
       SELECT 
         d.document_id,
         d.content,
         d.metadata,
-        COUNT(*) OVER() as total_count,
-        ${queryResult.sql}`;
-
-    // Add filters using FilterBuilderService
-    if (searchQuery.filter) {
-      const filterResult = this.filterBuilderService.buildConditions(
-        searchQuery.filter,
-        queryResult.params,
-        queryResult.nextParamIndex,
-      );
-      sql += filterResult.sql;
-      paramIndex = filterResult.nextParamIndex;
-    } else {
-      paramIndex = queryResult.nextParamIndex;
-    }
-
-    // Add pagination parameters
-    queryResult.params.push(size);
-    queryResult.params.push(from);
-
-    // Add ORDER BY, LIMIT, and OFFSET
-    sql += `
+        ts_rank_cd(COALESCE(d.materialized_vector, d.search_vector), to_tsquery('english', $1)) as score,
+        COUNT(*) OVER() as total_count
+      FROM documents d
+      WHERE d.index_name = $2 
+        AND COALESCE(d.materialized_vector, d.search_vector) @@ to_tsquery('english', $1)
       ORDER BY score DESC, document_id
-      LIMIT $${queryResult.params.length - 1} OFFSET $${queryResult.params.length}`;
+      LIMIT $3 OFFSET $4`;
 
-    // Debug logs removed for performance optimization
-
-    return { sql: sql, params: queryResult.params };
-  }
-
-  private buildFilterConditions(filter: any, params: any[], startIndex: number): string {
-    let sql = '';
-    let paramIndex = startIndex;
-
-    // Handle bool filters with must/should/must_not clauses
-    if (filter.bool) {
-      const boolClauses: string[] = [];
-
-      // Process MUST clauses (AND conditions)
-      if (filter.bool.must && Array.isArray(filter.bool.must)) {
-        for (const mustClause of filter.bool.must) {
-          const clauseSql = this.buildSingleFilterClause(mustClause, params, paramIndex);
-          if (clauseSql) {
-            boolClauses.push(clauseSql.sql);
-            paramIndex = clauseSql.nextParamIndex;
-          }
-        }
-      }
-
-      // Process SHOULD clauses (OR conditions)
-      if (filter.bool.should && Array.isArray(filter.bool.should)) {
-        const shouldClauses: string[] = [];
-        for (const shouldClause of filter.bool.should) {
-          const clauseSql = this.buildSingleFilterClause(shouldClause, params, paramIndex);
-          if (clauseSql) {
-            shouldClauses.push(clauseSql.sql);
-            paramIndex = clauseSql.nextParamIndex;
-          }
-        }
-        if (shouldClauses.length > 0) {
-          boolClauses.push(`(${shouldClauses.join(' OR ')})`);
-        }
-      }
-
-      // Process MUST_NOT clauses (NOT conditions)
-      if (filter.bool.must_not && Array.isArray(filter.bool.must_not)) {
-        for (const mustNotClause of filter.bool.must_not) {
-          const clauseSql = this.buildSingleFilterClause(mustNotClause, params, paramIndex);
-          if (clauseSql) {
-            boolClauses.push(`NOT (${clauseSql.sql})`);
-            paramIndex = clauseSql.nextParamIndex;
-          }
-        }
-      }
-
-      // Combine all bool clauses with AND
-      if (boolClauses.length > 0) {
-        sql += ` AND (${boolClauses.join(' AND ')})`;
-      }
-    }
-
-    // Handle simple term filters (backward compatibility)
-    if (filter.term) {
-      const clauseSql = this.buildSingleFilterClause({ term: filter.term }, params, paramIndex);
-      if (clauseSql) {
-        sql += ` AND ${clauseSql.sql}`;
-        paramIndex = clauseSql.nextParamIndex;
-      }
-    }
-
-    // Handle range filters
-    if (filter.range) {
-      Object.entries(filter.range).forEach(([field, conditions]) => {
-        Object.entries(conditions as any).forEach(([op, value]) => {
-          const operator = this.getRangeOperator(op);
-          const fieldSql = this.getFieldReference(field);
-
-          if (typeof value === 'number') {
-            sql += ` AND (${fieldSql})::numeric ${operator} $${paramIndex}::numeric`;
-          } else {
-            sql += ` AND ${fieldSql} ${operator} $${paramIndex}`;
-          }
-          params.push(value);
-          paramIndex++;
-        });
-      });
-    }
-
-    return sql;
-  }
-
-  /**
-   * Build a single filter clause (term, range, etc.)
-   */
-  private buildSingleFilterClause(
-    clause: any,
-    params: any[],
-    paramIndex: number,
-  ): { sql: string; nextParamIndex: number } | null {
-    if (clause.term) {
-      return this.buildTermClause(clause.term, params, paramIndex);
-    }
-    if (clause.range) {
-      return this.buildRangeClause(clause.range, params, paramIndex);
-    }
-    if (clause.match) {
-      return this.buildMatchClause(clause.match, params, paramIndex);
-    }
-    return null;
-  }
-
-  /**
-   * Build a term clause
-   */
-  private buildTermClause(
-    term: any,
-    params: any[],
-    paramIndex: number,
-  ): { sql: string; nextParamIndex: number } {
-    let sql = '';
-    let nextParamIndex = paramIndex;
-
-    // Handle nested term structure: { field: 'fieldName', value: 'fieldValue' }
-    if (term.field && term.value !== undefined) {
-      const field = term.field;
-      const value = term.value;
-      const fieldSql = this.getFieldReference(field);
-
-      if (Array.isArray(value)) {
-        sql = `${fieldSql} = ANY($${paramIndex}::text[])`;
-        params.push(value);
-      } else {
-        sql = `${fieldSql} = $${paramIndex}::text`;
-        params.push(String(value));
-      }
-      nextParamIndex = paramIndex + 1;
-    } else {
-      // Handle flat structure: { fieldName: 'fieldValue' }
-      const [field, value] = Object.entries(term)[0];
-      const fieldSql = this.getFieldReference(field);
-
-      if (Array.isArray(value)) {
-        sql = `${fieldSql} = ANY($${paramIndex}::text[])`;
-        params.push(value);
-      } else {
-        sql = `${fieldSql} = $${paramIndex}::text`;
-        params.push(String(value));
-      }
-      nextParamIndex = paramIndex + 1;
-    }
-
-    return { sql, nextParamIndex };
-  }
-
-  /**
-   * Build a range clause
-   */
-  private buildRangeClause(
-    range: any,
-    params: any[],
-    paramIndex: number,
-  ): { sql: string; nextParamIndex: number } {
-    const clauses: string[] = [];
-    let nextParamIndex = paramIndex;
-
-    Object.entries(range).forEach(([field, conditions]) => {
-      Object.entries(conditions as any).forEach(([op, value]) => {
-        const operator = this.getRangeOperator(op);
-        const fieldSql = this.getFieldReference(field);
-
-        if (typeof value === 'number') {
-          clauses.push(`(${fieldSql})::numeric ${operator} $${nextParamIndex}::numeric`);
-        } else {
-          clauses.push(`${fieldSql} ${operator} $${nextParamIndex}`);
-        }
-        params.push(value);
-        nextParamIndex++;
-      });
-    });
-
-    return { sql: clauses.join(' AND '), nextParamIndex };
-  }
-
-  /**
-   * Build a match clause
-   */
-  private buildMatchClause(
-    match: any,
-    params: any[],
-    paramIndex: number,
-  ): { sql: string; nextParamIndex: number } {
-    const field = match.field || 'content';
-    const value = match.value;
-    const fieldSql = this.getFieldReference(field);
-
-    const sql = `${fieldSql} ILIKE '%' || $${paramIndex} || '%'`;
-    params.push(value);
-
-    return { sql, nextParamIndex: paramIndex + 1 };
-  }
-
-  /**
-   * Determine whether a field should be referenced from content or metadata
-   */
-  private getFieldReference(field: string): string {
-    // Fields that are typically stored in content (document data)
-    const contentFields = [
-      'name',
-      'title',
-      'description',
-      'category_name',
-      'sub_category_name',
-      'is_active',
-      'is_verified',
-      'is_blocked',
-      'is_featured',
-      'price',
-      'id_number',
-      'slug',
-      'tags',
-      'business_name',
-      'property_end_date',
-      'property_start_date',
-      'property_discounted_price',
-    ];
-
-    // Fields that are typically stored in metadata (system/processing data)
-    const metadataFields = [
-      'index_name',
-      'document_id',
-      'created_at',
-      'updated_at',
-      'processing_status',
-      'index_version',
-      'search_vector',
-    ];
-
-    if (contentFields.includes(field)) {
-      return `d.content->>'${field}'`;
-    } else if (metadataFields.includes(field)) {
-      return `d.metadata->>'${field}'`;
-    } else {
-      // Default to content for unknown fields
-      return `d.content->>'${field}'`;
-    }
-  }
-
-  private isWildcardPattern(value: string): boolean {
-    return value.includes('*') || value.includes('?');
-  }
-
-  private convertWildcardToLikePattern(
-    pattern: string | { value: string; boost?: number },
-  ): string {
-    if (typeof pattern === 'string') {
-      return pattern.replace(/\*/g, '%').replace(/\?/g, '_');
-    }
-    return pattern.value.replace(/\*/g, '%').replace(/\?/g, '_');
-  }
-
-  private buildWildcardCondition(field: string, pattern: string, paramIndex: number): string {
-    const hasLeadingWildcard = pattern.startsWith('*');
-    const baseScore = hasLeadingWildcard ? 0.5 : 1.0; // Penalize leading wildcards
-
-    if (field === '_all') {
-      return `
-        WHEN d.content::text ILIKE $${paramIndex}
-        THEN ${baseScore} * (1.0 / (1 + length($${paramIndex}) - length(replace($${paramIndex}, '%', ''))))
-      `;
-    }
-
-    return `
-      WHEN d.content->>'${field}' ILIKE $${paramIndex}
-      THEN ${baseScore} * (1.0 / (1 + length($${paramIndex}) - length(replace($${paramIndex}, '%', ''))))
-    `;
-  }
-
-  private getRangeOperator(op: string): string {
-    switch (op) {
-      case 'gt':
-        return '>';
-      case 'gte':
-        return '>=';
-      case 'lt':
-        return '<';
-      case 'lte':
-        return '<=';
-      default:
-        return '=';
-    }
-  }
-
-  /**
-   * Get suggestions for a given search term using trigram similarity
-   */
-  async getSuggestions(
-    indexName: string,
-    text: string,
-    field = '_all',
-    size = 5,
-  ): Promise<Array<{ text: string; score: number; freq: number }>> {
-    try {
-      // Enable pg_trgm extension if not already enabled
-      await this.dataSource.query('CREATE EXTENSION IF NOT EXISTS pg_trgm');
-
-      let query: string;
-      const params: any[] = [indexName, text, size];
-
-      if (field === '_all') {
-        // Search across all text fields
-        query = `
-          WITH distinct_values AS (
-            SELECT DISTINCT
-              jsonb_object_keys(content) as field,
-              content->>jsonb_object_keys(content) as value
-            FROM search_documents
-            WHERE index_name = $1
-              AND content->>jsonb_object_keys(content) IS NOT NULL
-          ),
-          similarities AS (
-            SELECT 
-              value as text,
-              similarity(value, $2) as score,
-              COUNT(*) as freq
-            FROM distinct_values
-            WHERE 
-              similarity(value, $2) > 0.3
-              AND value != $2
-            GROUP BY value
-            ORDER BY score DESC, freq DESC
-            LIMIT $3
-          )
-          SELECT * FROM similarities
-          WHERE score > 0
-          ORDER BY score DESC, freq DESC
-        `;
-      } else {
-        // Search in specific field
-        query = `
-          WITH distinct_values AS (
-            SELECT DISTINCT
-              content->>'${field}' as value,
-              COUNT(*) as freq
-            FROM search_documents
-            WHERE 
-              index_name = $1
-              AND content->>'${field}' IS NOT NULL
-            GROUP BY content->>'${field}'
-          )
-          SELECT 
-            value as text,
-            similarity(value, $2) as score,
-            freq
-          FROM distinct_values
-          WHERE 
-            similarity(value, $2) > 0.3
-            AND value != $2
-          ORDER BY score DESC, freq DESC
-          LIMIT $3
-        `;
-      }
-
-      const results = await this.dataSource.query(query, params);
-
-      // Format and normalize scores
-      return results.map((row: any) => ({
-        text: row.text,
-        score: parseFloat(row.score),
-        freq: parseInt(row.freq, 10),
-      }));
-    } catch (error) {
-      this.logger.error(`Suggestion error: ${error.message}`);
-      throw new BadRequestException(`Suggestion error: ${error.message}`);
-    }
-  }
-
-  /**
-   * Get fuzzy matches for a term using trigram similarity
-   */
-  private async getFuzzyMatches(field: string, term: string, similarity = 0.3): Promise<string[]> {
-    const query = `
-      SELECT DISTINCT content->>'${field}' as value
-      FROM search_documents
-      WHERE 
-        content->>'${field}' IS NOT NULL
-        AND similarity(content->>'${field}', $1) > $2
-      ORDER BY similarity(content->>'${field}', $1) DESC
-      LIMIT 5
-    `;
-
-    const results = await this.dataSource.query(query, [term, similarity]);
-    return results.map((row: any) => row.value);
-  }
-
-  /**
-   * Enhance search results with fuzzy matching when exact matches are few
-   */
-  private async enhanceWithFuzzyMatches(
-    indexName: string,
-    field: string,
-    term: string,
-    exactMatches: number,
-  ): Promise<string> {
-    // If we have enough exact matches, don't do fuzzy matching
-    if (exactMatches >= 5) {
-      return term;
-    }
-
-    // Get fuzzy matches
-    const fuzzyMatches = await this.getFuzzyMatches(field, term);
-
-    // If we found fuzzy matches, include them in the search
-    if (fuzzyMatches.length > 0) {
-      return `(${term} | ${fuzzyMatches.join(' | ')})`;
-    }
-
-    return term;
-  }
-
-  /**
-   * Get query execution plan analysis
-   */
-  private async analyzeQueryPlan(sql: string, params: any[]): Promise<any> {
-    try {
-      const plan = await this.dataSource.query(`EXPLAIN (FORMAT JSON, ANALYZE) ${sql}`, params);
-      return {
-        plan: plan[0]['QUERY PLAN'][0],
-        warnings: this.analyzeQueryPlanForWarnings(plan[0]['QUERY PLAN'][0]),
-      };
-    } catch (error) {
-      this.logger.error(`Query plan analysis error: ${error.message}`);
-      return null;
-    }
-  }
-
-  /**
-   * Analyze query plan for potential performance issues
-   */
-  private analyzeQueryPlanForWarnings(plan: any): string[] {
-    const warnings: string[] = [];
-
-    // Check for sequential scans on large tables
-    if (plan.Plan['Node Type'] === 'Seq Scan' && plan['Plan Rows'] > 1000) {
-      warnings.push('Sequential scan detected on large table - consider adding an index');
-    }
-
-    // Check for high cost operations
-    if (plan['Total Cost'] > 1000) {
-      warnings.push('High cost operation detected - query might need optimization');
-    }
-
-    // Check for large result sets
-    if (plan['Plan Rows'] > 10000) {
-      warnings.push('Large result set - consider adding LIMIT or additional filters');
-    }
-
-    return warnings;
-  }
-
-  /**
-   * Get highlighted snippets for search results
-   */
-  private async getHighlights(
-    hit: any,
-    searchQuery: SearchQueryDto,
-  ): Promise<Record<string, string[]>> {
-    const highlights: Record<string, string[]> = {};
-    const searchText =
-      typeof searchQuery.query === 'string'
-        ? searchQuery.query
-        : searchQuery.query.match?.value || '';
-
-    // Configure highlight options
-    const options = "StartSel='<em>', StopSel='</em>', MaxWords=35, MinWords=15, ShortWord=3";
-
-    // Get highlights for each text field
-    for (const [field, value] of Object.entries(hit.source)) {
-      if (typeof value === 'string') {
-        const query = `
-          SELECT ts_headline(
-            'english',
-            $1,
-            plainto_tsquery('english', $2),
-            $3
-          ) as highlight
-        `;
-
-        const result = await this.dataSource.query(query, [value, searchText, options]);
-
-        if (result?.[0]?.highlight) {
-          highlights[field] = [result[0].highlight];
-        }
-      }
-    }
-
-    return highlights;
-  }
-
-  /**
-   * Get facet aggregations for specified fields
-   */
-  private async getFacets(
-    indexName: string,
-    facetFields: string[],
-  ): Promise<Record<string, Array<{ key: string; count: number }>>> {
-    const facets: Record<string, Array<{ key: string; count: number }>> = {};
-
-    for (const field of facetFields) {
-      // Handle array fields differently
-      const isArrayField = await this.isArrayField(indexName, field);
-
-      const query = isArrayField
-        ? `
-          WITH array_values AS (
-            SELECT jsonb_array_elements_text(content->'${field}') as value
-            FROM search_documents
-            WHERE index_name = $1
-              AND content ? '${field}'
-              AND jsonb_typeof(content->'${field}') = 'array'
-          )
-          SELECT 
-            value as key,
-            COUNT(*) as count
-          FROM array_values
-          GROUP BY value
-          ORDER BY count DESC
-          LIMIT 10
-        `
-        : `
-          SELECT 
-            content->>'${field}' as key,
-            COUNT(*) as count
-          FROM search_documents
-          WHERE index_name = $1
-            AND content ? '${field}'
-          GROUP BY content->>'${field}'
-          ORDER BY count DESC
-          LIMIT 10
-        `;
-
-      const results = await this.dataSource.query(query, [indexName]);
-
-      if (results?.length > 0) {
-        facets[field] = results.map(row => ({
-          key: row.key,
-          count: parseInt(row.count, 10),
-        }));
-      }
-    }
-
-    return facets;
-  }
-
-  /**
-   * Check if a field typically contains array values
-   */
-  private async isArrayField(indexName: string, field: string): Promise<boolean> {
-    const query = `
-      SELECT jsonb_typeof(content->'${field}') as type
-      FROM search_documents
-      WHERE index_name = $1
-        AND content ? '${field}'
-      LIMIT 1
-    `;
-
-    const result = await this.dataSource.query(query, [indexName]);
-    return result?.[0]?.type === 'array';
-  }
-
-  /**
-   * Handle array field operations with optimized performance
-   */
-  private async handleArrayFieldQuery(
-    field: string,
-    values: any[],
-    operation: 'any' | 'all' | 'exact' = 'any',
-  ): Promise<{ sql: string; params: any[] }> {
-    // Validate array values
-    if (!Array.isArray(values) || values.length === 0) {
-      throw new BadRequestException(`Invalid array values for field ${field}`);
-    }
-
-    let sql: string;
-    const params = values;
-
-    switch (operation) {
-      case 'any':
-        // Match if any array element matches any of the values
-        sql = `
-          jsonb_exists_any(
-            CASE jsonb_typeof(content->'${field}')
-              WHEN 'array' THEN content->'${field}'
-              ELSE jsonb_build_array(content->'${field}')
-            END,
-            array[${values.map((_, i) => `$${i + 1}::text`).join(', ')}]
-          )
-        `;
-        break;
-
-      case 'all':
-        // Match if all provided values exist in the array
-        sql = `
-          (
-            SELECT bool_and(elem::text = ANY (
-              SELECT jsonb_array_elements_text(
-                CASE jsonb_typeof(content->'${field}')
-                  WHEN 'array' THEN content->'${field}'
-                  ELSE jsonb_build_array(content->'${field}')
-                END
-              )
-            ))
-            FROM jsonb_array_elements_text($1::jsonb) elem
-          )
-        `;
-        params.unshift(JSON.stringify(values));
-        break;
-
-      case 'exact':
-        // Match if arrays are exactly equal (same elements, same order)
-        sql = `
-          CASE jsonb_typeof(content->'${field}')
-            WHEN 'array' THEN content->'${field}' = $1::jsonb
-            ELSE content->'${field}' = $1::jsonb->0
-          END
-        `;
-        params.unshift(JSON.stringify(values));
-        break;
-
-      default:
-        throw new BadRequestException(`Invalid array operation: ${operation}`);
-    }
+    const params = [searchTerm, indexName, size, from];
 
     return { sql, params };
   }
 
-  /**
-   * Get array field statistics for optimization
-   */
-  private async getArrayFieldStats(
-    indexName: string,
-    field: string,
-  ): Promise<{
-    totalValues: number;
-    uniqueValues: number;
-    avgArrayLength: number;
-    maxArrayLength: number;
-  }> {
-    const query = `
-      WITH array_stats AS (
-        SELECT 
-          jsonb_array_length(content->'${field}') as array_length,
-          jsonb_array_elements_text(content->'${field}') as array_value
-        FROM search_documents
+  private buildCountQuery(indexName: string, searchTerm: string, filter?: any): string {
+    // Normalize search term by stripping wildcard characters for maximum efficiency
+    const normalizedTerm = this.normalizeSearchQuery(searchTerm);
+
+    // Handle match_all queries
+    if (normalizedTerm === '*' || normalizedTerm === '') {
+      return `
+        SELECT COUNT(*) as total
+        FROM documents
         WHERE index_name = $1
-          AND jsonb_typeof(content->'${field}') = 'array'
-      )
-      SELECT
-        COUNT(array_value) as total_values,
-        COUNT(DISTINCT array_value) as unique_values,
-        AVG(array_length) as avg_length,
-        MAX(array_length) as max_length
-      FROM array_stats
+      `;
+    }
+
+    // Use optimized full-text search for basic queries (much faster than ILIKE)
+    if (this.shouldUseSimpleTextSearch(normalizedTerm)) {
+      return `
+        SELECT COUNT(*) as total
+        FROM documents
+        WHERE index_name = $1
+          AND search_vector IS NOT NULL
+          AND search_vector @@ plainto_tsquery('english', $2)
+      `;
+    }
+
+    // Use full-text search for complex queries (multiple words, special characters)
+    return `
+      SELECT COUNT(*) as total
+      FROM documents
+      WHERE index_name = $1
+        AND search_vector IS NOT NULL
+        AND COALESCE(materialized_vector, search_vector) @@ plainto_tsquery('english', $2)
     `;
-
-    const result = await this.dataSource.query(query, [indexName]);
-
-    return {
-      totalValues: parseInt(result[0].total_values || '0', 10),
-      uniqueValues: parseInt(result[0].unique_values || '0', 10),
-      avgArrayLength: parseFloat(result[0].avg_length || '0'),
-      maxArrayLength: parseInt(result[0].max_length || '0', 10),
-    };
   }
 
-  /**
-   * Optimize array field query based on statistics
-   */
-  private async optimizeArrayQuery(
-    indexName: string,
-    field: string,
-    values: any[],
-  ): Promise<{ sql: string; params: any[] }> {
-    const stats = await this.getArrayFieldStats(indexName, field);
-
-    // Choose optimal query strategy based on statistics
-    if (stats.uniqueValues / stats.totalValues > 0.8) {
-      // High cardinality: Use GIN index for exact matching
-      return this.handleArrayFieldQuery(field, values, 'exact');
-    } else if (stats.avgArrayLength <= 5) {
-      // Small arrays: Use simple array operations
-      return this.handleArrayFieldQuery(field, values, 'any');
-    } else {
-      // Large arrays: Use optimized containment checks
-      return {
-        sql: `
-          EXISTS (
-            SELECT 1
-            FROM jsonb_array_elements_text(content->'${field}') elem
-            WHERE elem = ANY($1::text[])
-          )
-        `,
-        params: [values],
-      };
-    }
-  }
-
-  /**
-   * Log query execution plan for performance analysis (Phase 2.3)
-   */
-  private async logQueryPlan(sql: string, params: any[], queryType: string): Promise<void> {
-    try {
-      const explainQuery = `EXPLAIN (FORMAT JSON, ANALYZE) ${sql}`;
-      const planResult = await this.dataSource.query(explainQuery, params);
-
-      if (planResult && planResult[0] && planResult[0]['QUERY PLAN']) {
-        const plan = planResult[0]['QUERY PLAN'][0];
-        const executionTime = plan['Execution Time'];
-        const planningTime = plan['Planning Time'];
-
-        // Query plan analysis logging disabled for performance
-      }
-    } catch (error) {
-      this.logger.debug(`Failed to get query plan: ${error.message}`);
-    }
-  }
-
-  /**
-   * Determine if parallel search should be used
-   */
-  private shouldUseParallelSearch(query: SearchQueryDto, size: number): boolean {
-    // Use parallel search only for:
-    // 1. Very large result sets (size > 100)
-    // 2. Complex wildcard queries with multiple wildcards
-    // 3. Boolean queries with multiple conditions
-
-    if (size > 100) return true;
-
-    const searchTerm = this.extractSearchTerm(query);
-
-    // Complex wildcard patterns (multiple wildcards)
-    const wildcardCount = (searchTerm.match(/\*/g) || []).length;
-    if (wildcardCount > 1) return true;
-
-    // Boolean queries
-    if (typeof query.query === 'object' && 'bool' in query.query) return true;
-
-    // Very high-frequency terms that might return massive results
-    const massiveTerms = ['a', 'the', 'and', 'or', 'in', 'on', 'at'];
-    if (massiveTerms.includes(searchTerm.toLowerCase())) return true;
-
-    // Default to standard search for better performance
-    return false;
-  }
-
-  /**
-   * Execute standard search with optimizations
-   */
   private async executeStandardSearch(
     indexName: string,
     searchQuery: SearchQueryDto,
   ): Promise<any> {
+    const startTime = Date.now();
+    console.log(`[PROFILE] executeStandardSearch started`);
+
+    const extractStart = Date.now();
     const searchTerm = this.extractSearchTerm(searchQuery);
-
-    // Build optimized query with parallel execution hints
-    const mainQuery = this.buildOptimizedSearchQuery(
-      indexName,
-      searchTerm,
-      searchQuery.size || 10,
-      searchQuery.from || 0,
-      searchQuery.filter,
+    console.log(
+      `[PROFILE] Extract search term took: ${Date.now() - extractStart}ms, term: ${searchTerm}`,
     );
 
-    // Build parameters array
-    const params = [searchTerm, indexName, searchQuery.size || 10, searchQuery.from || 0];
+    const size = Math.min(searchQuery.size || 10, 100); // Cap at 100
+    const from = searchQuery.from || 0;
 
-    // Execute query directly without parallel optimization overhead
-    const results = await this.dataSource.query(mainQuery, params);
+    try {
+      // Build optimized query with parallel execution hints
+      const buildQueryStart = Date.now();
+      const mainQuery = this.buildOptimizedSearchQuery(
+        indexName,
+        searchTerm,
+        size,
+        from,
+        searchQuery.filter,
+      );
+      console.log(`[PROFILE] Build main query took: ${Date.now() - buildQueryStart}ms`);
 
-    // Process results
-    const processedResults = await this.resultProcessor.processSearchResults(
-      results,
-      searchTerm,
-      searchQuery.from || 0,
-      searchQuery.size || 10,
-    );
+      // Build count query
+      const buildCountStart = Date.now();
+      const countQuery = this.buildCountQuery(indexName, searchTerm, searchQuery.filter);
+      console.log(`[PROFILE] Build count query took: ${Date.now() - buildCountStart}ms`);
 
-    return {
-      data: {
-        hits: processedResults.hits,
-        total: processedResults.totalHits,
-        maxScore: processedResults.maxScore,
-        pagination: {
-          currentPage: Math.floor((searchQuery.from || 0) / (searchQuery.size || 10)) + 1,
-          totalPages: Math.ceil(processedResults.totalHits / (searchQuery.size || 10)),
-          pageSize: searchQuery.size || 10,
-          hasNext: (searchQuery.from || 0) + (searchQuery.size || 10) < processedResults.totalHits,
-          hasPrevious: (searchQuery.from || 0) > 0,
-          totalResults: processedResults.totalHits,
+      // Build parameters array based on query type
+      const paramStart = Date.now();
+      let params: any[];
+      let countParams: any[];
+
+      if (searchTerm === '*' || searchTerm === '') {
+        // Match_all query - only needs index, size, from
+        params = [indexName, size, from];
+        countParams = [indexName];
+      } else if (searchTerm.includes('*') || searchTerm.includes('?')) {
+        // Wildcard query - needs pattern, index, size, from
+        const pattern = searchTerm.replace(/\*/g, '%').replace(/\?/g, '_');
+        params = [pattern, indexName, size, from];
+        countParams = [indexName, pattern];
+      } else {
+        // Regular text query - needs search term, index, size, from
+        params = [searchTerm, indexName, size, from];
+        countParams = [indexName, searchTerm];
+      }
+      console.log(`[PROFILE] Build parameters took: ${Date.now() - paramStart}ms`);
+
+      // Execute queries in parallel
+      const queryStart = Date.now();
+      const [results, countResult] = await Promise.all([
+        this.dataSource.query(mainQuery, params),
+        this.dataSource.query(countQuery, countParams),
+      ]);
+      console.log(`[PROFILE] Execute parallel queries took: ${Date.now() - queryStart}ms`);
+
+      const processStart = Date.now();
+      const total = parseInt(countResult[0]?.total || '0');
+
+      const responseData = {
+        data: {
+          hits: results.map((row: any) => ({
+            id: row.document_id,
+            index: indexName,
+            score: row.rank,
+            source: row.content,
+          })),
+          total: total.toString(),
+          maxScore: results.length > 0 ? Math.max(...results.map((r: any) => r.rank)) : 0,
         },
-      },
-      took: 0, // Will be set by caller
-    };
+        pagination: {
+          currentPage: Math.floor(from / size) + 1,
+          totalPages: Math.ceil(total / size),
+          pageSize: size,
+          hasNext: from + size < total,
+          hasPrevious: from > 0,
+          totalResults: total.toString(),
+        },
+        took: Date.now() - Date.now(), // Will be calculated by caller
+      };
+      console.log(`[PROFILE] Process results took: ${Date.now() - processStart}ms`);
+      console.log(`[PROFILE] executeStandardSearch total: ${Date.now() - startTime}ms`);
+
+      return responseData;
+    } catch (error) {
+      if (error.message.includes('statement_timeout')) {
+        throw new Error('Search query timed out. Please try a more specific search term.');
+      }
+      throw error;
+    }
   }
 
   /**
-   * Extract search term from query
+   * Extract search term from query - simplified for maximum performance
    */
   private extractSearchTerm(query: SearchQueryDto): string {
+    // For simple string queries, just return the query
     if (typeof query.query === 'string') {
       return query.query;
     }
-    if (query.query?.match?.value) {
-      return query.query.match.value;
+
+    // For object queries, try to extract the value quickly
+    if (query.query && typeof query.query === 'object') {
+      const queryObj = query.query as any;
+
+      // Handle match query
+      if (queryObj.match) {
+        if (typeof queryObj.match === 'string') {
+          return queryObj.match;
+        }
+        if (queryObj.match.value !== undefined) {
+          return queryObj.match.value;
+        }
+        if (queryObj.match.query !== undefined) {
+          return queryObj.match.query;
+        }
+        return '';
+      }
+
+      // Handle match_all query
+      if (queryObj.match_all !== undefined) {
+        return '*';
+      }
+
+      // Handle wildcard query
+      if (queryObj.wildcard) {
+        if (typeof queryObj.wildcard === 'string') {
+          return queryObj.wildcard;
+        }
+        if (queryObj.wildcard.value !== undefined) {
+          return queryObj.wildcard.value;
+        }
+        // Handle field-specific wildcard format: { "title": { "value": "smart*" } }
+        const entries = Object.entries(queryObj.wildcard);
+        if (entries.length > 0) {
+          const [field, config] = entries[0];
+          if (typeof config === 'string') {
+            return config;
+          }
+          if (typeof config === 'object' && config && 'value' in config) {
+            return (config as any).value;
+          }
+        }
+        return '';
+      }
+
+      // Handle term query
+      if (queryObj.term) {
+        if (typeof queryObj.term === 'string') {
+          return queryObj.term;
+        }
+        if (queryObj.term.value !== undefined) {
+          return queryObj.term.value;
+        }
+        // Handle field-specific term format: { "title": "value" }
+        const entries = Object.entries(queryObj.term);
+        if (entries.length > 0) {
+          const [field, value] = entries[0];
+          return typeof value === 'string' ? value : '';
+        }
+        return '';
+      }
     }
-    if (
-      typeof query.query === 'object' &&
-      'wildcard' in query.query &&
-      typeof query.query.wildcard === 'object' &&
-      'value' in query.query.wildcard
-    ) {
-      return (query.query.wildcard as { value: string }).value;
-    }
+
     return '';
   }
 
   /**
-   * Build optimized search query with parallel execution hints
+   * Normalize search query by stripping wildcard characters for maximum efficiency
+   * This converts all queries to simple text search while maintaining functionality
+   */
+  private normalizeSearchQuery(searchTerm: string): string {
+    if (!searchTerm) return '';
+
+    // Strip all wildcard characters (* and ?) and trim
+    const normalized = searchTerm.replace(/[\*\?]/g, '').trim();
+
+    // If we end up with empty string, return original
+    return normalized || searchTerm;
+  }
+
+  /**
+   * Determine if query should use simple text search or full-text search
+   * Simple text search is much faster for single words and basic queries
+   */
+  private shouldUseSimpleTextSearch(searchTerm: string): boolean {
+    if (!searchTerm || searchTerm === '*' || searchTerm === '') return false;
+
+    // Use simple text search for:
+    // 1. Single words (no spaces)
+    // 2. Short multi-word queries (2-3 words) - faster than full-text search
+    // 3. No special characters (except basic punctuation)
+    // 4. Short queries (less than 50 characters)
+
+    const hasMultipleWords = searchTerm.includes(' ');
+    const hasSpecialChars = /[^\w\s\-\.]/.test(searchTerm);
+    const isShortQuery = searchTerm.length < 50;
+    const wordCount = searchTerm.split(/\s+/).length;
+
+    // Use simple text search for single words OR short multi-word queries (2-3 words)
+    return (!hasMultipleWords || wordCount <= 3) && !hasSpecialChars && isShortQuery;
+  }
+
+  /**
+   * Extract search term from parsed query object
+   */
+  private extractTermFromParsedQuery(query: any): string {
+    if (typeof query === 'string') {
+      return query;
+    }
+
+    // Handle match query
+    if (query.type === 'term') {
+      return query.value || '';
+    }
+
+    // Handle wildcard query
+    if (query.type === 'wildcard') {
+      return query.value || query.pattern || '';
+    }
+
+    // Handle match_all query
+    if (query.type === 'match_all') {
+      return '*';
+    }
+
+    // Handle boolean query
+    if (query.type === 'boolean' && query.clauses) {
+      return query.clauses.map((clause: any) => this.extractTermFromParsedQuery(clause)).join(' ');
+    }
+
+    // Handle phrase query
+    if (query.type === 'phrase' && query.terms) {
+      return query.terms.join(' ');
+    }
+
+    return '';
+  }
+
+  /**
+   * Build optimized search query for single table architecture
    */
   private buildOptimizedSearchQuery(
     indexName: string,
@@ -1812,30 +1100,165 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
     from: number,
     filter?: any,
   ): string {
-    const filterResult = filter
-      ? this.filterBuilderService.buildConditions(filter, [], 1)
-      : { sql: '', nextParamIndex: 1 };
-    const filterClause = filterResult.sql;
+    // Normalize search term by stripping wildcard characters for maximum efficiency
+    const normalizedTerm = this.normalizeSearchQuery(searchTerm);
 
-    // Check if documents table has search vectors
-    return `
-      WITH search_results AS (
-        SELECT 
+    // Handle match_all queries (when searchTerm is '*' or empty)
+    if (normalizedTerm === '*' || normalizedTerm === '') {
+      return `
+        SELECT
           document_id,
           content,
           metadata,
           field_weights,
-          ts_rank_cd(COALESCE(materialized_vector, search_vector), to_tsquery('english', $1)) as rank,
-          COUNT(*) OVER() as total_count
+          1.0 as rank
+        FROM documents
+        WHERE index_name = $1
+          ${filter ? `AND ${filter}` : ''}
+        ORDER BY document_id
+        LIMIT $2 OFFSET $3
+      `;
+    }
+
+    // Use optimized full-text search for basic queries (much faster than ILIKE)
+    if (this.shouldUseSimpleTextSearch(normalizedTerm)) {
+      return `
+        SELECT
+          document_id,
+          content,
+          metadata,
+          field_weights,
+          1.0 as rank
         FROM documents
         WHERE index_name = $2
           AND search_vector IS NOT NULL
-          AND COALESCE(materialized_vector, search_vector) @@ to_tsquery('english', $1)
-          ${filterClause ? `AND ${filterClause}` : ''}
-      )
-      SELECT * FROM search_results
-      ORDER BY rank DESC
+          AND search_vector @@ plainto_tsquery('english', $1)
+          ${filter ? `AND ${filter}` : ''}
+        ORDER BY document_id
+        LIMIT $3 OFFSET $4
+      `;
+    }
+
+    // Use full-text search for complex queries (multiple words, special characters)
+    return `
+      SELECT
+        document_id,
+        content,
+        metadata,
+        field_weights,
+        ts_rank_cd(COALESCE(materialized_vector, search_vector), plainto_tsquery('english', $1)) as rank
+      FROM documents
+      WHERE index_name = $2
+        AND search_vector IS NOT NULL
+        AND COALESCE(materialized_vector, search_vector) @@ plainto_tsquery('english', $1)
+        ${filter ? `AND ${filter}` : ''}
+      ORDER BY rank DESC, document_id
       LIMIT $3 OFFSET $4
     `;
+  }
+
+  /**
+   * Simple query processing to replace QueryProcessorService
+   */
+  private processQuery(query: any): string {
+    if (typeof query === 'string') {
+      return query;
+    }
+
+    // Handle match query
+    if (query.match) {
+      return typeof query.match === 'string' ? query.match : query.match.query || '';
+    }
+
+    // Handle match_all query
+    if (query.match_all) {
+      return '*';
+    }
+
+    // Handle wildcard query
+    if (query.wildcard) {
+      const field = Object.keys(query.wildcard)[0];
+      const value = query.wildcard[field];
+      return typeof value === 'string' ? value : value.value || '';
+    }
+
+    // Handle term query
+    if (query.term) {
+      const field = Object.keys(query.term)[0];
+      const value = query.term[field];
+      return typeof value === 'string' ? value : value.value || '';
+    }
+
+    // Handle bool query (simplified)
+    if (query.bool) {
+      const terms: string[] = [];
+
+      if (query.bool.must) {
+        query.bool.must.forEach((clause: any) => {
+          terms.push(this.processQuery(clause));
+        });
+      }
+
+      if (query.bool.should) {
+        query.bool.should.forEach((clause: any) => {
+          terms.push(this.processQuery(clause));
+        });
+      }
+
+      return terms.join(' ');
+    }
+
+    return '';
+  }
+
+  /**
+   * Determine if a query is popular and should be cached longer
+   */
+  private isPopularQuery(searchQuery: SearchQueryDto): boolean {
+    const queryStr =
+      typeof searchQuery.query === 'string' ? searchQuery.query : JSON.stringify(searchQuery.query);
+
+    // Cache common single word searches longer
+    const popularTerms = ['hotel', 'restaurant', 'bank', 'school', 'hospital', 'shop', 'store'];
+    const isSimpleQuery = typeof searchQuery.query === 'string' && !queryStr.includes('*');
+    const isPopularTerm = popularTerms.some(term =>
+      queryStr.toLowerCase().includes(term.toLowerCase()),
+    );
+
+    return isSimpleQuery && isPopularTerm && (searchQuery.size || 10) <= 20;
+  }
+
+  /**
+   * Generate search vector from document content
+   */
+  private generateSearchVector(document: Record<string, any>): string {
+    // Extract text content from document
+    const textContent = this.extractTextContent(document);
+
+    // Generate tsvector using PostgreSQL function
+    return `to_tsvector('english', '${textContent.replace(/'/g, "''")}')`;
+  }
+
+  /**
+   * Extract text content from document for search vector generation
+   */
+  private extractTextContent(document: Record<string, any>): string {
+    const textParts: string[] = [];
+
+    // Extract common text fields
+    if (document.name) textParts.push(document.name);
+    if (document.title) textParts.push(document.title);
+    if (document.description) textParts.push(document.description);
+    if (document.content) textParts.push(document.content);
+    if (document.text) textParts.push(document.text);
+
+    // Add all string values as fallback
+    Object.values(document).forEach(value => {
+      if (typeof value === 'string' && value.length > 0) {
+        textParts.push(value);
+      }
+    });
+
+    return textParts.join(' ');
   }
 }
