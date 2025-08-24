@@ -85,10 +85,14 @@ WHERE
 CREATE INDEX IF NOT EXISTS idx_documents_index_name ON documents (index_name);
 
 -- Add lightweight covering index for common search patterns (without large JSONB fields)
-CREATE INDEX IF NOT EXISTS idx_documents_search_lightweight ON documents (index_name, document_id) INCLUDE (
-    search_vector,
-    materialized_vector
-);
+-- REMOVED: This index causes btree size limit errors for large documents
+-- CREATE INDEX IF NOT EXISTS idx_documents_search_lightweight ON documents (index_name, document_id) INCLUDE (
+--     search_vector,
+--     materialized_vector
+-- );
+
+-- Add a safer lightweight index without large vector fields
+CREATE INDEX IF NOT EXISTS idx_documents_search_lightweight_safe ON documents (index_name, document_id);
 
 -- Add generic performance indexes (field-agnostic)
 CREATE INDEX IF NOT EXISTS idx_documents_search_vector_optimized ON documents USING GIN (search_vector)

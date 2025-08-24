@@ -815,12 +815,16 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
     // Normalize search term by stripping wildcard characters for maximum efficiency
     const normalizedTerm = this.normalizeSearchQuery(searchTerm);
 
+    // Build filter conditions properly
+    const filterConditions = this.buildFilterConditions(filter);
+
     // Handle match_all queries
     if (normalizedTerm === '*' || normalizedTerm === '') {
       return `
         SELECT COUNT(*) as total
         FROM documents
         WHERE index_name = $1
+          ${filterConditions ? `AND ${filterConditions}` : ''}
       `;
     }
 
@@ -832,6 +836,7 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
         WHERE index_name = $1
           AND search_vector IS NOT NULL
           AND search_vector @@ plainto_tsquery('english', $2)
+          ${filterConditions ? `AND ${filterConditions}` : ''}
       `;
     }
 
@@ -842,6 +847,7 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
       WHERE index_name = $1
         AND search_vector IS NOT NULL
         AND COALESCE(materialized_vector, search_vector) @@ plainto_tsquery('english', $2)
+        ${filterConditions ? `AND ${filterConditions}` : ''}
     `;
   }
 
@@ -1091,7 +1097,7 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
   }
 
   /**
-   * Build optimized search query for single table architecture
+   * Build optimized search query with proper filter handling
    */
   private buildOptimizedSearchQuery(
     indexName: string,
@@ -1102,6 +1108,9 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
   ): string {
     // Normalize search term by stripping wildcard characters for maximum efficiency
     const normalizedTerm = this.normalizeSearchQuery(searchTerm);
+
+    // Build filter conditions properly
+    const filterConditions = this.buildFilterConditions(filter);
 
     // Handle match_all queries (when searchTerm is '*' or empty)
     if (normalizedTerm === '*' || normalizedTerm === '') {
@@ -1114,7 +1123,7 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
           1.0 as rank
         FROM documents
         WHERE index_name = $1
-          ${filter ? `AND ${filter}` : ''}
+          ${filterConditions ? `AND ${filterConditions}` : ''}
         ORDER BY document_id
         LIMIT $2 OFFSET $3
       `;
@@ -1133,7 +1142,7 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
         WHERE index_name = $2
           AND search_vector IS NOT NULL
           AND search_vector @@ plainto_tsquery('english', $1)
-          ${filter ? `AND ${filter}` : ''}
+          ${filterConditions ? `AND ${filterConditions}` : ''}
         ORDER BY document_id
         LIMIT $3 OFFSET $4
       `;
@@ -1151,10 +1160,81 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
       WHERE index_name = $2
         AND search_vector IS NOT NULL
         AND COALESCE(materialized_vector, search_vector) @@ plainto_tsquery('english', $1)
-        ${filter ? `AND ${filter}` : ''}
+        ${filterConditions ? `AND ${filterConditions}` : ''}
       ORDER BY rank DESC, document_id
       LIMIT $3 OFFSET $4
     `;
+  }
+
+  /**
+   * Build filter conditions from filter object
+   */
+  private buildFilterConditions(filter?: any): string {
+    if (!filter) return '';
+
+    // Handle bool filter
+    if (filter.bool) {
+      const conditions: string[] = [];
+
+      if (filter.bool.must) {
+        filter.bool.must.forEach((clause: any) => {
+          const condition = this.buildTermCondition(clause);
+          if (condition) conditions.push(condition);
+        });
+      }
+
+      if (filter.bool.should) {
+        const shouldConditions = filter.bool.should
+          .map((clause: any) => {
+            const condition = this.buildTermCondition(clause);
+            return condition;
+          })
+          .filter(Boolean);
+
+        if (shouldConditions.length > 0) {
+          conditions.push(`(${shouldConditions.join(' OR ')})`);
+        }
+      }
+
+      if (filter.bool.must_not) {
+        filter.bool.must_not.forEach((clause: any) => {
+          const condition = this.buildTermCondition(clause);
+          if (condition) conditions.push(`NOT (${condition})`);
+        });
+      }
+
+      return conditions.join(' AND ');
+    }
+
+    // Handle single term filter
+    return this.buildTermCondition(filter);
+  }
+
+  /**
+   * Build condition for a single term filter
+   */
+  private buildTermCondition(termFilter: any): string {
+    if (!termFilter || !termFilter.term) return '';
+
+    const { field, value } = termFilter.term;
+    if (!field || value === undefined) return '';
+
+    // Handle boolean values
+    if (typeof value === 'boolean') {
+      return `content->>'${field}' = '${value}'`;
+    }
+
+    // Handle string values
+    if (typeof value === 'string') {
+      return `content->>'${field}' = '${value}'`;
+    }
+
+    // Handle numeric values
+    if (typeof value === 'number') {
+      return `content->>'${field}' = '${value}'`;
+    }
+
+    return '';
   }
 
   /**

@@ -129,4 +129,32 @@ export class DebugController {
       };
     }
   }
+
+  @Get('remove-problematic-index')
+  @ApiOperation({
+    summary: 'Remove problematic index',
+    description: 'Remove the idx_documents_search_lightweight index that causes btree size limit errors',
+  })
+  async removeProblematicIndex() {
+    try {
+      const fs = require('fs');
+      const path = require('path');
+      const scriptPath = path.join(process.cwd(), 'scripts', 'remove-problematic-index.sql');
+      const script = fs.readFileSync(scriptPath, 'utf8');
+
+      await this.dataSource.query(script);
+
+      return {
+        status: 'success',
+        message: 'Problematic index removed successfully',
+        timestamp: new Date().toISOString(),
+      };
+    } catch (error) {
+      return {
+        status: 'error',
+        error: error.message,
+        timestamp: new Date().toISOString(),
+      };
+    }
+  }
 }
