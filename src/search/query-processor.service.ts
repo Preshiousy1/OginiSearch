@@ -16,11 +16,101 @@ import {
   MatchAllQueryStep,
 } from './interfaces/query-processor.interface';
 import { AnalyzerRegistryService } from '../analysis/analyzer-registry.service';
+import { EntityExtractionService } from './services/entity-extraction.service';
+import { LocationProcessorService } from './services/location-processor.service';
+import { QueryExpansionService } from './services/query-expansion.service';
+import { QueryComponents, SearchIntent } from './interfaces/intelligent-search.interface';
 
 @Injectable()
 export class QueryProcessorService implements QueryProcessor {
   private readonly logger = new Logger(QueryProcessorService.name);
-  constructor(private readonly analyzerRegistryService: AnalyzerRegistryService) {}
+
+  constructor(
+    private readonly analyzerRegistryService: AnalyzerRegistryService,
+    private readonly entityExtractionService: EntityExtractionService,
+    private readonly locationProcessorService: LocationProcessorService,
+    private readonly queryExpansionService: QueryExpansionService,
+  ) {}
+
+  /**
+   * Enhanced query processing with intelligent search capabilities
+   */
+  async processIntelligentQuery(
+    rawQuery: RawQuery,
+    userLocation?: { lat: number; lng: number },
+  ): Promise<QueryComponents> {
+    const queryText = this.extractQueryText(rawQuery);
+
+    // Parallel processing of different query components
+    const [entities, locationResult, intent] = await Promise.all([
+      this.entityExtractionService.extractEntities(queryText),
+      this.locationProcessorService.processLocationQuery(queryText, userLocation),
+      this.classifyIntent(queryText),
+    ]);
+
+    // Query expansion based on extracted entities
+    const expansion = await this.queryExpansionService.expandQuery(
+      queryText,
+      entities.businessTypes,
+      entities.services,
+    );
+
+    return {
+      original: queryText,
+      normalized: this.normalizeQuery(queryText),
+      entities,
+      intent,
+      expanded: expansion.expanded,
+      locationContext: locationResult.context,
+    };
+  }
+
+  /**
+   * Classify search intent
+   */
+  private classifyIntent(query: string): SearchIntent {
+    const normalizedQuery = query.toLowerCase();
+
+    // Transactional intent indicators
+    const transactionalKeywords = ['order', 'buy', 'book', 'reserve', 'appointment', 'delivery'];
+    if (transactionalKeywords.some(keyword => normalizedQuery.includes(keyword))) {
+      return 'transactional';
+    }
+
+    // Navigational intent indicators
+    const navigationalKeywords = ['where', 'location', 'address', 'directions', 'near', 'close to'];
+    if (navigationalKeywords.some(keyword => normalizedQuery.includes(keyword))) {
+      return 'navigational';
+    }
+
+    // Default to informational
+    return 'informational';
+  }
+
+  /**
+   * Extract query text from raw query
+   */
+  private extractQueryText(rawQuery: RawQuery): string {
+    if (typeof rawQuery.query === 'string') {
+      return rawQuery.query;
+    }
+
+    if (rawQuery.query?.match?.value) {
+      return rawQuery.query.match.value;
+    }
+
+    if (rawQuery.query?.term) {
+      const entries = Object.entries(rawQuery.query.term);
+      if (entries.length > 0) {
+        const [, value] = entries[0];
+        return typeof value === 'object' && value !== null && 'value' in value
+          ? String((value as any).value)
+          : String(value);
+      }
+    }
+
+    return '';
+  }
 
   /**
    * Process a raw query into structured query objects

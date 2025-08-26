@@ -133,7 +133,8 @@ export class DebugController {
   @Get('remove-problematic-index')
   @ApiOperation({
     summary: 'Remove problematic index',
-    description: 'Remove the idx_documents_search_lightweight index that causes btree size limit errors',
+    description:
+      'Remove the idx_documents_search_lightweight index that causes btree size limit errors',
   })
   async removeProblematicIndex() {
     try {

@@ -17,6 +17,7 @@ import { PostgreSQLDocumentProcessor } from './postgresql-document-processor';
 import { PostgreSQLAnalysisAdapter } from './postgresql-analysis.adapter';
 import { AnalysisModule } from 'src/analysis/analysis.module';
 import { RedisCacheService } from './redis-cache.service';
+import { PostgreSQLSearchEngine } from './postgresql-search-engine';
 
 @Module({
   imports: [
@@ -67,6 +68,7 @@ import { RedisCacheService } from './redis-cache.service';
     BM25RankingService,
     FilterBuilderService,
     RedisCacheService,
+    PostgreSQLSearchEngine,
   ],
   exports: [
     PostgreSQLService,
@@ -81,6 +83,7 @@ import { RedisCacheService } from './redis-cache.service';
     PostgreSQLAnalysisAdapter,
     PostgreSQLDocumentProcessor,
     RedisCacheService,
+    PostgreSQLSearchEngine,
   ],
 })
 export class PostgreSQLModule {}
