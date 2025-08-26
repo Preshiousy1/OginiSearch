@@ -15,10 +15,115 @@ export class LocationProcessorService {
   // Location patterns for parsing
   private readonly locationPatterns = {
     userLocation: /\b(near|close to|around)\s+me\b/i,
-    namedLocation: /\b(in|at)\s+([a-zA-Z\s]+)\b/i,
+    namedLocation: /\b(in|at|within)\s+([a-zA-Z\s]+)\b/i,
     coordinates: /\b(-?\d+\.?\d*)\s*,\s*(-?\d+\.?\d*)\b/,
     radius: /\bwithin\s+(\d+)\s*(km|miles?|meters?)\b/i,
+    distance: /\b(\d+)\s*(km|miles?|meters?)\s+(from|of|away)\b/i,
   };
+
+  // Common Nigerian cities and areas
+  private readonly nigerianCities = [
+    'lagos',
+    'abuja',
+    'kano',
+    'ibadan',
+    'port harcourt',
+    'benin city',
+    'kaduna',
+    'maiduguri',
+    'zaria',
+    'abuja',
+    'jos',
+    'ilorin',
+    'oyo',
+    'enugu',
+    'calabar',
+    'katsina',
+    'akure',
+    'sokoto',
+    'minna',
+    'bauchi',
+    'yola',
+    'jalingo',
+    'damaturu',
+    'gombe',
+    'birnin kebbi',
+    'dutse',
+    'gusau',
+    'lafia',
+    'markurdi',
+    'jalingo',
+    'yobe',
+    'kebbi',
+    'kogi',
+    'kwara',
+    'nasarawa',
+    'niger',
+    'plateau',
+    'taraba',
+    'zamfara',
+    'abia',
+    'adamawa',
+    'akwa ibom',
+    'anambra',
+    'bayelsa',
+    'cross river',
+    'delta',
+    'ebonyi',
+    'edo',
+    'ekiti',
+    'imo',
+    'jigawa',
+    'kaduna',
+    'katsina',
+    'kebbi',
+    'kogi',
+    'kwara',
+    'nasarawa',
+    'niger',
+    'ogun',
+    'ondo',
+    'osun',
+    'oyo',
+    'plateau',
+    'rivers',
+    'sokoto',
+    'taraba',
+    'yobe',
+    'zamfara',
+  ];
+
+  // Lagos areas
+  private readonly lagosAreas = [
+    'victoria island',
+    'lekki',
+    'ajah',
+    'ikoyi',
+    'surulere',
+    'yaba',
+    'ikeja',
+    'oshodi',
+    'alimosho',
+    'agege',
+    'ifako-ijaiye',
+    'kosofe',
+    'mushin',
+    'oshodi-isolo',
+    'somolu',
+    'mainland',
+    'island',
+    'lagos island',
+    'lagos mainland',
+    'apapa',
+    'amowo-odofin',
+    'badagry',
+    'epe',
+    'ibeju-lekki',
+    'ikorodu',
+    'oshodi',
+    'shomolu',
+    'surulere',
+  ];
 
   constructor(private readonly configService?: ConfigService) {}
 
@@ -205,5 +310,61 @@ export class LocationProcessorService {
    */
   getDefaultRadius(): number {
     return this.defaultRadius;
+  }
+
+  /**
+   * Check if a location is a known Nigerian city
+   */
+  isNigerianCity(location: string): boolean {
+    return this.nigerianCities.includes(location.toLowerCase());
+  }
+
+  /**
+   * Check if a location is a known Lagos area
+   */
+  isLagosArea(location: string): boolean {
+    return this.lagosAreas.includes(location.toLowerCase());
+  }
+
+  /**
+   * Get location type based on the location name
+   */
+  getLocationType(location: string): 'nigerian_city' | 'lagos_area' | 'general_area' | 'unknown' {
+    const normalizedLocation = location.toLowerCase();
+
+    if (this.isLagosArea(normalizedLocation)) {
+      return 'lagos_area';
+    }
+
+    if (this.isNigerianCity(normalizedLocation)) {
+      return 'nigerian_city';
+    }
+
+    // Check for common area indicators
+    if (
+      normalizedLocation.includes('street') ||
+      normalizedLocation.includes('road') ||
+      normalizedLocation.includes('avenue') ||
+      normalizedLocation.includes('close') ||
+      normalizedLocation.includes('drive')
+    ) {
+      return 'general_area';
+    }
+
+    return 'unknown';
+  }
+
+  /**
+   * Extract distance information from query
+   */
+  extractDistance(query: string): { distance: number; unit: string } | null {
+    const distanceMatch = query.match(this.locationPatterns.distance);
+    if (distanceMatch) {
+      return {
+        distance: parseInt(distanceMatch[1], 10),
+        unit: distanceMatch[2],
+      };
+    }
+    return null;
   }
 }

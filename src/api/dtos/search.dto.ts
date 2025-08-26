@@ -272,6 +272,16 @@ export class SearchQueryDto {
   @IsArray()
   @IsOptional()
   facets?: string[];
+
+  @ApiProperty({
+    name: 'userLocation',
+    example: { lat: 6.5244, lng: 3.3792 },
+    description: 'User location coordinates for geographic filtering',
+    required: false,
+  })
+  @IsOptional()
+  @IsObject()
+  userLocation?: { lat: number; lng: number };
 }
 
 export class SearchResponseDto {

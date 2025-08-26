@@ -106,7 +106,6 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
     searchQuery: SearchQueryDto,
   ): Promise<{ data: any; metrics: SearchMetrics }> {
     const startTime = Date.now();
-    console.log(`[PROFILE] PostgreSQL search started`);
 
     const metrics: SearchMetrics = {
       queryParsing: 0,
@@ -119,35 +118,27 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
 
     try {
       // Check Redis cache first (primary cache)
-      const cacheStart = Date.now();
       const cacheKey = this.redisCache.generateKey(indexName, searchQuery);
       const cachedResult = await this.redisCache.get(cacheKey);
-      console.log(`[PROFILE] Redis cache check took: ${Date.now() - cacheStart}ms`);
 
       if (cachedResult) {
         metrics.execution = Date.now() - startTime;
         metrics.total = metrics.execution;
-        console.log(`[PROFILE] Redis cache hit, returning in: ${metrics.execution}ms`);
         return { data: cachedResult, metrics };
       }
 
       // Fallback to in-memory cache
-      const memoryCacheStart = Date.now();
       const memoryCacheKey = this.optimizedCache.generateKey(indexName, searchQuery);
       const memoryCachedResult = this.optimizedCache.get(memoryCacheKey);
-      console.log(`[PROFILE] Memory cache check took: ${Date.now() - memoryCacheStart}ms`);
 
       if (memoryCachedResult) {
         metrics.execution = Date.now() - startTime;
         metrics.total = metrics.execution;
-        console.log(`[PROFILE] Memory cache hit, returning in: ${metrics.execution}ms`);
         return { data: memoryCachedResult, metrics };
       }
 
       // Execute standard search
-      const searchStart = Date.now();
       const searchResult = await this.executeStandardSearch(indexName, searchQuery);
-      console.log(`[PROFILE] Execute standard search took: ${Date.now() - searchStart}ms`);
 
       // Cache results in both Redis and memory
       const cacheSetStart = Date.now();
@@ -159,12 +150,6 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
 
       // Cache in memory (fallback)
       this.optimizedCache.set(memoryCacheKey, searchResult.data);
-
-      console.log(
-        `[PROFILE] Cache set took: ${
-          Date.now() - cacheSetStart
-        }ms (Redis TTL: ${ttl}s, Popular: ${isPopularQuery})`,
-      );
 
       metrics.execution = Date.now() - startTime;
       metrics.total = metrics.execution;
@@ -856,76 +841,38 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
     searchQuery: SearchQueryDto,
   ): Promise<any> {
     const startTime = Date.now();
-    console.log(`[PROFILE] executeStandardSearch started`);
 
-    const extractStart = Date.now();
     const searchTerm = this.extractSearchTerm(searchQuery);
-    console.log(
-      `[PROFILE] Extract search term took: ${Date.now() - extractStart}ms, term: ${searchTerm}`,
-    );
 
     const size = Math.min(searchQuery.size || 10, 100); // Cap at 100
     const from = searchQuery.from || 0;
 
     try {
-      // Build optimized query with parallel execution hints
+      // Build optimized single query with window function for count
       const buildQueryStart = Date.now();
-      const mainQuery = this.buildOptimizedSearchQuery(
+      const { sql, params } = this.buildOptimizedSingleQuery(
         indexName,
         searchTerm,
         size,
         from,
         searchQuery.filter,
       );
-      console.log(`[PROFILE] Build main query took: ${Date.now() - buildQueryStart}ms`);
 
-      // Build count query
-      const buildCountStart = Date.now();
-      const countQuery = this.buildCountQuery(indexName, searchTerm, searchQuery.filter);
-      console.log(`[PROFILE] Build count query took: ${Date.now() - buildCountStart}ms`);
+      // Execute single optimized query
+      const results = await this.dataSource.query(sql, params);
 
-      // Build parameters array based on query type
-      const paramStart = Date.now();
-      let params: any[];
-      let countParams: any[];
-
-      if (searchTerm === '*' || searchTerm === '') {
-        // Match_all query - only needs index, size, from
-        params = [indexName, size, from];
-        countParams = [indexName];
-      } else if (searchTerm.includes('*') || searchTerm.includes('?')) {
-        // Wildcard query - needs pattern, index, size, from
-        const pattern = searchTerm.replace(/\*/g, '%').replace(/\?/g, '_');
-        params = [pattern, indexName, size, from];
-        countParams = [indexName, pattern];
-      } else {
-        // Regular text query - needs search term, index, size, from
-        params = [searchTerm, indexName, size, from];
-        countParams = [indexName, searchTerm];
-      }
-      console.log(`[PROFILE] Build parameters took: ${Date.now() - paramStart}ms`);
-
-      // Execute queries in parallel
-      const queryStart = Date.now();
-      const [results, countResult] = await Promise.all([
-        this.dataSource.query(mainQuery, params),
-        this.dataSource.query(countQuery, countParams),
-      ]);
-      console.log(`[PROFILE] Execute parallel queries took: ${Date.now() - queryStart}ms`);
-
-      const processStart = Date.now();
-      const total = parseInt(countResult[0]?.total || '0');
+      const total = results.length > 0 ? parseInt(results[0]?.total_count || '0') : 0;
 
       const responseData = {
         data: {
           hits: results.map((row: any) => ({
             id: row.document_id,
             index: indexName,
-            score: row.rank,
+            score: row.rank || 1.0,
             source: row.content,
           })),
           total: total.toString(),
-          maxScore: results.length > 0 ? Math.max(...results.map((r: any) => r.rank)) : 0,
+          maxScore: results.length > 0 ? Math.max(...results.map((r: any) => r.rank || 1.0)) : 0,
         },
         pagination: {
           currentPage: Math.floor(from / size) + 1,
@@ -935,10 +882,8 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
           hasPrevious: from > 0,
           totalResults: total.toString(),
         },
-        took: Date.now() - Date.now(), // Will be calculated by caller
+        took: Date.now() - startTime,
       };
-      console.log(`[PROFILE] Process results took: ${Date.now() - processStart}ms`);
-      console.log(`[PROFILE] executeStandardSearch total: ${Date.now() - startTime}ms`);
 
       return responseData;
     } catch (error) {
@@ -950,194 +895,46 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
   }
 
   /**
-   * Extract search term from query - simplified for maximum performance
+   * Build optimized single query with window function for count
    */
-  private extractSearchTerm(query: SearchQueryDto): string {
-    // For simple string queries, just return the query
-    if (typeof query.query === 'string') {
-      return query.query;
-    }
-
-    // For object queries, try to extract the value quickly
-    if (query.query && typeof query.query === 'object') {
-      const queryObj = query.query as any;
-
-      // Handle match query
-      if (queryObj.match) {
-        if (typeof queryObj.match === 'string') {
-          return queryObj.match;
-        }
-        if (queryObj.match.value !== undefined) {
-          return queryObj.match.value;
-        }
-        if (queryObj.match.query !== undefined) {
-          return queryObj.match.query;
-        }
-        return '';
-      }
-
-      // Handle match_all query
-      if (queryObj.match_all !== undefined) {
-        return '*';
-      }
-
-      // Handle wildcard query
-      if (queryObj.wildcard) {
-        if (typeof queryObj.wildcard === 'string') {
-          return queryObj.wildcard;
-        }
-        if (queryObj.wildcard.value !== undefined) {
-          return queryObj.wildcard.value;
-        }
-        // Handle field-specific wildcard format: { "title": { "value": "smart*" } }
-        const entries = Object.entries(queryObj.wildcard);
-        if (entries.length > 0) {
-          const [field, config] = entries[0];
-          if (typeof config === 'string') {
-            return config;
-          }
-          if (typeof config === 'object' && config && 'value' in config) {
-            return (config as any).value;
-          }
-        }
-        return '';
-      }
-
-      // Handle term query
-      if (queryObj.term) {
-        if (typeof queryObj.term === 'string') {
-          return queryObj.term;
-        }
-        if (queryObj.term.value !== undefined) {
-          return queryObj.term.value;
-        }
-        // Handle field-specific term format: { "title": "value" }
-        const entries = Object.entries(queryObj.term);
-        if (entries.length > 0) {
-          const [field, value] = entries[0];
-          return typeof value === 'string' ? value : '';
-        }
-        return '';
-      }
-    }
-
-    return '';
-  }
-
-  /**
-   * Normalize search query by stripping wildcard characters for maximum efficiency
-   * This converts all queries to simple text search while maintaining functionality
-   */
-  private normalizeSearchQuery(searchTerm: string): string {
-    if (!searchTerm) return '';
-
-    // Strip all wildcard characters (* and ?) and trim
-    const normalized = searchTerm.replace(/[\*\?]/g, '').trim();
-
-    // If we end up with empty string, return original
-    return normalized || searchTerm;
-  }
-
-  /**
-   * Determine if query should use simple text search or full-text search
-   * Simple text search is much faster for single words and basic queries
-   */
-  private shouldUseSimpleTextSearch(searchTerm: string): boolean {
-    if (!searchTerm || searchTerm === '*' || searchTerm === '') return false;
-
-    // Use simple text search for:
-    // 1. Single words (no spaces)
-    // 2. Short multi-word queries (2-3 words) - faster than full-text search
-    // 3. No special characters (except basic punctuation)
-    // 4. Short queries (less than 50 characters)
-
-    const hasMultipleWords = searchTerm.includes(' ');
-    const hasSpecialChars = /[^\w\s\-\.]/.test(searchTerm);
-    const isShortQuery = searchTerm.length < 50;
-    const wordCount = searchTerm.split(/\s+/).length;
-
-    // Use simple text search for single words OR short multi-word queries (2-3 words)
-    return (!hasMultipleWords || wordCount <= 3) && !hasSpecialChars && isShortQuery;
-  }
-
-  /**
-   * Extract search term from parsed query object
-   */
-  private extractTermFromParsedQuery(query: any): string {
-    if (typeof query === 'string') {
-      return query;
-    }
-
-    // Handle match query
-    if (query.type === 'term') {
-      return query.value || '';
-    }
-
-    // Handle wildcard query
-    if (query.type === 'wildcard') {
-      return query.value || query.pattern || '';
-    }
-
-    // Handle match_all query
-    if (query.type === 'match_all') {
-      return '*';
-    }
-
-    // Handle boolean query
-    if (query.type === 'boolean' && query.clauses) {
-      return query.clauses.map((clause: any) => this.extractTermFromParsedQuery(clause)).join(' ');
-    }
-
-    // Handle phrase query
-    if (query.type === 'phrase' && query.terms) {
-      return query.terms.join(' ');
-    }
-
-    return '';
-  }
-
-  /**
-   * Build optimized search query with proper filter handling
-   */
-  private buildOptimizedSearchQuery(
+  private buildOptimizedSingleQuery(
     indexName: string,
     searchTerm: string,
     size: number,
     from: number,
     filter?: any,
-  ): string {
-    // Normalize search term by stripping wildcard characters for maximum efficiency
+  ): { sql: string; params: any[] } {
+    // Normalize search term
     const normalizedTerm = this.normalizeSearchQuery(searchTerm);
-
-    // Build filter conditions properly
     const filterConditions = this.buildFilterConditions(filter);
 
-    // Handle match_all queries (when searchTerm is '*' or empty)
+    // Handle match_all queries
     if (normalizedTerm === '*' || normalizedTerm === '') {
-      return `
+      const sql = `
         SELECT
           document_id,
           content,
           metadata,
-          field_weights,
-          1.0 as rank
+          1.0 as rank,
+          COUNT(*) OVER() as total_count
         FROM documents
         WHERE index_name = $1
           ${filterConditions ? `AND ${filterConditions}` : ''}
         ORDER BY document_id
         LIMIT $2 OFFSET $3
       `;
+      return { sql, params: [indexName, size, from] };
     }
 
-    // Use optimized full-text search for basic queries (much faster than ILIKE)
+    // Use optimized full-text search for basic queries
     if (this.shouldUseSimpleTextSearch(normalizedTerm)) {
-      return `
+      const sql = `
         SELECT
           document_id,
           content,
           metadata,
-          field_weights,
-          1.0 as rank
+          1.0 as rank,
+          COUNT(*) OVER() as total_count
         FROM documents
         WHERE index_name = $2
           AND search_vector IS NOT NULL
@@ -1146,16 +943,17 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
         ORDER BY document_id
         LIMIT $3 OFFSET $4
       `;
+      return { sql, params: [normalizedTerm, indexName, size, from] };
     }
 
-    // Use full-text search for complex queries (multiple words, special characters)
-    return `
+    // Use full-text search for complex queries with ranking
+    const sql = `
       SELECT
         document_id,
         content,
         metadata,
-        field_weights,
-        ts_rank_cd(COALESCE(materialized_vector, search_vector), plainto_tsquery('english', $1)) as rank
+        ts_rank_cd(COALESCE(materialized_vector, search_vector), plainto_tsquery('english', $1)) as rank,
+        COUNT(*) OVER() as total_count
       FROM documents
       WHERE index_name = $2
         AND search_vector IS NOT NULL
@@ -1164,6 +962,7 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
       ORDER BY rank DESC, document_id
       LIMIT $3 OFFSET $4
     `;
+    return { sql, params: [normalizedTerm, indexName, size, from] };
   }
 
   /**
@@ -1340,5 +1139,114 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
     });
 
     return textParts.join(' ');
+  }
+
+  /**
+   * Extract search term from query - simplified for maximum performance
+   */
+  private extractSearchTerm(query: SearchQueryDto): string {
+    // For simple string queries, just return the query
+    if (typeof query.query === 'string') {
+      return query.query;
+    }
+
+    // For object queries, try to extract the value quickly
+    if (query.query && typeof query.query === 'object') {
+      const queryObj = query.query as any;
+
+      // Handle match query
+      if (queryObj.match) {
+        if (typeof queryObj.match === 'string') {
+          return queryObj.match;
+        }
+        if (queryObj.match.value !== undefined) {
+          return queryObj.match.value;
+        }
+        if (queryObj.match.query !== undefined) {
+          return queryObj.match.query;
+        }
+        return '';
+      }
+
+      // Handle match_all query
+      if (queryObj.match_all !== undefined) {
+        return '*';
+      }
+
+      // Handle wildcard query
+      if (queryObj.wildcard) {
+        if (typeof queryObj.wildcard === 'string') {
+          return queryObj.wildcard;
+        }
+        if (queryObj.wildcard.value !== undefined) {
+          return queryObj.wildcard.value;
+        }
+        // Handle field-specific wildcard format: { "title": { "value": "smart*" } }
+        const entries = Object.entries(queryObj.wildcard);
+        if (entries.length > 0) {
+          const [field, config] = entries[0];
+          if (typeof config === 'string') {
+            return config;
+          }
+          if (typeof config === 'object' && config && 'value' in config) {
+            return (config as any).value;
+          }
+        }
+        return '';
+      }
+
+      // Handle term query
+      if (queryObj.term) {
+        if (typeof queryObj.term === 'string') {
+          return queryObj.term;
+        }
+        if (queryObj.term.value !== undefined) {
+          return queryObj.term.value;
+        }
+        // Handle field-specific term format: { "title": "value" }
+        const entries = Object.entries(queryObj.term);
+        if (entries.length > 0) {
+          const [field, value] = entries[0];
+          return typeof value === 'string' ? value : '';
+        }
+        return '';
+      }
+    }
+
+    return '';
+  }
+
+  /**
+   * Normalize search query by stripping wildcard characters for maximum efficiency
+   */
+  private normalizeSearchQuery(searchTerm: string): string {
+    if (!searchTerm) return '';
+
+    // Strip all wildcard characters (* and ?) and trim
+    const normalized = searchTerm.replace(/[\*\?]/g, '').trim();
+
+    // If we end up with empty string, return original
+    return normalized || searchTerm;
+  }
+
+  /**
+   * Determine if query should use simple text search or full-text search
+   */
+  private shouldUseSimpleTextSearch(searchTerm: string): boolean {
+    if (!searchTerm || searchTerm === '*' || searchTerm === '') return false;
+
+    // Use simple text search for:
+    // 1. Single words (no spaces)
+    // 2. Short multi-word queries (2-3 words) - faster than full-text search
+    // 3. No special characters (except basic punctuation)
+    // 4. Short queries (less than 50 characters)
+
+    const hasMultipleWords = searchTerm.includes(' ');
+    const hasSpecialChars = /[^\w\s\-\.]/.test(searchTerm);
+    const isShortQuery = searchTerm.length < 50;
+    const wordCount = searchTerm.split(/\s+/).length;
+
+    // Use simple text search for single words OR short multi-word queries (2-3 words)
+    return (!hasMultipleWords || wordCount <= 3) && !hasSpecialChars && isShortQuery;
   }
 }

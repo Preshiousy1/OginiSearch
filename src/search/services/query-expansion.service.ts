@@ -45,50 +45,56 @@ export class QueryExpansionService {
    * Expand query with synonyms and related terms
    */
   async expandQuery(
-    originalQuery: string,
+    query: string,
     businessTypes: string[],
     services: string[],
   ): Promise<QueryExpansionResult> {
-    const normalizedQuery = this.normalizeQuery(originalQuery);
-    const expandedTerms: string[] = [];
-    const synonyms: string[] = [];
-    const relatedTerms: string[] = [];
+    const original = query;
+    let expanded = query;
 
-    // Add original query terms
-    const originalTerms = normalizedQuery.split(/\s+/).filter(term => term.length > 0);
-    expandedTerms.push(...originalTerms);
+    try {
+      // Limit expansion to prevent query bloat
+      const maxSynonyms = 2; // Reduced from 3
+      const maxRelatedTerms = 1; // Reduced from 2
 
-    // Add synonyms for business types
-    for (const businessType of businessTypes) {
-      const businessSynonyms = this.synonyms.get(businessType) || [];
-      synonyms.push(...businessSynonyms);
-      expandedTerms.push(...businessSynonyms);
+      // Add business type synonyms (limited)
+      if (businessTypes.length > 0) {
+        const synonyms = this.getBusinessTypeSynonyms(businessTypes[0]); // Only use first business type
+        const limitedSynonyms = synonyms.slice(0, maxSynonyms);
+        if (limitedSynonyms.length > 0) {
+          expanded += ' ' + limitedSynonyms.join(' ');
+        }
+      }
+
+      // Add service synonyms (limited) - only if not already in business types
+      if (services.length > 0 && !businessTypes.includes(services[0])) {
+        const serviceSynonyms = this.getServiceSynonyms(services[0]); // Only use first service
+        const limitedServiceSynonyms = serviceSynonyms.slice(0, maxRelatedTerms);
+        if (limitedServiceSynonyms.length > 0) {
+          expanded += ' ' + limitedServiceSynonyms.join(' ');
+        }
+      }
+
+      // Remove duplicate terms and clean up
+      const terms = expanded.split(/\s+/);
+      const uniqueTerms = [...new Set(terms)];
+      expanded = uniqueTerms.join(' ');
+
+      return {
+        original,
+        expanded: expanded.trim(),
+        synonyms: businessTypes,
+        relatedTerms: services,
+      };
+    } catch (error) {
+      this.logger.warn(`Query expansion failed: ${error.message}`);
+      return {
+        original,
+        expanded: original,
+        synonyms: [],
+        relatedTerms: [],
+      };
     }
-
-    // Add synonyms for services
-    for (const service of services) {
-      const serviceSynonyms = this.synonyms.get(service) || [];
-      synonyms.push(...serviceSynonyms);
-      expandedTerms.push(...serviceSynonyms);
-    }
-
-    // Add related terms for specific keywords
-    for (const term of originalTerms) {
-      const related = this.relatedTerms.get(term) || [];
-      relatedTerms.push(...related);
-      expandedTerms.push(...related);
-    }
-
-    // Remove duplicates and create expanded query
-    const uniqueExpandedTerms = [...new Set(expandedTerms)];
-    const expandedQuery = uniqueExpandedTerms.join(' ');
-
-    return {
-      original: originalQuery,
-      expanded: expandedQuery,
-      synonyms: [...new Set(synonyms)],
-      relatedTerms: [...new Set(relatedTerms)],
-    };
   }
 
   /**
@@ -120,7 +126,36 @@ export class QueryExpansionService {
   }
 
   /**
-   * Normalize query for consistent processing
+   * Get business type synonyms
+   */
+  private getBusinessTypeSynonyms(businessType: string): string[] {
+    return this.synonyms.get(businessType) || [];
+  }
+
+  /**
+   * Get service synonyms
+   */
+  private getServiceSynonyms(service: string): string[] {
+    return this.synonyms.get(service) || [];
+  }
+
+  /**
+   * Get query synonyms
+   */
+  private getQuerySynonyms(query: string): string[] {
+    const terms = query.toLowerCase().split(/\s+/);
+    const synonyms: string[] = [];
+
+    for (const term of terms) {
+      const termSynonyms = this.synonyms.get(term) || [];
+      synonyms.push(...termSynonyms);
+    }
+
+    return [...new Set(synonyms)]; // Remove duplicates
+  }
+
+  /**
+   * Normalize query for processing
    */
   private normalizeQuery(query: string): string {
     if (!query) return '';

@@ -8,14 +8,105 @@ export class EntityExtractionService {
 
   // Business-specific entity mappings
   private readonly businessTypes = new Map<string, string[]>([
-    ['restaurant', ['food', 'dining', 'eatery', 'cafe', 'bistro', 'pub', 'bar', 'grill']],
-    ['hotel', ['accommodation', 'lodging', 'guesthouse', 'inn', 'resort', 'motel']],
-    ['clinic', ['hospital', 'medical', 'healthcare', 'doctor', 'pharmacy', 'dental']],
-    ['shop', ['store', 'retail', 'market', 'mall', 'supermarket', 'grocery']],
-    ['bank', ['financial', 'credit union', 'atm', 'money', 'finance']],
-    ['school', ['education', 'university', 'college', 'academy', 'institute']],
-    ['gym', ['fitness', 'workout', 'exercise', 'sports', 'training']],
-    ['salon', ['beauty', 'hair', 'spa', 'cosmetics', 'styling']],
+    // Food & Dining
+    [
+      'restaurant',
+      ['food', 'dining', 'eatery', 'cafe', 'bistro', 'pub', 'bar', 'grill', 'kitchen'],
+    ],
+    ['cafe', ['coffee', 'tea', 'beverage', 'breakfast', 'cafe', 'coffee shop']],
+    ['pizza', ['pizza', 'italian', 'delivery', 'takeout']],
+    ['fast food', ['fast food', 'quick food', 'takeaway', 'takeout', 'fast']],
+
+    // Accommodation
+    ['hotel', ['accommodation', 'lodging', 'guesthouse', 'inn', 'resort', 'motel', 'hostel']],
+    ['resort', ['resort', 'vacation', 'holiday', 'beach resort', 'mountain resort']],
+    ['guesthouse', ['guesthouse', 'bed and breakfast', 'bnb', 'inn']],
+
+    // Healthcare
+    ['clinic', ['hospital', 'medical', 'healthcare', 'doctor', 'pharmacy', 'dental', 'clinic']],
+    ['hospital', ['hospital', 'medical center', 'healthcare', 'emergency']],
+    ['pharmacy', ['pharmacy', 'drugstore', 'chemist', 'medical store']],
+    ['dental', ['dental', 'dentist', 'oral health', 'teeth']],
+    ['laboratory', ['lab', 'laboratory', 'testing', 'diagnostic']],
+
+    // Retail & Shopping
+    ['shop', ['store', 'retail', 'market', 'mall', 'supermarket', 'grocery', 'shop']],
+    ['supermarket', ['supermarket', 'grocery', 'food store', 'market']],
+    ['mall', ['mall', 'shopping center', 'plaza', 'shopping mall']],
+    ['electronics', ['electronics', 'tech', 'computer', 'phone', 'gadget']],
+    ['fashion', ['fashion', 'clothing', 'apparel', 'style', 'wear']],
+
+    // Financial Services
+    ['bank', ['financial', 'credit union', 'atm', 'money', 'finance', 'banking']],
+    ['atm', ['atm', 'cash machine', 'money machine', 'bank machine']],
+    ['insurance', ['insurance', 'coverage', 'policy', 'protection']],
+
+    // Education
+    ['school', ['education', 'university', 'college', 'academy', 'institute', 'school']],
+    ['university', ['university', 'college', 'higher education', 'campus']],
+    ['training', ['training', 'course', 'workshop', 'learning', 'education']],
+
+    // Fitness & Sports
+    ['gym', ['fitness', 'workout', 'exercise', 'sports', 'training', 'gym']],
+    ['fitness', ['fitness', 'workout', 'exercise', 'training', 'gym']],
+    ['sports', ['sports', 'athletic', 'fitness', 'training']],
+    ['swimming', ['swimming', 'pool', 'aquatic', 'water sports']],
+
+    // Beauty & Personal Care
+    ['salon', ['beauty', 'hair', 'spa', 'cosmetics', 'styling', 'salon']],
+    ['spa', ['spa', 'wellness', 'relaxation', 'massage', 'beauty']],
+    ['barber', ['barber', 'haircut', 'grooming', "men's hair"]],
+    ['nail', ['nail', 'manicure', 'pedicure', 'nail art']],
+
+    // Automotive
+    ['car', ['car', 'automotive', 'vehicle', 'auto', 'motor']],
+    ['mechanic', ['mechanic', 'auto repair', 'car service', 'automotive']],
+    ['gas station', ['gas', 'fuel', 'petrol', 'gas station', 'filling station']],
+
+    // Professional Services
+    ['lawyer', ['lawyer', 'attorney', 'legal', 'law', 'advocate']],
+    ['accountant', ['accountant', 'accounting', 'tax', 'financial advisor']],
+    ['consultant', ['consultant', 'consulting', 'advisor', 'expert']],
+
+    // Technology
+    ['software', ['software', 'tech', 'technology', 'digital', 'app']],
+    ['web design', ['web design', 'website', 'digital', 'online']],
+    ['it', ['it', 'technology', 'computer', 'tech', 'information technology']],
+
+    // Real Estate
+    ['real estate', ['real estate', 'property', 'housing', 'realty']],
+    ['agent', ['agent', 'broker', 'real estate', 'property']],
+
+    // Entertainment
+    ['cinema', ['cinema', 'movie', 'theater', 'film', 'entertainment']],
+    ['club', ['club', 'nightclub', 'entertainment', 'party']],
+    ['gaming', ['gaming', 'game', 'arcade', 'entertainment']],
+
+    // Transportation
+    ['taxi', ['taxi', 'cab', 'transport', 'ride', 'car service']],
+    ['bus', ['bus', 'transport', 'public transport', 'transit']],
+    ['airport', ['airport', 'air travel', 'flight', 'aviation']],
+
+    // Home Services
+    ['plumber', ['plumber', 'plumbing', 'pipe', 'water']],
+    ['electrician', ['electrician', 'electrical', 'power', 'wiring']],
+    ['cleaner', ['cleaner', 'cleaning', 'housekeeping', 'janitorial']],
+    ['security', ['security', 'guard', 'protection', 'safety']],
+
+    // Events & Venues
+    ['venue', ['venue', 'event', 'hall', 'space', 'facility']],
+    ['wedding', ['wedding', 'marriage', 'ceremony', 'reception']],
+    ['conference', ['conference', 'meeting', 'event', 'business']],
+
+    // Religious
+    ['church', ['church', 'religious', 'worship', 'faith']],
+    ['mosque', ['mosque', 'islamic', 'prayer', 'religious']],
+    ['temple', ['temple', 'religious', 'worship', 'faith']],
+
+    // Government
+    ['government', ['government', 'public', 'official', 'administration']],
+    ['post office', ['post office', 'mail', 'postal', 'shipping']],
+    ['police', ['police', 'law enforcement', 'security', 'authority']],
   ]);
 
   private readonly locationKeywords = [
