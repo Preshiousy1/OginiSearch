@@ -5,6 +5,7 @@ import { SearchController } from './controllers/search.controller';
 // import { StreamingSearchController } from './controllers/streaming-search.controller';
 import { BulkIndexingController } from './controllers/bulk-indexing.controller';
 import { WorkerManagementController } from './controllers/worker-management.controller';
+import { IntelligentSearchController } from './controllers/intelligent-search.controller';
 import { WorkerManagementService } from './services/worker-management.service';
 import { MetricsController } from './controllers/metrics.controller';
 import { DebugController } from './controllers/debug.controller';
@@ -39,6 +40,7 @@ import { BullModule } from '@nestjs/bull';
     // StreamingSearchController,
     BulkIndexingController,
     WorkerManagementController,
+    IntelligentSearchController,
     MetricsController,
     DebugController,
   ],

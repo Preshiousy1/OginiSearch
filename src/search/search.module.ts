@@ -1,24 +1,30 @@
-import { forwardRef, Module } from '@nestjs/common';
+import { Module } from '@nestjs/common';
 import { SearchService } from './search.service';
 import { QueryProcessorService } from './query-processor.service';
 import { TypoToleranceService } from './typo-tolerance.service';
-import { PostgreSQLFuzzySearch } from '../storage/postgresql/postgresql-fuzzy-search';
-import { SchemaModule } from '../schema/schema.module';
-import { StorageModule } from '../storage/storage.module';
-import { IndexModule } from '../index/index.module';
+import { EntityExtractionService } from './services/entity-extraction.service';
+import { LocationProcessorService } from './services/location-processor.service';
+import { QueryExpansionService } from './services/query-expansion.service';
 import { AnalysisModule } from '../analysis/analysis.module';
-import { PostgreSQLModule } from 'src/storage/postgresql/postgresql.module';
-import { SearchEngineModule } from 'src/search-engine/search-engine.module';
+import { PostgreSQLModule } from '../storage/postgresql/postgresql.module';
 
 @Module({
-  imports: [
-    SchemaModule,
-    StorageModule,
-    forwardRef(() => IndexModule),
-    AnalysisModule,
-    forwardRef(() => SearchEngineModule),
+  imports: [AnalysisModule, PostgreSQLModule],
+  providers: [
+    SearchService,
+    QueryProcessorService,
+    TypoToleranceService,
+    EntityExtractionService,
+    LocationProcessorService,
+    QueryExpansionService,
   ],
-  providers: [SearchService, QueryProcessorService, TypoToleranceService, PostgreSQLFuzzySearch],
-  exports: [SearchService, QueryProcessorService, TypoToleranceService, PostgreSQLFuzzySearch],
+  exports: [
+    SearchService,
+    QueryProcessorService,
+    TypoToleranceService,
+    EntityExtractionService,
+    LocationProcessorService,
+    QueryExpansionService,
+  ],
 })
 export class SearchModule {}
