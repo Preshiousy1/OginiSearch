@@ -56,11 +56,9 @@ CREATE TABLE IF NOT EXISTS documents (
 );
 
 -- Step 5: Create optimized indexes from the start
-CREATE INDEX IF NOT EXISTS idx_documents_search_vector ON documents USING GIN (search_vector)
-WITH (fastupdate = off);
-
-CREATE INDEX IF NOT EXISTS idx_documents_materialized_vector ON documents USING GIN (materialized_vector)
-WITH (fastupdate = off);
+-- REMOVED: Old indexes that cause performance issues and conflicts
+-- CREATE INDEX IF NOT EXISTS idx_documents_search_vector ON documents USING GIN (search_vector) WITH (fastupdate = off);
+-- CREATE INDEX IF NOT EXISTS idx_documents_materialized_vector ON documents USING GIN (materialized_vector) WITH (fastupdate = off);
 
 -- Removed field_weights index that can cause size issues
 -- CREATE INDEX IF NOT EXISTS idx_documents_field_weights ON documents USING GIN (field_weights jsonb_path_ops);
@@ -69,7 +67,7 @@ CREATE INDEX IF NOT EXISTS idx_documents_metadata ON documents USING GIN (metada
 
 CREATE INDEX IF NOT EXISTS idx_documents_content ON documents USING GIN (content);
 
--- Removed problematic covering index that causes index size limit errors
+-- REMOVED: Problematic covering index that causes index size limit errors
 -- CREATE INDEX IF NOT EXISTS idx_documents_search_covering ON documents (index_name, document_id) INCLUDE (
 --     content,
 --     metadata,
@@ -78,45 +76,45 @@ CREATE INDEX IF NOT EXISTS idx_documents_content ON documents USING GIN (content
 --     materialized_vector
 -- );
 
-CREATE INDEX IF NOT EXISTS idx_documents_composite_search ON documents (index_name)
+-- REMOVED: Old duplicate indexes that cause performance issues
+-- CREATE INDEX IF NOT EXISTS idx_documents_composite_search ON documents (index_name) WHERE search_vector IS NOT NULL;
+-- CREATE INDEX IF NOT EXISTS idx_documents_index_name ON documents (index_name);
+-- CREATE INDEX IF NOT EXISTS idx_documents_search_vector_optimized ON documents USING GIN (search_vector) WITH (fastupdate = off);
+-- CREATE INDEX IF NOT EXISTS idx_documents_materialized_vector_optimized ON documents USING GIN (materialized_vector) WITH (fastupdate = off);
+-- CREATE INDEX IF NOT EXISTS idx_documents_non_empty_search ON documents USING GIN (search_vector) WHERE search_vector IS NOT NULL AND search_vector != to_tsvector ('english', '');
+-- CREATE INDEX IF NOT EXISTS idx_documents_index_name_optimized ON documents (index_name) WHERE search_vector IS NOT NULL;
+-- CREATE INDEX IF NOT EXISTS idx_documents_search_lightweight_safe ON documents (index_name, document_id);
+
+-- Optimized index structure (exactly matching fix script)
+CREATE INDEX IF NOT EXISTS idx_documents_basic_lookup ON documents (index_name, document_id);
+
+CREATE INDEX IF NOT EXISTS idx_documents_search_vector_gin ON documents USING GIN (search_vector)
 WHERE
     search_vector IS NOT NULL;
 
-CREATE INDEX IF NOT EXISTS idx_documents_index_name ON documents (index_name);
+CREATE INDEX IF NOT EXISTS idx_documents_materialized_vector_gin ON documents USING GIN (materialized_vector)
+WHERE
+    materialized_vector IS NOT NULL;
 
--- Add lightweight covering index for common search patterns (without large JSONB fields)
--- REMOVED: This index causes btree size limit errors for large documents
--- CREATE INDEX IF NOT EXISTS idx_documents_search_lightweight ON documents (index_name, document_id) INCLUDE (
+CREATE INDEX IF NOT EXISTS idx_documents_index_name_filter ON documents (index_name)
+WHERE
+    search_vector IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_documents_document_id_lookup ON documents (document_id);
+
+CREATE INDEX IF NOT EXISTS idx_documents_search_pattern ON documents (
+    index_name,
+    document_id,
+    created_at
+)
+WHERE
+    search_vector IS NOT NULL;
+
+-- REMOVED: Problematic covering index that causes btree size limit errors
+-- CREATE INDEX IF NOT EXISTS idx_documents_search_covering_generic ON documents (index_name, document_id) INCLUDE (
 --     search_vector,
 --     materialized_vector
 -- );
-
--- Add a safer lightweight index without large vector fields
-CREATE INDEX IF NOT EXISTS idx_documents_search_lightweight_safe ON documents (index_name, document_id);
-
--- Add generic performance indexes (field-agnostic)
-CREATE INDEX IF NOT EXISTS idx_documents_search_vector_optimized ON documents USING GIN (search_vector)
-WITH (fastupdate = off);
-
-CREATE INDEX IF NOT EXISTS idx_documents_materialized_vector_optimized ON documents USING GIN (materialized_vector)
-WITH (fastupdate = off);
-
--- Add a generic covering index for common search patterns (without specific fields)
-CREATE INDEX IF NOT EXISTS idx_documents_search_covering_generic ON documents (index_name, document_id) INCLUDE (
-    search_vector,
-    materialized_vector
-);
-
--- Add a partial index for documents with non-empty search vectors (faster queries)
-CREATE INDEX IF NOT EXISTS idx_documents_non_empty_search ON documents USING GIN (search_vector)
-WHERE
-    search_vector IS NOT NULL
-    AND search_vector != to_tsvector ('english', '');
-
--- Add a generic index for index_name lookups (faster filtering)
-CREATE INDEX IF NOT EXISTS idx_documents_index_name_optimized ON documents (index_name)
-WHERE
-    search_vector IS NOT NULL;
 
 -- Add GIN trigram index for wildcard queries (much faster than ILIKE)
 CREATE INDEX IF NOT EXISTS idx_documents_content_trgm 

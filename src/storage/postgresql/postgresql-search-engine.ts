@@ -101,66 +101,66 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
   /**
    * Search documents using PostgreSQL full-text search
    */
-  async search(
-    indexName: string,
-    searchQuery: SearchQueryDto,
-  ): Promise<{ data: any; metrics: SearchMetrics }> {
+  async search(indexName: string, searchQuery: SearchQueryDto): Promise<any> {
     const startTime = Date.now();
 
-    const metrics: SearchMetrics = {
-      queryParsing: 0,
-      execution: 0,
-      highlighting: 0,
-      faceting: 0,
-      total: 0,
-      planStats: null,
-    };
+    const searchTerm = this.extractSearchTerm(searchQuery);
+
+    const size = Math.min(searchQuery.size || 10, 100); // Cap at 100
+    const from = searchQuery.from || 0;
 
     try {
-      // Check Redis cache first (primary cache)
-      const cacheKey = this.redisCache.generateKey(indexName, searchQuery);
-      const cachedResult = await this.redisCache.get(cacheKey);
-
-      if (cachedResult) {
-        metrics.execution = Date.now() - startTime;
-        metrics.total = metrics.execution;
-        return { data: cachedResult, metrics };
-      }
-
-      // Fallback to in-memory cache
-      const memoryCacheKey = this.optimizedCache.generateKey(indexName, searchQuery);
-      const memoryCachedResult = this.optimizedCache.get(memoryCacheKey);
-
-      if (memoryCachedResult) {
-        metrics.execution = Date.now() - startTime;
-        metrics.total = metrics.execution;
-        return { data: memoryCachedResult, metrics };
-      }
-
-      // Execute standard search
-      const searchResult = await this.executeStandardSearch(indexName, searchQuery);
-
-      // Cache results in both Redis and memory
-      const cacheSetStart = Date.now();
-      const isPopularQuery = this.isPopularQuery(searchQuery);
-      const ttl = isPopularQuery ? 600 : 60; // 10 minutes for popular, 1 minute for others
-
-      // Cache in Redis (primary)
-      await this.redisCache.set(cacheKey, searchResult.data, ttl);
-
-      // Cache in memory (fallback)
-      this.optimizedCache.set(memoryCacheKey, searchResult.data);
-
-      metrics.execution = Date.now() - startTime;
-      metrics.total = metrics.execution;
-
-      this.logger.log(
-        `Search completed for index '${indexName}': Found ${searchResult.data.total} results in ${metrics.execution}ms`,
+      // Build optimized data query
+      const { sql: dataSql, params: dataParams } = this.buildOptimizedSingleQuery(
+        indexName,
+        searchTerm,
+        size,
+        from,
+        searchQuery.filter,
       );
 
-      return { data: searchResult.data, metrics };
+      // Build optimized count query
+      const { sql: countSql, params: countParams } = this.buildCountQuery(
+        indexName,
+        searchTerm,
+        searchQuery.filter,
+      );
+
+      // Execute queries in parallel for better performance
+      const [results, countResult] = await Promise.all([
+        this.dataSource.query(dataSql, dataParams),
+        this.dataSource.query(countSql, countParams),
+      ]);
+
+      const total = parseInt(countResult[0]?.total_count || '0');
+
+      const responseData = {
+        data: {
+          hits: results.map((row: any) => ({
+            id: row.document_id,
+            index: indexName,
+            score: row.rank || 1.0,
+            source: row.content,
+          })),
+          total: total.toString(),
+          maxScore: results.length > 0 ? Math.max(...results.map((r: any) => r.rank || 1.0)) : 0,
+        },
+        pagination: {
+          currentPage: Math.floor(from / size) + 1,
+          totalPages: Math.ceil(total / size),
+          pageSize: size,
+          hasNext: from + size < total,
+          hasPrevious: from > 0,
+          totalResults: total.toString(),
+        },
+        took: Date.now() - startTime,
+      };
+
+      return responseData;
     } catch (error) {
-      this.logger.error(`Search failed for index '${indexName}': ${error.message}`);
+      if (error.message.includes('statement_timeout')) {
+        throw new Error('Search query timed out. Please try a more specific search term.');
+      }
       throw error;
     }
   }
@@ -796,102 +796,38 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
     return { sql, params };
   }
 
-  private buildCountQuery(indexName: string, searchTerm: string, filter?: any): string {
-    // Normalize search term by stripping wildcard characters for maximum efficiency
+  /**
+   * Build optimized count query
+   */
+  private buildCountQuery(
+    indexName: string,
+    searchTerm: string,
+    filter?: any,
+  ): { sql: string; params: any[] } {
     const normalizedTerm = this.normalizeSearchQuery(searchTerm);
-
-    // Build filter conditions properly
     const filterConditions = this.buildFilterConditions(filter);
 
     // Handle match_all queries
     if (normalizedTerm === '*' || normalizedTerm === '') {
-      return `
-        SELECT COUNT(*) as total
+      const sql = `
+        SELECT COUNT(*) as total_count
         FROM documents
         WHERE index_name = $1
           ${filterConditions ? `AND ${filterConditions}` : ''}
       `;
+      return { sql, params: [indexName] };
     }
 
-    // Use optimized full-text search for basic queries (much faster than ILIKE)
-    if (this.shouldUseSimpleTextSearch(normalizedTerm)) {
-      return `
-        SELECT COUNT(*) as total
-        FROM documents
-        WHERE index_name = $1
-          AND search_vector IS NOT NULL
-          AND search_vector @@ plainto_tsquery('english', $2)
-          ${filterConditions ? `AND ${filterConditions}` : ''}
-      `;
-    }
-
-    // Use full-text search for complex queries (multiple words, special characters)
-    return `
-      SELECT COUNT(*) as total
+    // Use optimized count for search queries
+    const sql = `
+      SELECT COUNT(*) as total_count
       FROM documents
-      WHERE index_name = $1
+      WHERE index_name = $2
         AND search_vector IS NOT NULL
-        AND COALESCE(materialized_vector, search_vector) @@ plainto_tsquery('english', $2)
+        AND search_vector @@ plainto_tsquery('english', $1)
         ${filterConditions ? `AND ${filterConditions}` : ''}
     `;
-  }
-
-  private async executeStandardSearch(
-    indexName: string,
-    searchQuery: SearchQueryDto,
-  ): Promise<any> {
-    const startTime = Date.now();
-
-    const searchTerm = this.extractSearchTerm(searchQuery);
-
-    const size = Math.min(searchQuery.size || 10, 100); // Cap at 100
-    const from = searchQuery.from || 0;
-
-    try {
-      // Build optimized single query with window function for count
-      const buildQueryStart = Date.now();
-      const { sql, params } = this.buildOptimizedSingleQuery(
-        indexName,
-        searchTerm,
-        size,
-        from,
-        searchQuery.filter,
-      );
-
-      // Execute single optimized query
-      const results = await this.dataSource.query(sql, params);
-
-      const total = results.length > 0 ? parseInt(results[0]?.total_count || '0') : 0;
-
-      const responseData = {
-        data: {
-          hits: results.map((row: any) => ({
-            id: row.document_id,
-            index: indexName,
-            score: row.rank || 1.0,
-            source: row.content,
-          })),
-          total: total.toString(),
-          maxScore: results.length > 0 ? Math.max(...results.map((r: any) => r.rank || 1.0)) : 0,
-        },
-        pagination: {
-          currentPage: Math.floor(from / size) + 1,
-          totalPages: Math.ceil(total / size),
-          pageSize: size,
-          hasNext: from + size < total,
-          hasPrevious: from > 0,
-          totalResults: total.toString(),
-        },
-        took: Date.now() - startTime,
-      };
-
-      return responseData;
-    } catch (error) {
-      if (error.message.includes('statement_timeout')) {
-        throw new Error('Search query timed out. Please try a more specific search term.');
-      }
-      throw error;
-    }
+    return { sql, params: [normalizedTerm, indexName] };
   }
 
   /**
@@ -915,8 +851,7 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
           document_id,
           content,
           metadata,
-          1.0 as rank,
-          COUNT(*) OVER() as total_count
+          1.0 as rank
         FROM documents
         WHERE index_name = $1
           ${filterConditions ? `AND ${filterConditions}` : ''}
@@ -933,8 +868,7 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
           document_id,
           content,
           metadata,
-          1.0 as rank,
-          COUNT(*) OVER() as total_count
+          1.0 as rank
         FROM documents
         WHERE index_name = $2
           AND search_vector IS NOT NULL
@@ -952,8 +886,7 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
         document_id,
         content,
         metadata,
-        ts_rank_cd(COALESCE(materialized_vector, search_vector), plainto_tsquery('english', $1)) as rank,
-        COUNT(*) OVER() as total_count
+        ts_rank_cd(COALESCE(materialized_vector, search_vector), plainto_tsquery('english', $1)) as rank
       FROM documents
       WHERE index_name = $2
         AND search_vector IS NOT NULL

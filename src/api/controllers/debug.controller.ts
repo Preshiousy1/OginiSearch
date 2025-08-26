@@ -1,5 +1,5 @@
 /* eslint-disable @typescript-eslint/no-var-requires */
-import { Controller, Get, Param } from '@nestjs/common';
+import { Controller, Get, Param, Post } from '@nestjs/common';
 import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { DataSource } from 'typeorm';
 
@@ -148,6 +148,35 @@ export class DebugController {
       return {
         status: 'success',
         message: 'Problematic index removed successfully',
+        timestamp: new Date().toISOString(),
+      };
+    } catch (error) {
+      return {
+        status: 'error',
+        error: error.message,
+        timestamp: new Date().toISOString(),
+      };
+    }
+  }
+
+  @Post('fix-index-size-limitation')
+  @ApiOperation({
+    summary: 'Comprehensive PostgreSQL index optimization',
+    description:
+      'Fix index size limitations AND cleanup duplicate indexes for optimal performance. This single endpoint handles both the "index row size exceeds btree version 4 maximum" error and removes conflicting indexes.',
+  })
+  async fixIndexSizeLimitation() {
+    try {
+      const fs = require('fs');
+      const path = require('path');
+      const scriptPath = path.join(process.cwd(), 'scripts', 'fix-index-size-limitation.sql');
+      const script = fs.readFileSync(scriptPath, 'utf8');
+
+      await this.dataSource.query(script);
+
+      return {
+        status: 'success',
+        message: 'Comprehensive index optimization completed successfully',
         timestamp: new Date().toISOString(),
       };
     } catch (error) {
