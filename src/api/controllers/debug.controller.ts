@@ -202,7 +202,11 @@ export class DebugController {
     try {
       const fs = require('fs');
       const path = require('path');
-      const scriptPath = path.join(process.cwd(), 'scripts', 'typo-tolerance-optimization.sql');
+      const scriptPath = path.join(
+        process.cwd(),
+        'scripts',
+        'typo-tolerance-optimization-deployment.sql',
+      );
       const script = fs.readFileSync(scriptPath, 'utf8');
 
       await this.dataSource.query(script);

@@ -18,9 +18,10 @@ curl -X POST http://staging-url/debug/fix-index-size-limitation
 
 ### 2. Setup Typo Tolerance Optimization (CORE OPTIMIZATION)
 ```bash
-curl -X POST http://staging-url/debug/setup-typo-tolerance-optimization
+curl -X POST https://oginisearch-production.up.railway.app/debug/setup-typo-tolerance-optimization
 ```
 **Purpose**: Creates the materialized view (`search_terms`) and database functions for ultra-fast typo tolerance.
+**Expected Result**: `{"status": "success", "statistics": {"total_terms": "600000+", "total_indices": "2"}}`
 
 ### 3. Add Missing Typo Functions (BACKUP FUNCTIONS)
 ```bash
