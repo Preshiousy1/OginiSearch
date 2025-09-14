@@ -25,13 +25,14 @@ curl -X POST https://oginisearch-production.up.railway.app/debug/setup-typo-tole
 
 ### 3. Add Missing Typo Functions (BACKUP FUNCTIONS)
 ```bash
-curl -X POST http://staging-url/debug/add-typo-functions
+curl -X POST https://oginisearch-production.up.railway.app/debug/add-typo-functions
 ```
 **Purpose**: Adds the `fast_similarity_search` and `get_index_typo_stats` functions with optimized parameters.
+**Expected Result**: `{"status": "success", "message": "Typo tolerance functions added successfully"}`
 
 ### 4. Refresh Materialized View (DATA SYNC)
 ```bash
-curl -X POST http://staging-url/debug/refresh-typo-tolerance-view
+curl -X POST https://oginisearch-production.up.railway.app/debug/refresh-typo-tolerance-view
 ```
 **Purpose**: Ensures the materialized view contains the latest document data.
 

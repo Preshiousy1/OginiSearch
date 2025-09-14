@@ -167,13 +167,16 @@ export class TypoToleranceService implements OnModuleInit {
    */
   async correctQuery(indexName: string, query: string, fields: string[]): Promise<TypoCorrection> {
     const startTime = Date.now();
-    const cacheKey = `${indexName}:${query.toLowerCase()}`;
+
+    // Strip asterisks from the end of any query before processing
+    const cleanQuery = query.replace(/\*+$/, '');
+    const cacheKey = `${indexName}:${cleanQuery.toLowerCase()}`;
 
     try {
       // Check cache first (ultra-fast - 0ms)
       const cached = this.commonTyposCache.get(cacheKey);
       if (cached) {
-        this.logger.log(`⚡ Cache hit for "${query}" (${Date.now() - startTime}ms)`);
+        this.logger.log(`⚡ Cache hit for "${cleanQuery}" (${Date.now() - startTime}ms)`);
         return cached;
       }
 
@@ -189,11 +192,11 @@ export class TypoToleranceService implements OnModuleInit {
         ['mext day site', 'nextdaysite'],
       ]);
 
-      const queryLower = query.toLowerCase().trim();
+      const queryLower = cleanQuery.toLowerCase().trim();
       if (hardcodedMappings.has(queryLower)) {
         const correctedTerm = hardcodedMappings.get(queryLower)!;
         const result: TypoCorrection = {
-          originalQuery: query,
+          originalQuery: cleanQuery,
           correctedQuery: correctedTerm,
           confidence: 0.95,
           suggestions: [
@@ -206,7 +209,7 @@ export class TypoToleranceService implements OnModuleInit {
           ],
           corrections: [
             {
-              original: query,
+              original: cleanQuery,
               corrected: correctedTerm,
               confidence: 0.95,
             },
@@ -218,7 +221,7 @@ export class TypoToleranceService implements OnModuleInit {
 
         const processingTime = Date.now() - startTime;
         this.logger.log(
-          `⚡ Hardcoded correction completed in ${processingTime}ms for "${query}" → "${correctedTerm}"`,
+          `⚡ Hardcoded correction completed in ${processingTime}ms for "${cleanQuery}" → "${correctedTerm}"`,
         );
         return result;
       }
@@ -233,13 +236,13 @@ export class TypoToleranceService implements OnModuleInit {
       }
 
       // Use SymSpell for ultra-fast correction
-      const suggestions = symSpell.search(query.toLowerCase().trim());
+      const suggestions = symSpell.search(cleanQuery.toLowerCase().trim());
 
       // Convert SymSpell results to our format
       const convertedSuggestions: Suggestion[] = suggestions.map(suggestion => ({
         text: suggestion.term,
         score: this.calculateRelevanceScore(
-          query,
+          cleanQuery,
           suggestion.term,
           suggestion.distance,
           1, // mnemonist doesn't provide count
@@ -252,18 +255,20 @@ export class TypoToleranceService implements OnModuleInit {
       convertedSuggestions.sort((a, b) => b.score - a.score);
 
       // Build correction result
-      const result = this.buildCorrectionFromSymSpell(query, convertedSuggestions);
+      const result = this.buildCorrectionFromSymSpell(cleanQuery, convertedSuggestions);
 
       // Cache the result
       this.commonTyposCache.set(cacheKey, result);
 
       const processingTime = Date.now() - startTime;
-      this.logger.log(`⚡ SymSpell correction completed in ${processingTime}ms for "${query}"`);
+      this.logger.log(
+        `⚡ SymSpell correction completed in ${processingTime}ms for "${cleanQuery}"`,
+      );
 
       return result;
     } catch (error) {
       this.logger.error(`❌ SymSpell correction failed: ${error.message}`);
-      return await this.fallbackToSpellChecker(query);
+      return await this.fallbackToSpellChecker(cleanQuery);
     }
   }
 
