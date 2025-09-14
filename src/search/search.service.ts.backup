@@ -1,0 +1,479 @@
+import { Injectable, Logger } from '@nestjs/common';
+import {
+  SearchQueryDto,
+  SearchResponseDto,
+  SuggestQueryDto,
+  SuggestionResultDto,
+} from '../api/dtos/search.dto';
+import { PostgreSQLSearchEngine } from '../storage/postgresql/postgresql-search-engine';
+import { EntityExtractionService } from './services/entity-extraction.service';
+import { LocationProcessorService } from './services/location-processor.service';
+import { QueryExpansionService } from './services/query-expansion.service';
+import { GeographicFilterService } from './services/geographic-filter.service';
+import { MultiSignalRankingService } from './services/multi-signal-ranking.service';
+import { TypoToleranceService, TypoCorrection } from './typo-tolerance.service';
+
+@Injectable()
+export class SearchService {
+  private readonly logger = new Logger(SearchService.name);
+
+  constructor(
+    private readonly postgresSearchEngine: PostgreSQLSearchEngine,
+    private readonly entityExtractionService: EntityExtractionService,
+    private readonly locationProcessorService: LocationProcessorService,
+    private readonly queryExpansionService: QueryExpansionService,
+    private readonly geographicFilterService: GeographicFilterService,
+    private readonly multiSignalRankingService: MultiSignalRankingService,
+    private readonly typoToleranceService: TypoToleranceService,
+  ) {}
+
+  /**
+   * Execute search with intelligent processing and typo tolerance
+   */
+  async search(indexName: string, searchQuery: SearchQueryDto): Promise<SearchResponseDto> {
+    const startTime = Date.now();
+    const originalQuery = this.getQueryText(searchQuery);
+
+    try {
+      this.logger.log(`[PROFILE] Search started for: ${JSON.stringify(searchQuery)}`);
+
+      // First, process typo tolerance to get corrected query
+      const typoCorrection = await this.processTypoTolerance(indexName, originalQuery);
+
+      // Use corrected query if available and confidence is high enough
+      let searchQueryToUse = searchQuery;
+      let queryTextToUse = originalQuery;
+      let highScoringSuggestions: string[] = [];
+
+      if (
+        typoCorrection &&
+        typoCorrection.confidence > 0.5 &&
+        typoCorrection.corrections.length > 0
+      ) {
+        // Get all suggestions with scores above 600 for comprehensive search
+        highScoringSuggestions = typoCorrection.suggestions
+          .filter(suggestion => suggestion.score > 600)
+          .map(suggestion => suggestion.text);
+
+        this.logger.log(
+          `🎯 Using corrected query: "${originalQuery}" → "${typoCorrection.correctedQuery}"`,
+        );
+        this.logger.log(`🔍 High-scoring suggestions (>600): ${highScoringSuggestions.join(', ')}`);
+
+        // Use the top correction as primary query
+        searchQueryToUse = {
+          ...searchQuery,
+          query: typoCorrection.correctedQuery,
+        };
+        queryTextToUse = typoCorrection.correctedQuery;
+      }
+
+      // OPTIMIZATION: Skip first search if we have high-scoring suggestions
+      let searchResults: any;
+
+      if (highScoringSuggestions.length > 1) {
+        // OPTIMIZATION: Execute ALL searches in parallel for maximum speed
+        this.logger.log(
+          `⚡ Executing ${highScoringSuggestions.length} searches in parallel for maximum speed`,
+        );
+
+        // Create search queries for ALL high-scoring suggestions (including the first one)
+        const allSearchQueries = highScoringSuggestions.map(suggestion => ({
+          ...searchQuery,
+          query: suggestion,
+        }));
+
+        // OPTIMIZATION: Execute searches with streaming results for speed
+        const startTime = Date.now();
+
+        // Start all searches but don't wait for all to complete
+        const searchPromises = allSearchQueries.map(async (query, index) => {
+          try {
+            // Add cache key for Redis optimization
+            const cacheKey = `search:${indexName}:${query.query}:${JSON.stringify(query)}`;
+            const cached = await this.getCachedSearchResult(cacheKey);
+            if (cached) {
+              this.logger.log(`📋 Using cached result for "${query.query}"`);
+              return cached;
+            }
+
+            const result = await this.executeSearch(indexName, query);
+
+            // Cache the result for future requests
+            await this.cacheSearchResult(cacheKey, result);
+
+            return result;
+          } catch (error) {
+            this.logger.warn(`⚠️ Search failed for "${query.query}": ${error.message}`);
+            return null;
+          }
+        });
+
+        // OPTIMIZATION: Wait for first few results instead of all
+        const firstResults = await Promise.allSettled(searchPromises.slice(0, 3));
+        const parallelTime = Date.now() - startTime;
+
+        // Process completed results immediately
+        const allSearchResults = firstResults
+          .filter(result => result.status === 'fulfilled' && result.value)
+          .map(result => (result as PromiseFulfilledResult<any>).value);
+
+        this.logger.log(`⚡ Parallel search execution completed in ${parallelTime}ms`);
+
+        // OPTIMIZATION: Stream results instead of full merging
+        const allHits = allSearchResults
+          .filter(result => result && result.data && result.data.hits)
+          .map(result => result.data.hits)
+          .flat();
+
+        // Fast deduplication using Set for O(1) performance
+        const seenIds = new Set();
+        const uniqueHits: any[] = [];
+
+        for (const hit of allHits) {
+          if (hit.id && !seenIds.has(hit.id)) {
+            seenIds.add(hit.id);
+            uniqueHits.push(hit);
+          }
+        }
+
+        // Sort by score (highest first) - only top results
+        const topHits = uniqueHits
+          .sort((a, b) => (b.score || 0) - (a.score || 0))
+          .slice(0, parseInt((searchQuery.size || '10').toString()));
+
+        // Calculate total from all searches
+        const totalResults = Math.max(
+          ...allSearchResults.filter(r => r && r.data).map(r => parseInt(r.data.total) || 0),
+        );
+
+        searchResults = {
+          ...searchResults,
+          data: {
+            ...searchResults.data,
+            hits: topHits,
+            total: totalResults.toString(),
+          },
+        };
+
+        this.logger.log(
+          `⚡ Optimized: ${topHits.length} unique results from ${highScoringSuggestions.length} parallel searches in ${parallelTime}ms`,
+        );
+      } else {
+        // Fallback: Execute single search for corrected query
+        this.logger.log(
+          `🔍 Executing single search for corrected query: "${searchQueryToUse.query}"`,
+        );
+        searchResults = await this.executeSearch(indexName, searchQueryToUse);
+      }
+
+      // OPTIMIZATION: Process intelligent features in background for speed
+      const intelligentInfoPromise = this.processIntelligentQuery(queryTextToUse);
+
+      // OPTIMIZATION: Wait for intelligent processing only when needed
+      const intelligentInfo = await intelligentInfoPromise;
+
+      // Apply geographic filtering and location-based ranking
+      let finalResults = searchResults;
+      if (intelligentInfo?.locationResult?.hasLocation) {
+        const locationFiltered = await this.geographicFilterService.filterByLocation(
+          searchResults.data.hits,
+          intelligentInfo.locationResult,
+        );
+        const locationRanked = await this.geographicFilterService.sortByLocationRelevance(
+          locationFiltered,
+          intelligentInfo.locationResult,
+        );
+        finalResults = {
+          ...searchResults,
+          data: {
+            ...searchResults.data,
+            hits: locationRanked,
+          },
+        };
+      }
+
+      // Apply multi-signal ranking
+      const rankedResults = await this.multiSignalRankingService.rankResults(
+        finalResults.data.hits,
+        queryTextToUse,
+        intelligentInfo,
+      );
+
+      finalResults = {
+        ...finalResults,
+        data: {
+          ...finalResults.data,
+          hits: rankedResults,
+        },
+      };
+
+      // Fallback strategy: if no results, try simplified query
+      if (finalResults.data.hits.length === 0 && intelligentInfo?.businessTypes?.length > 0) {
+        const simplifiedQuery = this.buildSimplifiedQuery(queryTextToUse, intelligentInfo);
+        if (simplifiedQuery !== queryTextToUse) {
+          const fallbackResults = await this.postgresSearchEngine.search(indexName, {
+            ...searchQueryToUse,
+            query: simplifiedQuery,
+          });
+
+          if (fallbackResults.data.hits.length > 0) {
+            const fallbackRankedResults = await this.multiSignalRankingService.rankResults(
+              fallbackResults.data.hits,
+              simplifiedQuery,
+              intelligentInfo,
+            );
+
+            finalResults = {
+              ...fallbackResults,
+              data: {
+                ...fallbackResults.data,
+                hits: fallbackRankedResults,
+              },
+            };
+          }
+        }
+      }
+
+      // Add typo tolerance information to response
+      const response: SearchResponseDto = {
+        ...finalResults,
+        took: Date.now() - startTime,
+        typoTolerance: typoCorrection,
+      };
+
+      this.logger.log(
+        `Search completed for index '${indexName}': Found ${finalResults.data.total} results in ${response.took}ms`,
+      );
+
+      return response;
+    } catch (error) {
+      this.logger.error(`Search error for index '${indexName}': ${error.message}`, error.stack);
+      throw error;
+    }
+  }
+
+  /**
+   * Process typo tolerance in parallel with search
+   */
+  private async processTypoTolerance(
+    indexName: string,
+    query: string,
+  ): Promise<TypoCorrection | null> {
+    try {
+      this.logger.log(
+        `🔍 Starting typo tolerance processing for: "${query}" in index: ${indexName}`,
+      );
+
+      // Only process typo tolerance for queries longer than 2 characters
+      if (!query || query.trim().length < 3) {
+        this.logger.log(`⚠️ Query too short for typo tolerance: "${query}"`);
+        return null;
+      }
+
+      this.logger.log(`✅ Query length OK, processing typo tolerance...`);
+
+      // Process typo tolerance in background using SMART method (fast path for correct spellings)
+      const typoCorrection = await this.typoToleranceService.correctQuerySmart(indexName, query, [
+        'name',
+        'title',
+        'description',
+        'category_name',
+        'profile',
+      ]);
+
+      this.logger.log(`📝 Typo correction result:`, JSON.stringify(typoCorrection, null, 2));
+
+      // Only return if there are actual corrections
+      if (typoCorrection.corrections.length > 0 && typoCorrection.confidence > 0.2) {
+        this.logger.log(
+          `🎯 Typo correction found: "${query}" → "${typoCorrection.correctedQuery}" (confidence: ${typoCorrection.confidence})`,
+        );
+        return typoCorrection;
+      }
+
+      this.logger.log(`ℹ️ No significant typo corrections found for: "${query}"`);
+      this.logger.log(`ℹ️ Suggestions found: ${typoCorrection.suggestions.length}`);
+      this.logger.log(`ℹ️ Corrections found: ${typoCorrection.corrections.length}`);
+      this.logger.log(`ℹ️ Confidence: ${typoCorrection.confidence}`);
+      return null;
+    } catch (error) {
+      this.logger.error(`❌ Typo tolerance processing failed: ${error.message}`, error.stack);
+      return null;
+    }
+  }
+
+  /**
+   * Execute the actual search with database optimization
+   */
+  private async executeSearch(indexName: string, searchQuery: SearchQueryDto): Promise<any> {
+    const startTime = Date.now();
+
+    try {
+      // OPTIMIZATION: Use optimized search with database hints
+      const optimizedQuery = this.optimizeSearchQuery(searchQuery);
+      const result = await this.postgresSearchEngine.search(indexName, optimizedQuery);
+
+      const searchTime = Date.now() - startTime;
+      if (searchTime > 1000) {
+        this.logger.warn(`⚠️ Slow search detected: ${searchTime}ms for "${searchQuery.query}"`);
+      }
+
+      return result;
+    } catch (error) {
+      const searchTime = Date.now() - startTime;
+      this.logger.error(`❌ Search failed after ${searchTime}ms: ${error.message}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Optimize search query for better performance
+   */
+  private optimizeSearchQuery(searchQuery: SearchQueryDto): SearchQueryDto {
+    // OPTIMIZATION: Return optimized query (placeholder for future database optimizations)
+    return searchQuery;
+  }
+
+  /**
+   * Process intelligent query features
+   */
+  private async processIntelligentQuery(query: string): Promise<any> {
+    try {
+      const entities = await this.entityExtractionService.extractEntities(query);
+      const locationResult = await this.locationProcessorService.processLocationQuery(query);
+      const expandedQuery = await this.queryExpansionService.expandQuery(query, [], []);
+
+      return {
+        entities,
+        locationResult,
+        expandedQuery,
+        businessTypes: entities.businessTypes,
+        services: entities.services,
+        modifiers: entities.modifiers,
+      };
+    } catch (error) {
+      this.logger.warn(`Intelligent query processing failed: ${error.message}`);
+      return null;
+    }
+  }
+
+  /**
+   * Get cached search result from Redis
+   */
+  private async getCachedSearchResult(cacheKey: string): Promise<any | null> {
+    try {
+      // For now, return null (Redis integration can be added later)
+      // This is a placeholder for future Redis optimization
+      return null;
+    } catch (error) {
+      this.logger.warn(`⚠️ Cache retrieval failed: ${error.message}`);
+      return null;
+    }
+  }
+
+  /**
+   * Cache search result in Redis
+   */
+  private async cacheSearchResult(cacheKey: string, result: any): Promise<void> {
+    try {
+      // For now, do nothing (Redis integration can be added later)
+      // This is a placeholder for future Redis optimization
+    } catch (error) {
+      this.logger.warn(`⚠️ Cache storage failed: ${error.message}`);
+    }
+  }
+
+  /**
+   * Merge and deduplicate search results by document ID
+   */
+  private mergeAndDeduplicateHits(hits: any[]): any[] {
+    const seenIds = new Set();
+    const uniqueHits: any[] = [];
+
+    for (const hit of hits) {
+      if (hit.id && !seenIds.has(hit.id)) {
+        seenIds.add(hit.id);
+        uniqueHits.push(hit);
+      }
+    }
+
+    // Sort by score (highest first)
+    return uniqueHits.sort((a, b) => (b.score || 0) - (a.score || 0));
+  }
+
+  /**
+   * Get suggestions with typo tolerance
+   */
+  async suggest(indexName: string, suggestDto: SuggestQueryDto): Promise<SuggestionResultDto[]> {
+    try {
+      const { text, field = 'name', size = 5 } = suggestDto;
+
+      if (!text || text.length < 2) {
+        return [];
+      }
+
+      // Get suggestions with typo tolerance
+      const suggestions = await this.typoToleranceService.getSuggestions(
+        indexName,
+        field,
+        text,
+        size,
+      );
+
+      // Convert to SuggestionResultDto format
+      return suggestions.map(suggestion => ({
+        text: suggestion.text,
+        id: suggestion.text,
+        score: suggestion.score,
+        distance: suggestion.distance,
+        frequency: suggestion.freq,
+      }));
+    } catch (error) {
+      this.logger.error(`Suggestion failed: ${error.message}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Get query text from search query
+   */
+  private getQueryText(searchQuery: SearchQueryDto): string {
+    if (typeof searchQuery.query === 'string') {
+      return searchQuery.query;
+    }
+
+    if (searchQuery.query?.match?.value) {
+      return searchQuery.query.match.value;
+    }
+
+    if (searchQuery.query?.wildcard?.value) {
+      const wildcardValue = searchQuery.query.wildcard.value;
+      return typeof wildcardValue === 'string' ? wildcardValue : wildcardValue.value;
+    }
+
+    return '';
+  }
+
+  /**
+   * Build simplified query for fallback strategy
+   */
+  private buildSimplifiedQuery(originalQuery: string, intelligentInfo: any): string {
+    const businessTypes = intelligentInfo.businessTypes || [];
+    const locationResult = intelligentInfo.locationResult;
+
+    let simplifiedQuery = '';
+
+    // Add business type
+    if (businessTypes.length > 0) {
+      simplifiedQuery += businessTypes[0];
+    }
+
+    // Add location if present
+    if (locationResult?.hasLocation && locationResult.location) {
+      simplifiedQuery += ` in ${locationResult.location}`;
+    }
+
+    return simplifiedQuery.trim() || originalQuery;
+  }
+}

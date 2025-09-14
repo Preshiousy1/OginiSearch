@@ -7,7 +7,6 @@ import { PostgreSQLIndexStats } from './postgresql-index-stats';
 import { PostgreSQLResultProcessorService } from './result-processor.service';
 import { PostgreSQLPerformanceMonitorService } from './performance-monitor.service';
 import { OptimizedQueryCacheService } from './optimized-query-cache.service';
-import { TypoToleranceService } from '../../search/typo-tolerance.service';
 import { Document } from './entities/document.entity';
 import { Index } from './entities/index.entity';
 import { SchemaModule } from '../../schema/schema.module';
@@ -27,7 +26,7 @@ import { PostgreSQLSearchEngine } from './postgresql-search-engine';
       useFactory: async (configService: ConfigService) => ({
         type: 'postgres',
         host: configService.get<string>('POSTGRES_HOST', 'localhost'),
-        port: configService.get<number>('POSTGRES_PORT', 5432),
+        port: Number(configService.get<string>('POSTGRES_PORT', '5432')),
         database: configService.get<string>('POSTGRES_DB', 'ogini_search'),
         username: configService.get<string>('POSTGRES_USER', 'postgres'),
         password: configService.get<string>('POSTGRES_PASSWORD'),
@@ -64,7 +63,6 @@ import { PostgreSQLSearchEngine } from './postgresql-search-engine';
     PostgreSQLResultProcessorService,
     PostgreSQLPerformanceMonitorService,
     OptimizedQueryCacheService,
-    TypoToleranceService,
     BM25RankingService,
     FilterBuilderService,
     RedisCacheService,

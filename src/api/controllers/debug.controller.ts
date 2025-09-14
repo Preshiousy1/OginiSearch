@@ -1,7 +1,8 @@
 /* eslint-disable @typescript-eslint/no-var-requires */
-import { Controller, Get, Param, Post } from '@nestjs/common';
+import { Controller, Get, Param, Post, Body } from '@nestjs/common';
 import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { DataSource } from 'typeorm';
+import { TypoToleranceService } from '../../search/typo-tolerance.service';
 
 /**
  * Lean Debug Controller for essential diagnostics
@@ -10,7 +11,10 @@ import { DataSource } from 'typeorm';
 @ApiTags('debug')
 @Controller('debug')
 export class DebugController {
-  constructor(private readonly dataSource: DataSource) {}
+  constructor(
+    private readonly dataSource: DataSource,
+    private readonly typoToleranceService: TypoToleranceService,
+  ) {}
 
   @Get('health/:indexName')
   @ApiOperation({
@@ -177,6 +181,149 @@ export class DebugController {
       return {
         status: 'success',
         message: 'Comprehensive index optimization completed successfully',
+        timestamp: new Date().toISOString(),
+      };
+    } catch (error) {
+      return {
+        status: 'error',
+        error: error.message,
+        timestamp: new Date().toISOString(),
+      };
+    }
+  }
+
+  @Post('setup-typo-tolerance-optimization')
+  @ApiOperation({
+    summary: 'Setup typo tolerance optimization',
+    description:
+      'Deploy the materialized view and database functions for ultra-fast typo tolerance',
+  })
+  async setupTypoToleranceOptimization() {
+    try {
+      const fs = require('fs');
+      const path = require('path');
+      const scriptPath = path.join(process.cwd(), 'scripts', 'typo-tolerance-optimization.sql');
+      const script = fs.readFileSync(scriptPath, 'utf8');
+
+      await this.dataSource.query(script);
+
+      // Get statistics after setup
+      const stats = await this.dataSource.query(`
+        SELECT 
+          COUNT(*) as total_terms,
+          COUNT(DISTINCT index_name) as total_indices
+        FROM search_terms
+      `);
+
+      return {
+        status: 'success',
+        message: 'Typo tolerance optimization setup completed successfully',
+        statistics: stats[0],
+        timestamp: new Date().toISOString(),
+      };
+    } catch (error) {
+      return {
+        status: 'error',
+        error: error.message,
+        timestamp: new Date().toISOString(),
+      };
+    }
+  }
+
+  @Post('add-typo-functions')
+  @ApiOperation({
+    summary: 'Add missing typo tolerance functions',
+    description: 'Add the missing database functions for typo tolerance',
+  })
+  async addTypoFunctions() {
+    try {
+      const fs = require('fs');
+      const path = require('path');
+      const scriptPath = path.join(process.cwd(), 'scripts', 'add-typo-functions.sql');
+      const script = fs.readFileSync(scriptPath, 'utf8');
+
+      await this.dataSource.query(script);
+
+      return {
+        status: 'success',
+        message: 'Typo tolerance functions added successfully',
+        timestamp: new Date().toISOString(),
+      };
+    } catch (error) {
+      return {
+        status: 'error',
+        error: error.message,
+        timestamp: new Date().toISOString(),
+      };
+    }
+  }
+
+  @Get('typo-tolerance-stats/:indexName')
+  @ApiOperation({
+    summary: 'Get typo tolerance statistics',
+    description: 'Get statistics about the typo tolerance materialized view for a specific index',
+  })
+  async getTypoToleranceStats(@Param('indexName') indexName: string) {
+    try {
+      const stats = await this.dataSource.query('SELECT * FROM get_index_typo_stats($1)', [
+        indexName,
+      ]);
+
+      return {
+        status: 'success',
+        indexName,
+        statistics: stats[0] || null,
+        timestamp: new Date().toISOString(),
+      };
+    } catch (error) {
+      return {
+        status: 'error',
+        error: error.message,
+        indexName,
+        timestamp: new Date().toISOString(),
+      };
+    }
+  }
+
+  @Post('refresh-typo-tolerance-view')
+  @ApiOperation({
+    summary: 'Refresh typo tolerance materialized view',
+    description: 'Refresh the search_terms materialized view to include latest data',
+  })
+  async refreshTypoToleranceView() {
+    try {
+      await this.dataSource.query('REFRESH MATERIALIZED VIEW search_terms');
+      return {
+        status: 'success',
+        message: 'Typo tolerance materialized view refreshed successfully',
+        timestamp: new Date().toISOString(),
+      };
+    } catch (error) {
+      return {
+        status: 'error',
+        error: error.message,
+        timestamp: new Date().toISOString(),
+      };
+    }
+  }
+
+  @Post('test-typo-tolerance')
+  @ApiOperation({
+    summary: 'Test typo tolerance service directly',
+    description: 'Test the typo tolerance service with a given query',
+  })
+  async testTypoTolerance(@Body() body: { indexName: string; query: string }) {
+    try {
+      // Use our optimized TypoToleranceService for 10ms target
+      const result = await this.typoToleranceService.correctQuery(body.indexName, body.query, [
+        'name',
+        'description',
+        'category',
+      ]);
+
+      return {
+        status: 'success',
+        result,
         timestamp: new Date().toISOString(),
       };
     } catch (error) {

@@ -8,6 +8,7 @@ import {
   IsNumber,
 } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
+import { TypoCorrection } from '../../search/typo-tolerance.service';
 
 export class MatchQueryDto {
   @ApiProperty({
@@ -343,6 +344,12 @@ export class SearchResponseDto {
     description: 'Time taken to search in milliseconds',
   })
   took: number;
+
+  @ApiProperty({
+    description: 'Typo tolerance corrections and suggestions',
+    required: false,
+  })
+  typoTolerance?: TypoCorrection;
 }
 
 export class SuggestQueryDto {
@@ -382,6 +389,15 @@ export class SuggestionResultDto {
 
   @ApiProperty({ description: 'Category', example: 'Business', required: false })
   category?: string;
+
+  @ApiProperty({ description: 'Suggestion score', example: 150, required: false })
+  score?: number;
+
+  @ApiProperty({ description: 'Edit distance from input', example: 2, required: false })
+  distance?: number;
+
+  @ApiProperty({ description: 'Term frequency estimate', example: 100, required: false })
+  frequency?: number;
 }
 
 export class SuggestResponseDto {
