@@ -818,13 +818,13 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
       return { sql, params: [indexName] };
     }
 
-    // Use optimized count for search queries
+    // Use optimized count for search queries (use weighted_search_vector if available)
     const sql = `
       SELECT COUNT(*) as total_count
       FROM documents
       WHERE index_name = $2
         AND search_vector IS NOT NULL
-        AND search_vector @@ plainto_tsquery('english', $1)
+        AND COALESCE(weighted_search_vector, search_vector) @@ plainto_tsquery('english', $1)
         ${filterConditions ? `AND ${filterConditions}` : ''}
     `;
     return { sql, params: [normalizedTerm, indexName] };
@@ -861,37 +861,129 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
       return { sql, params: [indexName, size, from] };
     }
 
-    // Use optimized full-text search for basic queries
+    // Use optimized full-text search for basic queries with field-weighted ranking
     if (this.shouldUseSimpleTextSearch(normalizedTerm)) {
       const sql = `
+        WITH field_rankings AS (
+          SELECT
+            document_id,
+            content,
+            metadata,
+            -- Name/Title field matches (highest priority)
+            CASE 
+              WHEN content->>'name' ILIKE '%' || $1 || '%' THEN 100.0
+              WHEN content->>'title' ILIKE '%' || $1 || '%' THEN 100.0
+              ELSE 0.0
+            END as name_score,
+            
+            -- Category field matches (medium priority)
+            CASE 
+              WHEN content->>'category_name' ILIKE '%' || $1 || '%' THEN 20.0
+              WHEN content->>'sub_category_name' ILIKE '%' || $1 || '%' THEN 20.0
+              ELSE 0.0
+            END as category_score,
+            
+            -- Description field matches (lower priority)
+            CASE 
+              WHEN content->>'description' ILIKE '%' || $1 || '%' THEN 15.0
+              ELSE 0.0
+            END as description_score,
+            
+            -- Tags field matches (lowest priority)
+            CASE 
+              WHEN content->>'tags' ILIKE '%' || $1 || '%' THEN 10.0
+              ELSE 0.0
+            END as tags_score,
+            
+            -- Full-text search ranking as base (use weighted_search_vector if available)
+            COALESCE(
+              ts_rank_cd(COALESCE(weighted_search_vector, materialized_vector, search_vector), plainto_tsquery('english', $1)),
+              0.0
+            ) as base_rank
+          FROM documents
+          WHERE index_name = $2
+            AND search_vector IS NOT NULL
+            AND (
+              COALESCE(weighted_search_vector, materialized_vector, search_vector) @@ plainto_tsquery('english', $1)
+              OR content->>'name' ILIKE '%' || $1 || '%'
+              OR content->>'title' ILIKE '%' || $1 || '%'
+              OR content->>'category_name' ILIKE '%' || $1 || '%'
+              OR content->>'sub_category_name' ILIKE '%' || $1 || '%'
+              OR content->>'description' ILIKE '%' || $1 || '%'
+              OR content->>'tags' ILIKE '%' || $1 || '%'
+            )
+            ${filterConditions ? `AND ${filterConditions}` : ''}
+        )
         SELECT
           document_id,
           content,
           metadata,
-          1.0 as rank
-        FROM documents
-        WHERE index_name = $2
-          AND search_vector IS NOT NULL
-          AND search_vector @@ plainto_tsquery('english', $1)
-          ${filterConditions ? `AND ${filterConditions}` : ''}
-        ORDER BY document_id
+          (name_score + category_score + description_score + tags_score + base_rank) as rank
+        FROM field_rankings
+        ORDER BY rank DESC, document_id
         LIMIT $3 OFFSET $4
       `;
       return { sql, params: [normalizedTerm, indexName, size, from] };
     }
 
-    // Use full-text search for complex queries with ranking
+    // Use field-weighted ranking for better relevance
     const sql = `
+      WITH field_rankings AS (
+        SELECT
+          document_id,
+          content,
+          metadata,
+          -- Name/Title field matches (highest priority)
+          CASE 
+            WHEN content->>'name' ILIKE '%' || $1 || '%' THEN 100.0
+            WHEN content->>'title' ILIKE '%' || $1 || '%' THEN 100.0
+            ELSE 0.0
+          END as name_score,
+          
+          -- Category field matches (medium priority)
+          CASE 
+            WHEN content->>'category_name' ILIKE '%' || $1 || '%' THEN 20.0
+            WHEN content->>'sub_category_name' ILIKE '%' || $1 || '%' THEN 20.0
+            ELSE 0.0
+          END as category_score,
+          
+          -- Description field matches (lower priority)
+          CASE 
+            WHEN content->>'description' ILIKE '%' || $1 || '%' THEN 15.0
+            ELSE 0.0
+          END as description_score,
+          
+          -- Tags field matches (lowest priority)
+          CASE 
+            WHEN content->>'tags' ILIKE '%' || $1 || '%' THEN 10.0
+            ELSE 0.0
+          END as tags_score,
+          
+          -- Full-text search ranking as base (use weighted_search_vector if available)
+          COALESCE(
+            ts_rank_cd(COALESCE(weighted_search_vector, materialized_vector, search_vector), plainto_tsquery('english', $1)),
+            0.0
+          ) as base_rank
+        FROM documents
+        WHERE index_name = $2
+          AND search_vector IS NOT NULL
+          AND (
+            COALESCE(weighted_search_vector, materialized_vector, search_vector) @@ plainto_tsquery('english', $1)
+            OR content->>'name' ILIKE '%' || $1 || '%'
+            OR content->>'title' ILIKE '%' || $1 || '%'
+            OR content->>'category_name' ILIKE '%' || $1 || '%'
+            OR content->>'sub_category_name' ILIKE '%' || $1 || '%'
+            OR content->>'description' ILIKE '%' || $1 || '%'
+            OR content->>'tags' ILIKE '%' || $1 || '%'
+          )
+          ${filterConditions ? `AND ${filterConditions}` : ''}
+      )
       SELECT
         document_id,
         content,
         metadata,
-        ts_rank_cd(COALESCE(materialized_vector, search_vector), plainto_tsquery('english', $1)) as rank
-      FROM documents
-      WHERE index_name = $2
-        AND search_vector IS NOT NULL
-        AND COALESCE(materialized_vector, search_vector) @@ plainto_tsquery('english', $1)
-        ${filterConditions ? `AND ${filterConditions}` : ''}
+        (name_score + category_score + description_score + tags_score + base_rank) as rank
+      FROM field_rankings
       ORDER BY rank DESC, document_id
       LIMIT $3 OFFSET $4
     `;

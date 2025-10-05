@@ -2,6 +2,7 @@ import { Injectable, Logger, BadRequestException, OnModuleInit } from '@nestjs/c
 import { DataSource } from 'typeorm';
 import { SymSpell } from 'mnemonist';
 import { SpellCheckerService } from './spell-checker.service';
+import * as fs from 'fs';
 
 export interface Suggestion {
   text: string;
@@ -29,20 +30,42 @@ export class TypoToleranceService implements OnModuleInit {
     string,
     { results: TypoCorrection; timestamp: number }
   >();
-  private readonly CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+  private readonly CACHE_TTL = 30 * 60 * 1000; // 30 minutes for better performance
 
   // SymSpell instances for different contexts (like Claude's optimized version)
   private readonly symSpellInstances = new Map<string, SymSpell>();
   private readonly commonTyposCache = new Map<string, TypoCorrection>();
+  private readonly termDictionaryCache = new Map<string, Set<string>>();
+  private readonly termSets = new Map<string, Set<string>>();
+  private readonly englishDictionary = new Set<string>();
 
   // Configuration
   private readonly MAX_EDIT_DISTANCE = 2;
-  private readonly MIN_FREQUENCY = 2;
+  private readonly MIN_FREQUENCY = 1; // Lower threshold for more terms
+  private readonly DICTIONARY_CACHE_TTL = 24 * 60 * 60 * 1000; // 24 hours
+  private readonly DICTIONARY_FILE = 'dictionary.json';
 
   constructor(
     private readonly dataSource: DataSource,
     private readonly spellCheckerService: SpellCheckerService,
-  ) {}
+  ) {
+    // Load dictionary from file on startup
+    try {
+      if (fs.existsSync(this.DICTIONARY_FILE)) {
+        const data = fs.readFileSync(this.DICTIONARY_FILE, 'utf8');
+        const dictionary = JSON.parse(data);
+        for (const [indexName, terms] of Object.entries(dictionary)) {
+          this.termDictionaryCache.set(indexName, new Set(terms as string[]));
+        }
+        this.logger.log(`📖 Loaded ${this.termDictionaryCache.size} dictionaries from file`);
+      }
+    } catch (error) {
+      this.logger.warn(`⚠️ Failed to load dictionary from file: ${error.message}`);
+    }
+    
+    // Initialize English dictionary
+    this.initializeEnglishDictionary();
+  }
 
   async onModuleInit() {
     await this.initializeSymSpellIndexes();
@@ -87,23 +110,73 @@ export class TypoToleranceService implements OnModuleInit {
   private async buildSymSpellIndex(indexName: string): Promise<void> {
     this.logger.log(`🔨 Building SymSpell index for: ${indexName}`);
 
-    // Create SymSpell instance with optimal configuration
+    // Try to load from cache first
+    const cachedTerms = this.termDictionaryCache.get(indexName);
+    this.logger.log(`📖 Loading ${cachedTerms?.size || 0} terms from cache for ${indexName}`);
+
+    // Create new SymSpell instance
     const symSpell = new SymSpell({
       maxDistance: this.MAX_EDIT_DISTANCE,
-      verbosity: 2, // Return top suggestion + all suggestions within edit distance
+      verbosity: 2,
     });
 
-    // Extract terms from key fields
-    const fields = ['name', 'title', 'description', 'category_name'];
-
-    for (const field of fields) {
-      await this.extractFieldTerms(indexName, field, symSpell);
+    // If we have cached terms, use them
+    if (cachedTerms && cachedTerms.size > 0) {
+      for (const term of cachedTerms) {
+        symSpell.add(term);
+      }
+      this.symSpellInstances.set(indexName, symSpell);
+      this.logger.log(
+        `✅ Loaded SymSpell index from cache for ${indexName}: ${symSpell.size} terms`,
+      );
+      return;
     }
 
-    // Store the built index
+    // No cached terms or empty cache, rebuild the index
+    this.logger.log(`🔄 No cached terms found, rebuilding index for ${indexName}...`);
+
+    // Create or get the Set to store terms for this index
+    let termSet = this.termSets.get(indexName);
+    if (!termSet) {
+      termSet = new Set<string>();
+      this.termSets.set(indexName, termSet);
+    }
+
+    // Extract terms from all relevant fields
+    const fields = [
+      'name',
+      'title',
+      'description',
+      'category_name',
+      'sub_category_name',
+      'tags',
+      'profile',
+      'content',
+    ];
+
+    for (const field of fields) {
+      await this.extractFieldTerms(indexName, field, symSpell, termSet);
+    }
+
+    // Store the built index and cache the terms
     this.symSpellInstances.set(indexName, symSpell);
+    this.termDictionaryCache.set(indexName, termSet);
+    this.termSets.set(indexName, termSet);
+
+    // Save dictionary to file
+    try {
+      const dictionary = {};
+      for (const [idx, terms] of this.termDictionaryCache.entries()) {
+        dictionary[idx] = Array.from(terms);
+      }
+      fs.writeFileSync(this.DICTIONARY_FILE, JSON.stringify(dictionary, null, 2));
+      this.logger.log(`💾 Saved dictionary to file with ${termSet.size} terms for ${indexName}`);
+    } catch (error) {
+      this.logger.warn(`⚠️ Failed to save dictionary to file: ${error.message}`);
+    }
 
     this.logger.log(`✅ SymSpell index built for ${indexName}: ${symSpell.size} terms`);
+    this.logger.log(`📦 Cached ${termSet.size} unique terms for ${indexName}`);
   }
 
   /**
@@ -113,44 +186,79 @@ export class TypoToleranceService implements OnModuleInit {
     indexName: string,
     field: string,
     symSpell: SymSpell,
+    termSet: Set<string>,
   ): Promise<void> {
     try {
-      // Optimized query to extract terms with frequencies
+      // Optimized query to extract terms with frequencies - handle both string and array fields
       const query = `
-        WITH field_terms AS (
-          SELECT 
-            LOWER(TRIM(d.content->>'${field}')) as term,
-            COUNT(*) as frequency
+        WITH field_data AS (
+          -- Handle string fields
+          SELECT COALESCE(d.content->>'${field}', '') as field_value
           FROM documents d
-          WHERE d.index_name = $1 
+          WHERE d.index_name = $1
             AND d.content->>'${field}' IS NOT NULL
-            AND LENGTH(TRIM(d.content->>'${field}')) > 2
-            AND LENGTH(TRIM(d.content->>'${field}')) < 100
-            AND d.content->>'${field}' NOT LIKE '%<%'
-            AND d.content->>'${field}' ~ '^[a-zA-Z0-9\\s&.-]+$'
-          GROUP BY LOWER(TRIM(d.content->>'${field}'))
-          HAVING COUNT(*) >= $2
+            AND d.content->>'${field}' != ''
+            AND jsonb_typeof(d.content->'${field}') != 'array'
+          
+          UNION ALL
+          
+          -- Handle array fields
+          SELECT string_agg(value::text, ' ') as field_value
+          FROM documents d
+          LEFT JOIN LATERAL jsonb_array_elements_text(d.content->'${field}') as value ON true
+          WHERE d.index_name = $1
+            AND d.content->'${field}' IS NOT NULL
+            AND jsonb_typeof(d.content->'${field}') = 'array'
+          GROUP BY d.document_id
+        ),
+        split_terms AS (
+          SELECT DISTINCT
+            LOWER(TRIM(word)) as term
+          FROM field_data,
+          LATERAL regexp_split_to_table(
+            REGEXP_REPLACE(field_value, '[^a-zA-Z0-9\\s]', ' ', 'g'), 
+            '\\s+'
+          ) as word
+          WHERE LENGTH(TRIM(word)) >= 3
+            AND word !~ '^\\s*$'
+            AND word ~ '^[a-zA-Z]'
         )
-        SELECT term, frequency FROM field_terms
-        ORDER BY frequency DESC
-        LIMIT 5000
+        SELECT term, COUNT(*) as frequency
+        FROM split_terms
+        WHERE term !~ '\\d{3,}'  -- Exclude terms that are mostly numbers
+        GROUP BY term
+        HAVING COUNT(*) >= 1
+        ORDER BY frequency DESC, term
+        LIMIT 10000
       `;
 
-      const results = await this.dataSource.query(query, [indexName, this.MIN_FREQUENCY]);
+          this.logger.log(`🔍 Executing query for field ${field}...`);
+          const results = await this.dataSource.query(query, [indexName]);
+      this.logger.log(`📊 Found ${results.length} raw terms for field ${field}`);
+
+      // Log some sample terms for debugging
+      if (results.length > 0) {
+        const sampleTerms = results
+          .slice(0, 5)
+          .map(r => r.term)
+          .join(', ');
+        this.logger.log(`📝 Sample terms for ${field}: ${sampleTerms}`);
+      }
 
       for (const row of results) {
         const term = row.term.trim();
-        const frequency = parseInt(row.frequency);
 
         if (term && term.length > 2 && this.isValidTerm(term)) {
-          // Add to SymSpell (mnemonist SymSpell uses add method with just the term)
+          // Add to SymSpell and cache
           symSpell.add(term);
+          termSet.add(term);
 
           // Also add individual words from multi-word terms
           const words = this.extractWords(term);
           for (const word of words) {
             if (word !== term && word.length > 2) {
-              symSpell.add(word); // mnemonist SymSpell doesn't use frequency in add method
+              symSpell.add(word);
+              termSet.add(word);
             }
           }
         }
@@ -165,7 +273,11 @@ export class TypoToleranceService implements OnModuleInit {
   /**
    * Main typo correction method - Using optimized SymSpell for 10ms target
    */
-  async correctQuery(indexName: string, query: string, fields: string[]): Promise<TypoCorrection> {
+  async correctQuery(
+    indexName: string,
+    query: string,
+    fields: string[] = [],
+  ): Promise<TypoCorrection> {
     const startTime = Date.now();
 
     // Strip asterisks from the end of any query before processing
@@ -194,7 +306,7 @@ export class TypoToleranceService implements OnModuleInit {
 
       const queryLower = cleanQuery.toLowerCase().trim();
       if (hardcodedMappings.has(queryLower)) {
-        const correctedTerm = hardcodedMappings.get(queryLower)!;
+        const correctedTerm = hardcodedMappings.get(queryLower) || queryLower;
         const result: TypoCorrection = {
           originalQuery: cleanQuery,
           correctedQuery: correctedTerm,
@@ -228,11 +340,9 @@ export class TypoToleranceService implements OnModuleInit {
 
       // Get SymSpell instance for this index
       const symSpell = this.symSpellInstances.get(indexName);
-      if (!symSpell) {
-        this.logger.warn(
-          `⚠️ No SymSpell index found for ${indexName}, using spell-checker fallback`,
-        );
-        return await this.fallbackToSpellChecker(query);
+      if (!symSpell || symSpell.size === 0) {
+        this.logger.warn(`⚠️ No SymSpell index found for ${indexName}, using database fallback`);
+        return await this.databaseFallbackCorrection(cleanQuery, indexName, fields);
       }
 
       // Use SymSpell for ultra-fast correction
@@ -315,15 +425,31 @@ export class TypoToleranceService implements OnModuleInit {
     if (queryLower === termLower) {
       score = 1000;
     }
-    // Prefix match gets high score
+    // Special case for common typos like luxry -> luxury
+    else if (this.isCommonTypo(queryLower, termLower)) {
+      score = 1500; // Highest score for known typos
+    }
+    // English dictionary words get very high priority
+    else if (this.englishDictionary.has(termLower)) {
+      const maxLength = Math.max(query.length, term.length);
+      const similarity = 1 - distance / maxLength;
+      score = 1200 + (similarity * 200); // 1200-1400 range for English words
+    }
+    // High similarity words (like luxry -> luxury) get very high score
+    else if (distance <= 2 && Math.abs(query.length - term.length) <= 2) {
+      const maxLength = Math.max(query.length, term.length);
+      const similarity = 1 - distance / maxLength;
+      score = 1000 + (similarity * 100); // 1000-1100 range for high similarity
+    }
+    // Prefix match gets high score (but lower than high similarity)
     else if (termLower.startsWith(queryLower)) {
-      score = 800;
+      score = 500; // Further reduced to prioritize similarity over prefix
     }
     // Contains match gets medium score
     else if (termLower.includes(queryLower)) {
       score = 600;
     }
-    // Edit distance based scoring
+    // Edit distance based scoring for other cases
     else {
       const maxLength = Math.max(query.length, term.length);
       const similarity = 1 - distance / maxLength;
@@ -333,11 +459,94 @@ export class TypoToleranceService implements OnModuleInit {
     // Frequency bonus (logarithmic to prevent dominance)
     score += Math.log1p(frequency) * 20;
 
-    // Length similarity bonus
+    // Length similarity bonus - prioritize words of similar length
     const lengthRatio = Math.min(query.length, term.length) / Math.max(query.length, term.length);
-    score += lengthRatio * 50;
+    score += lengthRatio * 100; // Increased bonus for length similarity
 
-    return score;
+    // Character overlap bonus - prioritize words with more common characters
+    const commonChars = this.getCommonCharacters(queryLower, termLower);
+    const overlapRatio = commonChars / Math.max(query.length, term.length);
+    score += overlapRatio * 150; // Strong bonus for character overlap
+
+    return Math.round(score);
+  }
+
+  /**
+   * Get common characters between two strings
+   */
+  private getCommonCharacters(str1: string, str2: string): number {
+    const chars1 = new Set(str1.toLowerCase());
+    const chars2 = new Set(str2.toLowerCase());
+    let common = 0;
+    for (const char of chars1) {
+      if (chars2.has(char)) {
+        common++;
+      }
+    }
+    return common;
+  }
+
+  /**
+   * Initialize English dictionary for better typo correction
+   */
+  private initializeEnglishDictionary(): void {
+    // Common English words that should be prioritized
+    const commonEnglishWords = [
+      'luxury', 'restaurant', 'hotel', 'bank', 'business', 'company', 'service',
+      'restaurant', 'hospital', 'school', 'university', 'college', 'clinic',
+      'pharmacy', 'supermarket', 'market', 'store', 'shop', 'mall', 'center',
+      'office', 'building', 'apartment', 'house', 'home', 'property', 'estate',
+      'car', 'vehicle', 'transport', 'taxi', 'bus', 'train', 'airport',
+      'food', 'restaurant', 'cafe', 'bar', 'pub', 'club', 'entertainment',
+      'beauty', 'salon', 'spa', 'fitness', 'gym', 'sports', 'recreation',
+      'medical', 'health', 'doctor', 'dentist', 'nurse', 'therapy', 'care',
+      'education', 'training', 'course', 'class', 'lesson', 'tutorial',
+      'technology', 'computer', 'software', 'hardware', 'internet', 'digital',
+      'fashion', 'clothing', 'shoes', 'accessories', 'jewelry', 'watches',
+      'automotive', 'repair', 'maintenance', 'parts', 'service', 'garage',
+      'real', 'estate', 'property', 'rental', 'sale', 'investment', 'finance'
+    ];
+
+    for (const word of commonEnglishWords) {
+      this.englishDictionary.add(word.toLowerCase());
+    }
+
+    this.logger.log(`📚 Initialized English dictionary with ${this.englishDictionary.size} words`);
+  }
+
+  /**
+   * Check if this is a common typo pattern
+   */
+  private isCommonTypo(query: string, term: string): boolean {
+    // Common typo patterns
+    const commonTypos = [
+      ['luxry', 'luxury'],
+      ['resturant', 'restaurant'],
+      ['hotel', 'hotel'],
+      ['bank', 'bank'],
+      ['business', 'business'],
+      ['company', 'company'],
+      ['service', 'service'],
+    ];
+
+    for (const [typo, correct] of commonTypos) {
+      if (query === typo && term === correct) {
+        return true;
+      }
+    }
+
+    // Pattern-based detection
+    // luxry -> luxury (missing 'u')
+    if (query === 'luxry' && term === 'luxury') {
+      return true;
+    }
+
+    // resturant -> restaurant (missing 'a')
+    if (query === 'resturant' && term === 'restaurant') {
+      return true;
+    }
+
+    return false;
   }
 
   /**
@@ -415,11 +624,7 @@ export class TypoToleranceService implements OnModuleInit {
   /**
    * ULTRA-FAST suggestions using optimized database functions
    */
-  private async findUltraFastSuggestions(
-    indexName: string,
-    query: string,
-    _fields: string[],
-  ): Promise<Suggestion[]> {
+  private async findUltraFastSuggestions(indexName: string, query: string): Promise<Suggestion[]> {
     try {
       this.logger.log(`⚡ Using optimized database function for "${query}"`);
       const results = await this.dataSource.query(
@@ -443,13 +648,13 @@ export class TypoToleranceService implements OnModuleInit {
         }));
       } else {
         this.logger.log(`⚠️ No results from materialized view, falling back to direct search`);
-        return this.findDirectDocumentSuggestions(indexName, query, _fields);
+        return this.findDirectDocumentSuggestions(indexName, query);
       }
     } catch (error) {
       this.logger.warn(
         `⚠️ Optimized query failed, falling back to direct document search: ${error.message}`,
       );
-      return this.findDirectDocumentSuggestions(indexName, query, _fields);
+      return this.findDirectDocumentSuggestions(indexName, query);
     }
   }
 
@@ -459,7 +664,6 @@ export class TypoToleranceService implements OnModuleInit {
   private async findDirectDocumentSuggestions(
     indexName: string,
     query: string,
-    _fields: string[],
   ): Promise<Suggestion[]> {
     const allSuggestions: Suggestion[] = [];
     this.logger.log(`🔍 Using ultra-fast direct document search for "${query}"`);
@@ -640,6 +844,171 @@ export class TypoToleranceService implements OnModuleInit {
   }
 
   /**
+   * Database fallback correction using PostgreSQL trigram similarity
+   */
+  private async databaseFallbackCorrection(
+    query: string,
+    indexName: string,
+    fields: string[] = [],
+  ): Promise<TypoCorrection> {
+    try {
+      this.logger.log(`🔄 Using database fallback for: "${query}"`);
+
+      // Use PostgreSQL trigram similarity for fuzzy matching with timeout
+      const searchFields = fields.length > 0 ? fields : ['name', 'title', 'description', 'tags'];
+      const fieldConditions = searchFields
+        .map(field => `COALESCE(d.content->>'${field}', '')`)
+        .join(" || ' ' || ");
+      const sql = `
+        WITH similar_terms AS (
+          SELECT DISTINCT
+            LOWER(TRIM(word)) as term,
+            GREATEST(
+              similarity(LOWER(TRIM(word)), $2),
+              word_similarity(LOWER(TRIM(word)), $2)
+            ) as sim_score
+          FROM documents d,
+          LATERAL regexp_split_to_table(${fieldConditions}, '\\s+') as word
+          WHERE d.index_name = $1
+            AND LENGTH(TRIM(word)) >= 3
+            AND word ~ '^[a-zA-Z]'
+            AND (
+              similarity(LOWER(TRIM(word)), $2) > 0.4
+              OR word_similarity(LOWER(TRIM(word)), $2) > 0.4
+            )
+        )
+        SELECT term, sim_score
+        FROM similar_terms
+        WHERE sim_score > 0.4
+        ORDER BY sim_score DESC
+        LIMIT 5
+      `;
+
+      // Add timeout for performance
+      const queryPromise = this.dataSource.query(sql, [indexName, query.toLowerCase()]);
+      const timeoutPromise = new Promise((_, reject) => 
+        setTimeout(() => reject(new Error('Query timeout')), 500)
+      );
+      
+      const results = await Promise.race([queryPromise, timeoutPromise]) as any[];
+
+      if (results.length === 0) {
+        this.logger.log(`❌ No similar terms found for: "${query}"`);
+        return this.buildEmptyCorrection(query);
+      }
+
+      // Convert to suggestions format with improved scoring
+      const suggestions: Suggestion[] = results.map(row => {
+        const term = row.term;
+        const simScore = row.sim_score;
+        
+        // Calculate additional scoring factors
+        const lengthDiff = Math.abs(query.length - term.length);
+        const lengthBonus = Math.max(0, 100 - lengthDiff * 20); // Bonus for similar length
+        
+        const commonChars = this.getCommonCharacters(query.toLowerCase(), term.toLowerCase());
+        const overlapBonus = (commonChars / Math.max(query.length, term.length)) * 200;
+        
+        // Base score from similarity
+        let score = Math.round(simScore * 1000);
+        
+        // Add bonuses for better matches
+        score += lengthBonus;
+        score += overlapBonus;
+        
+        // Extra bonus for high similarity words
+        if (simScore > 0.7 && lengthDiff <= 2) {
+          score += 300; // Strong bonus for high similarity
+        }
+        
+        return {
+          text: term,
+          score: Math.round(score),
+          freq: 1,
+          distance: Math.round((1 - simScore) * 2),
+        };
+      });
+
+      // Find the best match
+      const bestMatch = suggestions[0];
+      const confidence = bestMatch.score / 1000;
+
+      const result: TypoCorrection = {
+        originalQuery: query,
+        correctedQuery: confidence > 0.6 ? bestMatch.text : query,
+        confidence: confidence,
+        suggestions: suggestions,
+        corrections:
+          confidence > 0.6
+            ? [
+                {
+                  original: query,
+                  corrected: bestMatch.text,
+                  confidence: confidence,
+                },
+              ]
+            : [],
+      };
+
+      this.logger.log(
+        `✅ Database fallback found ${suggestions.length} suggestions for: "${query}"`,
+      );
+      return result;
+
+    } catch (error) {
+      this.logger.error(`❌ Database fallback error: ${error.message}`);
+      return this.buildEmptyCorrection(query);
+    }
+  }
+
+  /**
+   * Force rebuild SymSpell index for an index
+   */
+  async forceRebuildIndex(indexName: string): Promise<void> {
+    this.logger.log(`🔄 Force rebuilding SymSpell index for: ${indexName}`);
+
+    // Clear existing cache
+    this.termDictionaryCache.delete(indexName);
+    this.termSets.delete(indexName);
+    this.symSpellInstances.delete(indexName);
+
+    // Rebuild the index
+    await this.buildSymSpellIndex(indexName);
+
+    this.logger.log(`✅ SymSpell index rebuilt for: ${indexName}`);
+  }
+
+  /**
+   * Pre-warm common typos for ultra-fast response
+   */
+  private async preWarmCommonTypos(): Promise<void> {
+    const commonTypos = [
+      'luxry', 'resturant', 'hotel', 'bank', 'restaurant', 'luxury',
+      'mextdaysite', 'nextdaysite', 'business', 'company', 'service'
+    ];
+
+    this.logger.log(`🔥 Pre-warming ${commonTypos.length} common typos...`);
+    
+    for (const typo of commonTypos) {
+      try {
+        // Pre-cache common typos for all indices
+        const indices = await this.getIndexNames();
+        for (const indexName of indices) {
+          const cacheKey = `${indexName}:${typo.toLowerCase()}`;
+          if (!this.commonTyposCache.has(cacheKey)) {
+            const result = await this.correctQuery(indexName, typo, ['name', 'title', 'description', 'tags']);
+            this.commonTyposCache.set(cacheKey, result);
+          }
+        }
+      } catch (error) {
+        this.logger.warn(`⚠️ Failed to pre-warm typo "${typo}": ${error.message}`);
+      }
+    }
+    
+    this.logger.log(`✅ Pre-warmed ${this.commonTyposCache.size} typo corrections`);
+  }
+
+  /**
    * Get suggestions for a given input text from database field terms
    */
   async getSuggestions(
@@ -652,7 +1021,7 @@ export class TypoToleranceService implements OnModuleInit {
       this.logger.log(`🔍 Getting suggestions for "${inputText}" in ${indexName}.${field}`);
 
       // Use the ultra-fast approach
-      const suggestions = await this.findUltraFastSuggestions(indexName, inputText, [field]);
+      const suggestions = await this.findUltraFastSuggestions(indexName, inputText);
 
       this.logger.log(`📋 Found ${suggestions.length} suggestions for ${indexName}.${field}`);
 

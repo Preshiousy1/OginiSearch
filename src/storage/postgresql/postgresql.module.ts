@@ -17,6 +17,7 @@ import { PostgreSQLAnalysisAdapter } from './postgresql-analysis.adapter';
 import { AnalysisModule } from 'src/analysis/analysis.module';
 import { RedisCacheService } from './redis-cache.service';
 import { PostgreSQLSearchEngine } from './postgresql-search-engine';
+import { FieldWeightsService } from './field-weights.service';
 
 @Module({
   imports: [
@@ -67,6 +68,7 @@ import { PostgreSQLSearchEngine } from './postgresql-search-engine';
     FilterBuilderService,
     RedisCacheService,
     PostgreSQLSearchEngine,
+    FieldWeightsService,
   ],
   exports: [
     PostgreSQLService,
@@ -82,6 +84,7 @@ import { PostgreSQLSearchEngine } from './postgresql-search-engine';
     PostgreSQLDocumentProcessor,
     RedisCacheService,
     PostgreSQLSearchEngine,
+    FieldWeightsService,
   ],
 })
 export class PostgreSQLModule {}

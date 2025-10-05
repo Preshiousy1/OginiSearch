@@ -22,7 +22,19 @@ CREATE EXTENSION IF NOT EXISTS "unaccent";
 
 CREATE EXTENSION IF NOT EXISTS "pg_stat_statements";
 
--- Step 3: Create indices table
+-- Step 3: Create field weights table for dynamic field ranking
+CREATE TABLE IF NOT EXISTS field_weights (
+    index_name VARCHAR(255) NOT NULL,
+    field_name VARCHAR(255) NOT NULL,
+    weight FLOAT NOT NULL,
+    description TEXT,
+    created_at TIMESTAMP
+    WITH
+        TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (index_name, field_name)
+);
+
+-- Step 4: Create indices table
 CREATE TABLE IF NOT EXISTS indices (
     index_name VARCHAR(255) PRIMARY KEY,
     settings JSONB NOT NULL DEFAULT '{}',

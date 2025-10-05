@@ -24,7 +24,7 @@ export class BM25RankingService {
     name: 3.0,
     title: 3.0,
     description: 1.5,
-    tags: 1.5,
+    tags: 1.0, // LOWERED priority for tags
     content: 1.0,
   };
 

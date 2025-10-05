@@ -93,9 +93,9 @@ export class SearchService {
               typoCorrection.confidence > 0.1 && // Lowered from 0.3 to 0.1 (10%)
               typoCorrection.corrections.length > 0
             ) {
-              // Get high-scoring suggestions
+              // Get high-scoring suggestions (only the best one to avoid parallel search timeouts)
               highScoringSuggestions = typoCorrection.suggestions
-                .filter(suggestion => suggestion.score > 50) // Lowered from 400 to 50
+                .filter(suggestion => suggestion.score > 1500) // Only include very high confidence corrections
                 .map(suggestion => suggestion.text);
 
               this.logger.log(
@@ -396,21 +396,34 @@ export class SearchService {
       this.logger.log(`✅ Query length OK, processing typo tolerance...`);
 
       // Since dictionary already determined this is a typo, use fast typo correction
-      const typoCorrection = await this.typoToleranceService.correctQuery(indexName, query, [
-        'name',
-        'title',
-        'description',
-        'category_name',
-        'profile',
-      ]);
+      const fields = ['name', 'title', 'description', 'category_name', 'profile'];
+      const typoCorrection = await this.typoToleranceService.correctQuery(indexName, query, fields);
 
       this.logger.log(`📝 Typo correction result:`, JSON.stringify(typoCorrection, null, 2));
 
-      // Only return if there are actual corrections
-      if (typoCorrection.corrections.length > 0 && typoCorrection.confidence > 0.2) {
+      // Return if we have corrections or high-scoring suggestions
+      if (
+        (typoCorrection.corrections.length > 0 && typoCorrection.confidence > 0.1) ||
+        (typoCorrection.suggestions.length > 0 && typoCorrection.suggestions[0].score > 400)
+      ) {
         this.logger.log(
           `🎯 Typo correction found: "${query}" → "${typoCorrection.correctedQuery}" (confidence: ${typoCorrection.confidence})`,
         );
+
+        // If we have suggestions but no corrections, use the best suggestion
+        if (typoCorrection.corrections.length === 0 && typoCorrection.suggestions.length > 0) {
+          const bestSuggestion = typoCorrection.suggestions[0];
+          typoCorrection.correctedQuery = bestSuggestion.text;
+          typoCorrection.confidence = Math.min(0.95, bestSuggestion.score / 1000);
+          typoCorrection.corrections = [
+            {
+              original: query,
+              corrected: bestSuggestion.text,
+              confidence: typoCorrection.confidence,
+            },
+          ];
+        }
+
         return typoCorrection;
       }
 
@@ -433,11 +446,11 @@ export class SearchService {
     const startTime = Date.now();
 
     try {
-      // 🚀 OPTIMIZED: Increase timeout to 2 seconds for better reliability
+      // 🚀 OPTIMIZED: Increase timeout to 5 seconds for better reliability
       const result = await Promise.race([
         this.postgresSearchEngine.search(indexName, searchQuery),
         new Promise((_, reject) =>
-          setTimeout(() => reject(new Error('PostgreSQL search timeout')), 2000),
+          setTimeout(() => reject(new Error('PostgreSQL search timeout')), 5000),
         ),
       ]);
 

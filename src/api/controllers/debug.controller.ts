@@ -3,6 +3,8 @@ import { Controller, Get, Param, Post, Body } from '@nestjs/common';
 import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { DataSource } from 'typeorm';
 import { TypoToleranceService } from '../../search/typo-tolerance.service';
+import * as fs from 'fs';
+import * as path from 'path';
 
 /**
  * Lean Debug Controller for essential diagnostics
@@ -15,6 +17,60 @@ export class DebugController {
     private readonly dataSource: DataSource,
     private readonly typoToleranceService: TypoToleranceService,
   ) {}
+  @Post('setup-field-weights')
+  @ApiOperation({
+    summary: 'Set up field weights support',
+    description: 'Applies the field weights patch to add support for weighted field ranking',
+  })
+  async setupFieldWeights() {
+    try {
+      // Read and execute the patch script
+      const fs = require('fs');
+      const path = require('path');
+      const scriptPath = path.join(process.cwd(), 'scripts', 'patch-field-weights.sql');
+      const script = fs.readFileSync(scriptPath, 'utf8');
+      await this.dataSource.query(script);
+
+      return {
+        status: 'success',
+        message: 'Field weights support added successfully',
+        timestamp: new Date().toISOString(),
+      };
+    } catch (error) {
+      return {
+        status: 'error',
+        message: error.message,
+        timestamp: new Date().toISOString(),
+      };
+    }
+  }
+
+  @Get('field-weights/:indexName')
+  @ApiOperation({
+    summary: 'Get field weights for index',
+    description: 'Returns the configured field weights for the specified index',
+  })
+  async getFieldWeights(@Param('indexName') indexName: string) {
+    try {
+      const weights = await this.dataSource.query(
+        'SELECT field_name, weight, description FROM field_weights WHERE index_name = $1 ORDER BY weight DESC',
+        [indexName],
+      );
+
+      return {
+        status: 'success',
+        indexName,
+        weights,
+        timestamp: new Date().toISOString(),
+      };
+    } catch (error) {
+      return {
+        status: 'error',
+        message: error.message,
+        timestamp: new Date().toISOString(),
+      };
+    }
+  }
 
   @Get('health/:indexName')
   @ApiOperation({
@@ -319,15 +375,152 @@ export class DebugController {
   async testTypoTolerance(@Body() body: { indexName: string; query: string }) {
     try {
       // Use our optimized TypoToleranceService for 10ms target
-      const result = await this.typoToleranceService.correctQuery(body.indexName, body.query, [
-        'name',
-        'description',
-        'category',
-      ]);
+      const result = await this.typoToleranceService.correctQuery(body.indexName, body.query);
 
       return {
         status: 'success',
         result,
+        timestamp: new Date().toISOString(),
+      };
+    } catch (error) {
+      return {
+        status: 'error',
+        error: error.message,
+        timestamp: new Date().toISOString(),
+      };
+    }
+  }
+
+  @Post('rebuild-typo-tolerance-index')
+  @ApiOperation({
+    summary: 'Force rebuild SymSpell index',
+    description: 'Force rebuild the SymSpell index for a specific index',
+  })
+  async rebuildTypoToleranceIndex(@Body() body: { indexName: string }) {
+    try {
+      await this.typoToleranceService.forceRebuildIndex(body.indexName);
+      return {
+        status: 'success',
+        message: `SymSpell index rebuilt for ${body.indexName}`,
+        timestamp: new Date().toISOString(),
+      };
+    } catch (error) {
+      return {
+        status: 'error',
+        error: error.message,
+        timestamp: new Date().toISOString(),
+      };
+    }
+  }
+
+  @Post('optimize-search-performance')
+  @ApiOperation({
+    summary: 'Optimize search performance',
+    description: 'Apply database indexes and optimizations for faster search queries',
+  })
+  async optimizeSearchPerformance() {
+    try {
+      const scriptPath = path.join(process.cwd(), 'scripts', 'optimize-search-performance.sql');
+
+      // Check if script exists
+      if (!fs.existsSync(scriptPath)) {
+        return {
+          status: 'error',
+          error: 'Optimization script not found',
+          timestamp: new Date().toISOString(),
+        };
+      }
+
+      const script = fs.readFileSync(scriptPath, 'utf8');
+
+      // Split script into individual statements for better error handling
+      const statements = script
+        .split(';')
+        .map(stmt => stmt.trim())
+        .filter(stmt => stmt.length > 0 && !stmt.startsWith('--'));
+
+      const results = [];
+
+      for (const statement of statements) {
+        try {
+          if (statement.trim()) {
+            await this.dataSource.query(statement);
+            results.push({ statement: statement.substring(0, 50) + '...', status: 'success' });
+          }
+        } catch (error) {
+          results.push({
+            statement: statement.substring(0, 50) + '...',
+            status: 'error',
+            error: error.message,
+          });
+        }
+      }
+
+      return {
+        status: 'success',
+        message: 'Search performance optimizations applied successfully',
+        optimizations: [
+          'GIN indexes on JSON fields for faster ILIKE operations',
+          'Composite indexes for common search patterns',
+          'Partial indexes for active documents',
+          'Optimized search_vector indexes',
+          'Updated table statistics',
+        ],
+        results: results,
+        timestamp: new Date().toISOString(),
+      };
+    } catch (error) {
+      return {
+        status: 'error',
+        error: error.message,
+        timestamp: new Date().toISOString(),
+      };
+    }
+  }
+
+  @Post('implement-precomputed-ranking')
+  @ApiOperation({
+    summary: 'Implement precomputed field-weighted ranking',
+    description: 'Deploy precomputed tsvector with field weights for sub-100ms search performance',
+  })
+  async implementPrecomputedRanking() {
+    try {
+      const scriptPath = path.join(process.cwd(), 'scripts', 'simple-precomputed-ranking.sql');
+
+      // Check if script exists
+      if (!fs.existsSync(scriptPath)) {
+        return {
+          status: 'error',
+          error: 'Precomputed ranking script not found',
+          timestamp: new Date().toISOString(),
+        };
+      }
+
+      const script = fs.readFileSync(scriptPath, 'utf8');
+
+      // Execute the script as a single transaction
+      const startTime = Date.now();
+      await this.dataSource.query(script);
+      const executionTime = Date.now() - startTime;
+
+      // Get document count with weighted vectors
+      const countResult = await this.dataSource.query(
+        'SELECT COUNT(*) as count FROM documents WHERE weighted_search_vector IS NOT NULL',
+      );
+      const documentsUpdated = parseInt(countResult[0]?.count || '0');
+
+      return {
+        status: 'success',
+        message: 'Precomputed field-weighted ranking implemented successfully',
+        optimizations: [
+          'Precomputed tsvector with field weights (A=name/title, B=category, C=description, D=tags)',
+          'Automatic trigger for new documents',
+          'Optimized GIN index on weighted_search_vector',
+          'Batch update of existing documents',
+          'Ready for sub-100ms search performance',
+        ],
+        documentsUpdated,
+        executionTime: `${executionTime}ms`,
         timestamp: new Date().toISOString(),
       };
     } catch (error) {

@@ -16,9 +16,12 @@ ENV PYTHON=/usr/bin/python3
 # Copy package files
 COPY package*.json ./
 
-# Install dependencies and NestJS CLI
-RUN npm ci && \
-    npm install -g @nestjs/cli
+# # Install dependencies and NestJS CLI
+# RUN npm ci && \
+#     npm install -g @nestjs/cli
+
+RUN npm install -g typescript @nestjs/cli
+RUN npm install --legacy-peer-deps
 
 # Copy source code
 COPY . .

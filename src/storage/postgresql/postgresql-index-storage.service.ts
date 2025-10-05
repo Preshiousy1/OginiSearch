@@ -200,9 +200,26 @@ export class PostgreSQLIndexStorageService implements IndexStorage {
       for (const [field, fieldData] of Object.entries(document.fields)) {
         if (!fieldData.terms || fieldData.terms.length === 0) continue;
 
-        // Determine field weight
-        const weight = field === 'title' ? 'A' : field === 'description' ? 'B' : 'C';
-        fieldWeights[field] = weight === 'A' ? 2.0 : weight === 'B' ? 1.5 : 1.0;
+        // Determine field weight - prioritize name and title fields
+        let weight: string;
+        let weightValue: number;
+
+        if (field === 'name' || field === 'title') {
+          weight = 'A';
+          weightValue = 3.0;
+        } else if (field === 'category_name' || field === 'sub_category_name') {
+          weight = 'B';
+          weightValue = 2.0;
+        } else if (field === 'description') {
+          weight = 'C';
+          weightValue = 1.5;
+        } else {
+          // tags, content, and other fields get lowest priority
+          weight = 'D';
+          weightValue = 1.0;
+        }
+
+        fieldWeights[field] = weightValue;
 
         // Create field-specific tsvector
         const fieldText = fieldData.terms.join(' ');

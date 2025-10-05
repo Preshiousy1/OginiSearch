@@ -23,6 +23,7 @@ import { IndexingService } from '../indexing/indexing.service';
 import { TermDictionary } from '../index/term-dictionary';
 import { SearchQueryDto, SearchResponseDto } from '../api/dtos/search.dto';
 import { BulkIndexingService } from '../indexing/services/bulk-indexing.service';
+import { FieldWeightsService } from 'src/storage/postgresql/field-weights.service';
 
 @Injectable()
 export class DocumentService implements OnModuleInit {
@@ -36,6 +37,8 @@ export class DocumentService implements OnModuleInit {
     @Inject('TERM_DICTIONARY') private readonly termDictionary: TermDictionary,
     @Inject(forwardRef(() => BulkIndexingService))
     private readonly bulkIndexingService: BulkIndexingService,
+    @Inject(forwardRef(() => FieldWeightsService))
+    private readonly fieldWeightsService: FieldWeightsService,
   ) {}
 
   /**
@@ -529,7 +532,16 @@ export class DocumentService implements OnModuleInit {
         mappings: detectedMappings,
       };
       await this.indexService.updateIndex(indexName, updatedSettings);
-      this.logger.log(`Auto-detected and configured mappings for ${fieldTypes.size} fields`);
+
+      // Analyze and create field weights for detected fields
+      await this.fieldWeightsService.analyzeAndCreateFieldWeights(
+        indexName,
+        Array.from(fieldTypes.keys()),
+      );
+
+      this.logger.log(
+        `Auto-detected and configured mappings and weights for ${fieldTypes.size} fields`,
+      );
     }
   }
 

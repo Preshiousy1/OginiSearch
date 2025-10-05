@@ -9,6 +9,7 @@ import { DocumentProcessorService } from './document-processor.service';
 import { AnalysisModule } from '../analysis/analysis.module';
 import { TermDictionary } from '../index/term-dictionary';
 import { DocumentProcessingService } from './document-processing.service';
+import { PostgreSQLModule } from 'src/storage/postgresql/postgresql.module';
 
 @Module({
   imports: [
@@ -18,6 +19,7 @@ import { DocumentProcessingService } from './document-processing.service';
     forwardRef(() => BulkIndexingModule),
     forwardRef(() => SearchModule),
     forwardRef(() => AnalysisModule),
+    forwardRef(() => PostgreSQLModule),
   ],
   providers: [DocumentService, DocumentProcessorService, DocumentProcessingService],
   exports: [DocumentService, DocumentProcessorService, DocumentProcessingService],

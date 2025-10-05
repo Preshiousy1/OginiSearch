@@ -24,12 +24,12 @@ export class PostgreSQLAnalysisAdapter {
 
   // Business-optimized field weights for directory search
   private readonly defaultBusinessWeights: BusinessFieldWeights = {
-    name: 3.0, // Highest priority - business name
-    title: 3.0, // Alternative business name field
+    name: 10.0, // Highest priority - business name
+    title: 10.0, // Alternative business name field
     category_name: 2.0, // Important for categorization
     sub_category_name: 2.0, // Subcategory classification
     description: 1.5, // Descriptive content
-    tags: 1.5, // Tag-based filtering
+    tags: 1.0, // Tag-based filtering - lowest priority
     content: 1.0, // General content
     location: 1.0, // Location information
   };
@@ -144,10 +144,10 @@ export class PostgreSQLAnalysisAdapter {
    * Map business field weights to PostgreSQL weight labels (A=highest, D=lowest)
    */
   private mapWeightToPostgreSQL(weight: number): string {
-    if (weight >= 3.0) return 'A'; // High priority (business names)
-    if (weight >= 2.0) return 'B'; // Medium-high priority (categories)
-    if (weight >= 1.5) return 'C'; // Medium priority (descriptions, tags)
-    return 'D'; // Low priority (general content)
+    if (weight >= 10.0) return 'A'; // Highest priority (business names)
+    if (weight >= 5.0) return 'B'; // High priority (titles)
+    if (weight >= 2.0) return 'C'; // Medium priority (categories)
+    return 'D'; // Low priority (descriptions, tags, content)
   }
 
   /**
