@@ -21,7 +21,11 @@ BEGIN
         -- B-weight (high priority): category fields  
         COALESCE(setweight(to_tsvector('english', COALESCE(content_data->>'category_name', '')), 'B'), ''::tsvector) ||
         COALESCE(setweight(to_tsvector('english', 
-            array_to_string(ARRAY(SELECT jsonb_array_elements_text(content_data->'sub_category_name')), ' ')
+            CASE 
+                WHEN jsonb_typeof(content_data->'sub_category_name') = 'array' 
+                THEN array_to_string(ARRAY(SELECT jsonb_array_elements_text(content_data->'sub_category_name')), ' ')
+                ELSE COALESCE(content_data->>'sub_category_name', '')
+            END
         ), 'B'), ''::tsvector) ||
         -- C-weight (medium priority): description and location
         COALESCE(setweight(to_tsvector('english', COALESCE(content_data->>'description', '')), 'C'), ''::tsvector) ||
