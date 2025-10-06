@@ -3,6 +3,7 @@ import { Controller, Get, Param, Post, Body } from '@nestjs/common';
 import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { DataSource } from 'typeorm';
 import { TypoToleranceService } from '../../search/typo-tolerance.service';
+import { FilterBuilderService } from '../../storage/postgresql/filter-builder.service';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -16,6 +17,7 @@ export class DebugController {
   constructor(
     private readonly dataSource: DataSource,
     private readonly typoToleranceService: TypoToleranceService,
+    private readonly filterBuilderService: FilterBuilderService,
   ) {}
   @Post('setup-field-weights')
   @ApiOperation({
@@ -528,6 +530,53 @@ export class DebugController {
         status: 'error',
         error: error.message,
         timestamp: new Date().toISOString(),
+      };
+    }
+  }
+
+  @Post('test-location-filter')
+  @ApiOperation({
+    summary: 'Test location filter generation',
+    description: 'Test how location filters are converted to SQL',
+  })
+  async testLocationFilter(@Body() body: { locationText: string }) {
+    try {
+      // Test the filter builder service
+      const filter = {
+        bool: {
+          must: [{ term: { field: 'location_text', value: body.locationText } }],
+        },
+      };
+
+      const params: any[] = [];
+      const result = this.filterBuilderService.buildConditions(filter, params, 2);
+
+      // Test the actual SQL execution
+      const testSql = `
+        SELECT document_id, content->>'name' as name, content->>'location_text' as location
+        FROM documents 
+        WHERE index_name = $1 
+        ${result.sql}
+        LIMIT 5
+      `;
+
+      const testParams = ['businesses', ...params];
+      const testResults = await this.dataSource.query(testSql, testParams);
+
+      return {
+        filter,
+        generatedSql: result.sql,
+        params: params,
+        testSql,
+        testParams,
+        testResults,
+        message: 'Location filter test completed',
+      };
+    } catch (error) {
+      console.error('Error testing location filter:', error);
+      return {
+        error: error.message,
+        message: 'Location filter test failed',
       };
     }
   }

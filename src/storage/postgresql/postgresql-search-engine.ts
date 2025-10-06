@@ -1043,6 +1043,18 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
     const { field, value } = termFilter.term;
     if (!field || value === undefined) return '';
 
+    // Fields that should use LIKE matching for partial text search
+    const likeFields = [
+      'location_text',
+      'description',
+      'tags',
+      'profile',
+      'name',
+      'title',
+      'category_name',
+      'sub_category_name',
+    ];
+
     // Handle boolean values
     if (typeof value === 'boolean') {
       return `content->>'${field}' = '${value}'`;
@@ -1050,7 +1062,13 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
 
     // Handle string values
     if (typeof value === 'string') {
-      return `content->>'${field}' = '${value}'`;
+      if (likeFields.includes(field)) {
+        // Use ILIKE for text fields to enable partial matching
+        return `content->>'${field}' ILIKE '%${value}%'`;
+      } else {
+        // Use exact match for other string fields
+        return `content->>'${field}' = '${value}'`;
+      }
     }
 
     // Handle numeric values

@@ -123,9 +123,30 @@ export class FilterBuilderService {
       value = v;
     }
 
-    params.push(value);
     const fieldRef = this.getFieldReference(field);
-    const sql = `${fieldRef} = $${paramIndex}::text`;
+
+    // Fields that should use LIKE matching for partial text search
+    const likeFields = [
+      'location_text',
+      'description',
+      'tags',
+      'profile',
+      'name',
+      'title',
+      'category_name',
+      'sub_category_name',
+    ];
+
+    let sql: string;
+    if (likeFields.includes(field) && typeof value === 'string') {
+      // Use ILIKE for text fields to enable partial matching
+      params.push(`%${value}%`);
+      sql = `${fieldRef} ILIKE $${paramIndex}`;
+    } else {
+      // Use exact match for boolean, numeric, and other fields
+      params.push(value);
+      sql = `${fieldRef} = $${paramIndex}::text`;
+    }
 
     return { sql, nextParamIndex: paramIndex + 1 };
   }
@@ -162,7 +183,7 @@ export class FilterBuilderService {
   private getFieldReference(field: string): string {
     // Handle .keyword subfields by extracting the base field name
     const baseField = field.includes('.keyword') ? field.split('.')[0] : field;
-    return `d.content->>'${baseField}'`;
+    return `content->>'${baseField}'`;
   }
 
   /**
