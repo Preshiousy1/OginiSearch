@@ -79,12 +79,14 @@ export class SearchService {
         searchResults = originalResults;
         // NO TYPO CORRECTION NEEDED - we have results!
       } else {
-        // 5. No results from original query - only NOW start typo correction
-        this.logger.log(`❌ Original query found no results - starting typo correction`);
+        // 5. No results from original query - check if typo correction is needed
+        this.logger.log(`❌ Original query found no results - evaluating typo correction`);
 
-        // Run typo correction for queries with few results (regardless of dictionary check)
-        if (originalQuery.length > 3) {
-          this.logger.log(`🔍 DEBUG: About to call processTypoTolerance for "${originalQuery}"`);
+        // Only run typo correction if dictionary suggests the query is misspelled
+        if (originalQuery.length > 3 && !isLikelyCorrect) {
+          this.logger.log(
+            `🔍 Dictionary indicates possible typo - starting typo correction for "${originalQuery}"`,
+          );
           try {
             typoCorrection = await this.processTypoTolerance(indexName, originalQuery);
 
@@ -124,6 +126,9 @@ export class SearchService {
           }
         } else {
           // Dictionary says it's correct, so no typo correction needed
+          this.logger.log(
+            `✅ Dictionary confirms "${originalQuery}" is valid - skipping typo correction`,
+          );
           searchResults = originalResults;
         }
       }

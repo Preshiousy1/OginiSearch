@@ -75,6 +75,32 @@ export class DictionaryService {
   }
 
   /**
+   * Extract base words from wildcard patterns (* and ?)
+   */
+  private extractBaseWordsFromWildcard(query: string): string[] {
+    // Remove wildcard characters and split by common separators
+    const cleanQuery = query
+      .replace(/[*?]/g, ' ') // Replace wildcards with spaces
+      .replace(/[^\w\s]/g, ' ') // Replace non-word, non-space chars with spaces
+      .trim();
+
+    // Split into words and filter out short/empty ones
+    const words = cleanQuery
+      .split(/\s+/)
+      .filter(word => word.length >= 3)
+      .map(word => word.toLowerCase());
+
+    return words;
+  }
+
+  /**
+   * Check if a query contains wildcard characters
+   */
+  private isWildcardQuery(query: string): boolean {
+    return query.includes('*') || query.includes('?');
+  }
+
+  /**
    * Check if a query is likely spelled correctly
    */
   async isQueryLikelyCorrect(query: string): Promise<boolean> {
@@ -86,9 +112,32 @@ export class DictionaryService {
         return true;
       }
 
-      // Check if query contains multiple words (likely a name/phrase)
-      if (queryLower.includes(' ')) {
-        return true;
+      // Check if query contains multiple words separated by spaces (likely a name/phrase)
+      if (queryLower.includes(' ') && !this.isWildcardQuery(queryLower)) {
+        // For multi-word phrases, split and check each word
+        const words = queryLower.split(/\s+/).filter(word => word.length >= 3);
+        if (words.length === 0) return true;
+
+        // If most words are valid, consider the query correct
+        const validWords = await Promise.all(words.map(word => this.isWordValid(word)));
+        const validCount = validWords.filter(Boolean).length;
+        return validCount / words.length >= 0.5; // At least 50% of words should be valid
+      }
+
+      // Handle wildcard queries (*, ?)
+      if (this.isWildcardQuery(queryLower)) {
+        const baseWords = this.extractBaseWordsFromWildcard(queryLower);
+
+        // If no meaningful base words extracted, assume it's a valid search pattern
+        if (baseWords.length === 0) {
+          return true;
+        }
+
+        // Check if all extracted base words are valid
+        const validityChecks = await Promise.all(baseWords.map(word => this.isWordValid(word)));
+
+        // If any base word is valid, consider the wildcard query valid
+        return validityChecks.some(Boolean);
       }
 
       // For single words, check against dictionary (case-insensitive)
