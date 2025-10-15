@@ -902,9 +902,8 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
             ) as base_rank
           FROM documents
           WHERE index_name = $2
-            AND search_vector IS NOT NULL
             AND (
-              COALESCE(weighted_search_vector, materialized_vector, search_vector) @@ plainto_tsquery('english', $1)
+              (search_vector IS NOT NULL AND COALESCE(weighted_search_vector, materialized_vector, search_vector) @@ plainto_tsquery('english', $1))
               OR content->>'name' ILIKE '%' || $1 || '%'
               OR content->>'title' ILIKE '%' || $1 || '%'
               OR content->>'category_name' ILIKE '%' || $1 || '%'

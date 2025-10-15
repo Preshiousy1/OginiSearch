@@ -107,11 +107,28 @@ export class SearchService {
                 `🔍 High-scoring suggestions (>400): ${highScoringSuggestions.join(', ')}`,
               );
 
-              // Use the corrected query
-              searchQueryToUse = {
-                ...searchQuery,
-                query: typoCorrection.correctedQuery,
-              };
+              // Use the corrected query - maintain the same query structure as original
+              if (typeof searchQuery.query === 'string') {
+                searchQueryToUse = {
+                  ...searchQuery,
+                  query: typoCorrection.correctedQuery,
+                };
+              } else if (searchQuery.query?.match) {
+                searchQueryToUse = {
+                  ...searchQuery,
+                  query: {
+                    match: {
+                      value: typoCorrection.correctedQuery,
+                    },
+                  },
+                };
+              } else {
+                // Fallback to string format
+                searchQueryToUse = {
+                  ...searchQuery,
+                  query: typoCorrection.correctedQuery,
+                };
+              }
               queryTextToUse = typoCorrection.correctedQuery;
 
               // Execute search with corrected query
@@ -268,11 +285,9 @@ export class SearchService {
         }
       } else {
         // Fallback: Execute single search for corrected query
-        this.logger.log(
-          `🔍 Executing single search for corrected query: "${searchQueryToUse.query}"`,
-        );
+        this.logger.log(`🔍 Executing single search for corrected query: "${queryTextToUse}"`);
         // OPTIMIZATION: Add Redis caching for search results
-        const cacheKey = `search:${indexName}:${searchQueryToUse.query}:${JSON.stringify(
+        const cacheKey = `search:${indexName}:${queryTextToUse}:${JSON.stringify(
           searchQueryToUse,
         )}`;
         const cachedResult = await this.getCachedSearchResult(cacheKey);
@@ -451,11 +466,11 @@ export class SearchService {
     const startTime = Date.now();
 
     try {
-      // 🚀 OPTIMIZED: Increase timeout to 5 seconds for better reliability
+      // 🚀 OPTIMIZED: Increase timeout to 10 seconds for production reliability
       const result = await Promise.race([
         this.postgresSearchEngine.search(indexName, searchQuery),
         new Promise((_, reject) =>
-          setTimeout(() => reject(new Error('PostgreSQL search timeout')), 5000),
+          setTimeout(() => reject(new Error('PostgreSQL search timeout')), 10000),
         ),
       ]);
 
@@ -470,7 +485,8 @@ export class SearchService {
       this.logger.error(`❌ PostgreSQL search failed after ${searchTime}ms: ${error.message}`);
 
       // 🚀 AGGRESSIVE OPTIMIZATION: Use ultra-fast fallback search
-      this.logger.log(`🚀 Using ULTRA-FAST fallback search for "${searchQuery.query}"`);
+      const queryText = this.getQueryText(searchQuery);
+      this.logger.log(`🚀 Using ULTRA-FAST fallback search for "${queryText}"`);
       return await this.ultraFastFallbackSearch(indexName, searchQuery);
     }
   }
@@ -483,7 +499,7 @@ export class SearchService {
     searchQuery: SearchQueryDto,
   ): Promise<any> {
     try {
-      const query = searchQuery.query || '';
+      const query = this.getQueryText(searchQuery);
 
       // 🚀 ULTRA-FAST query with correct column names and minimal processing
       const ultraFastQuery = `
@@ -541,7 +557,7 @@ export class SearchService {
    */
   private async fastFallbackSearch(indexName: string, searchQuery: SearchQueryDto): Promise<any> {
     try {
-      const query = searchQuery.query || '';
+      const query = this.getQueryText(searchQuery);
 
       // SIMPLE, FAST query that bypasses complex PostgreSQL search
       const simpleQuery = `
