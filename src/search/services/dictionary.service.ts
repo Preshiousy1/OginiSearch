@@ -141,7 +141,27 @@ export class DictionaryService {
       }
 
       // For single words, check against dictionary (case-insensitive)
-      return await this.isWordValid(queryLower);
+      const isValidInDictionary = await this.isWordValid(queryLower);
+
+      // If it's not in dictionary, check if it looks like a business name
+      if (!isValidInDictionary) {
+        // Business names often have patterns like:
+        // - Mixed case (Fazsion, McDonald's)
+        // - Numbers (7-Eleven)
+        // - Special characters (McDonald's, O'Reilly)
+        // - Non-English words (common in business names)
+        const hasMixedCase = query !== queryLower && query !== query.toUpperCase();
+        const hasNumbers = /\d/.test(query);
+        const hasSpecialChars = /[^a-zA-Z0-9\s]/.test(query);
+        const isShortBusinessName = query.length >= 3 && query.length <= 20;
+
+        // If it looks like a business name, consider it valid
+        if (hasMixedCase || hasNumbers || hasSpecialChars || isShortBusinessName) {
+          return true;
+        }
+      }
+
+      return isValidInDictionary;
     } catch (error) {
       this.logger.warn(`⚠️ Query validation failed for "${query}": ${error.message}`);
       return true; // Fallback: assume correct to avoid blocking

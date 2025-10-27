@@ -72,7 +72,7 @@ export class SearchService {
       let searchResults: any;
 
       // 4. Check if we have good results from original query
-      if (originalResults.data.hits.length > 2) {
+      if (originalResults.data.hits.length > 0) {
         this.logger.log(
           `✅ Original query found ${originalResults.data.hits.length} results - using fast path`,
         );
@@ -476,7 +476,8 @@ export class SearchService {
 
       const searchTime = Date.now() - startTime;
       if (searchTime > 500) {
-        this.logger.warn(`⚠️ Slow search detected: ${searchTime}ms for "${searchQuery.query}"`);
+        const queryText = this.getQueryText(searchQuery);
+        this.logger.warn(`⚠️ Slow search detected: ${searchTime}ms for "${queryText}"`);
       }
 
       return result;
@@ -524,7 +525,13 @@ export class SearchService {
         LIMIT ${searchQuery.size || 10}
       `;
 
-      const results = await this.dataSource.query(ultraFastQuery, [indexName, query]);
+      // Add timeout to ultra-fast query
+      const results = await Promise.race([
+        this.dataSource.query(ultraFastQuery, [indexName, query]),
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error('Ultra-fast query timeout')), 3000),
+        ),
+      ]);
 
       return {
         data: {
