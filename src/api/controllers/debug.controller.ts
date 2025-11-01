@@ -19,60 +19,6 @@ export class DebugController {
     private readonly typoToleranceService: TypoToleranceService,
     private readonly filterBuilderService: FilterBuilderService,
   ) {}
-  @Post('setup-field-weights')
-  @ApiOperation({
-    summary: 'Set up field weights support',
-    description: 'Applies the field weights patch to add support for weighted field ranking',
-  })
-  async setupFieldWeights() {
-    try {
-      // Read and execute the patch script
-      const fs = require('fs');
-      const path = require('path');
-      const scriptPath = path.join(process.cwd(), 'scripts', 'patch-field-weights.sql');
-      const script = fs.readFileSync(scriptPath, 'utf8');
-      await this.dataSource.query(script);
-
-      return {
-        status: 'success',
-        message: 'Field weights support added successfully',
-        timestamp: new Date().toISOString(),
-      };
-    } catch (error) {
-      return {
-        status: 'error',
-        message: error.message,
-        timestamp: new Date().toISOString(),
-      };
-    }
-  }
-
-  @Get('field-weights/:indexName')
-  @ApiOperation({
-    summary: 'Get field weights for index',
-    description: 'Returns the configured field weights for the specified index',
-  })
-  async getFieldWeights(@Param('indexName') indexName: string) {
-    try {
-      const weights = await this.dataSource.query(
-        'SELECT field_name, weight, description FROM field_weights WHERE index_name = $1 ORDER BY weight DESC',
-        [indexName],
-      );
-
-      return {
-        status: 'success',
-        indexName,
-        weights,
-        timestamp: new Date().toISOString(),
-      };
-    } catch (error) {
-      return {
-        status: 'error',
-        message: error.message,
-        timestamp: new Date().toISOString(),
-      };
-    }
-  }
 
   @Get('health/:indexName')
   @ApiOperation({
@@ -181,64 +127,6 @@ export class DebugController {
       return {
         status: 'success',
         message: 'Clean database initialization completed',
-        timestamp: new Date().toISOString(),
-      };
-    } catch (error) {
-      return {
-        status: 'error',
-        error: error.message,
-        timestamp: new Date().toISOString(),
-      };
-    }
-  }
-
-  @Get('remove-problematic-index')
-  @ApiOperation({
-    summary: 'Remove problematic index',
-    description:
-      'Remove the idx_documents_search_lightweight index that causes btree size limit errors',
-  })
-  async removeProblematicIndex() {
-    try {
-      const fs = require('fs');
-      const path = require('path');
-      const scriptPath = path.join(process.cwd(), 'scripts', 'remove-problematic-index.sql');
-      const script = fs.readFileSync(scriptPath, 'utf8');
-
-      await this.dataSource.query(script);
-
-      return {
-        status: 'success',
-        message: 'Problematic index removed successfully',
-        timestamp: new Date().toISOString(),
-      };
-    } catch (error) {
-      return {
-        status: 'error',
-        error: error.message,
-        timestamp: new Date().toISOString(),
-      };
-    }
-  }
-
-  @Post('fix-index-size-limitation')
-  @ApiOperation({
-    summary: 'Comprehensive PostgreSQL index optimization',
-    description:
-      'Fix index size limitations AND cleanup duplicate indexes for optimal performance. This single endpoint handles both the "index row size exceeds btree version 4 maximum" error and removes conflicting indexes.',
-  })
-  async fixIndexSizeLimitation() {
-    try {
-      const fs = require('fs');
-      const path = require('path');
-      const scriptPath = path.join(process.cwd(), 'scripts', 'fix-index-size-limitation.sql');
-      const script = fs.readFileSync(scriptPath, 'utf8');
-
-      await this.dataSource.query(script);
-
-      return {
-        status: 'success',
-        message: 'Comprehensive index optimization completed successfully',
         timestamp: new Date().toISOString(),
       };
     } catch (error) {
@@ -415,125 +303,6 @@ export class DebugController {
     }
   }
 
-  @Post('optimize-search-performance')
-  @ApiOperation({
-    summary: 'Optimize search performance',
-    description: 'Apply database indexes and optimizations for faster search queries',
-  })
-  async optimizeSearchPerformance() {
-    try {
-      const scriptPath = path.join(process.cwd(), 'scripts', 'optimize-search-performance.sql');
-
-      // Check if script exists
-      if (!fs.existsSync(scriptPath)) {
-        return {
-          status: 'error',
-          error: 'Optimization script not found',
-          timestamp: new Date().toISOString(),
-        };
-      }
-
-      const script = fs.readFileSync(scriptPath, 'utf8');
-
-      // Split script into individual statements for better error handling
-      const statements = script
-        .split(';')
-        .map(stmt => stmt.trim())
-        .filter(stmt => stmt.length > 0 && !stmt.startsWith('--'));
-
-      const results = [];
-
-      for (const statement of statements) {
-        try {
-          if (statement.trim()) {
-            await this.dataSource.query(statement);
-            results.push({ statement: statement.substring(0, 50) + '...', status: 'success' });
-          }
-        } catch (error) {
-          results.push({
-            statement: statement.substring(0, 50) + '...',
-            status: 'error',
-            error: error.message,
-          });
-        }
-      }
-
-      return {
-        status: 'success',
-        message: 'Search performance optimizations applied successfully',
-        optimizations: [
-          'GIN indexes on JSON fields for faster ILIKE operations',
-          'Composite indexes for common search patterns',
-          'Partial indexes for active documents',
-          'Optimized search_vector indexes',
-          'Updated table statistics',
-        ],
-        results: results,
-        timestamp: new Date().toISOString(),
-      };
-    } catch (error) {
-      return {
-        status: 'error',
-        error: error.message,
-        timestamp: new Date().toISOString(),
-      };
-    }
-  }
-
-  @Post('implement-precomputed-ranking')
-  @ApiOperation({
-    summary: 'Implement precomputed field-weighted ranking',
-    description: 'Deploy precomputed tsvector with field weights for sub-100ms search performance',
-  })
-  async implementPrecomputedRanking() {
-    try {
-      const scriptPath = path.join(process.cwd(), 'scripts', 'simple-precomputed-ranking.sql');
-
-      // Check if script exists
-      if (!fs.existsSync(scriptPath)) {
-        return {
-          status: 'error',
-          error: 'Precomputed ranking script not found',
-          timestamp: new Date().toISOString(),
-        };
-      }
-
-      const script = fs.readFileSync(scriptPath, 'utf8');
-
-      // Execute the script as a single transaction
-      const startTime = Date.now();
-      await this.dataSource.query(script);
-      const executionTime = Date.now() - startTime;
-
-      // Get document count with weighted vectors
-      const countResult = await this.dataSource.query(
-        'SELECT COUNT(*) as count FROM documents WHERE weighted_search_vector IS NOT NULL',
-      );
-      const documentsUpdated = parseInt(countResult[0]?.count || '0');
-
-      return {
-        status: 'success',
-        message: 'Precomputed field-weighted ranking implemented successfully',
-        optimizations: [
-          'Precomputed tsvector with field weights (A=name/title, B=category, C=description, D=tags)',
-          'Automatic trigger for new documents',
-          'Optimized GIN index on weighted_search_vector',
-          'Batch update of existing documents',
-          'Ready for sub-100ms search performance',
-        ],
-        documentsUpdated,
-        executionTime: `${executionTime}ms`,
-        timestamp: new Date().toISOString(),
-      };
-    } catch (error) {
-      return {
-        status: 'error',
-        error: error.message,
-        timestamp: new Date().toISOString(),
-      };
-    }
-  }
-
   @Post('test-location-filter')
   @ApiOperation({
     summary: 'Test location filter generation',
@@ -577,6 +346,326 @@ export class DebugController {
       return {
         error: error.message,
         message: 'Location filter test failed',
+      };
+    }
+  }
+
+  @Post('complete-search-optimization')
+  @ApiOperation({
+    summary: 'Run complete search engine optimization',
+    description:
+      'Executes the comprehensive database optimization script for sub-200ms search performance. This includes: materialized columns, search vector generation, optimized indexes, and performance monitoring setup. Estimated runtime: 2-4 hours for 600K documents.',
+  })
+  async completeSearchOptimization() {
+    try {
+      const scriptPath = path.join(process.cwd(), 'scripts', 'complete-search-optimization.sql');
+
+      // Check if script exists
+      if (!fs.existsSync(scriptPath)) {
+        return {
+          status: 'error',
+          error: 'Complete search optimization script not found',
+          timestamp: new Date().toISOString(),
+        };
+      }
+
+      const script = fs.readFileSync(scriptPath, 'utf8');
+      const startTime = Date.now();
+
+      // Clean the script for Node.js execution
+      const cleanScript = script
+        // Remove psql-specific commands
+        .replace(/\\timing on/g, '')
+        .replace(/\\set ON_ERROR_STOP on/g, '')
+        // Remove BEGIN/COMMIT that wrap sections (not inside DO blocks)
+        .replace(/^BEGIN;/gm, '')
+        .replace(/^COMMIT;/gm, '')
+        // Fix CONCURRENTLY statements - they can't be in transactions
+        // Handle both "CREATE INDEX CONCURRENTLY" and "CREATE INDEX CONCURRENTLY IF NOT EXISTS"
+        .replace(/CREATE INDEX CONCURRENTLY IF NOT EXISTS/gi, 'CREATE INDEX IF NOT EXISTS')
+        .replace(/CREATE INDEX CONCURRENTLY/gi, 'CREATE INDEX IF NOT EXISTS')
+        .replace(
+          /DROP INDEX IF EXISTS ([^;]+);[\s\n]*CREATE INDEX CONCURRENTLY/gi,
+          'CREATE INDEX IF NOT EXISTS',
+        );
+
+      // Smart statement splitting that respects DO $$ and FUNCTION $$ blocks
+      const statements: string[] = [];
+      let currentStatement = '';
+      let inDollarQuote = false;
+      let blockType: 'DO' | 'FUNCTION' | null = null;
+
+      const lines = cleanScript.split('\n');
+
+      for (const line of lines) {
+        // Skip empty lines and comments when not in a statement
+        if (!currentStatement && (line.trim() === '' || line.trim().startsWith('--'))) {
+          continue;
+        }
+
+        currentStatement += line + '\n';
+
+        // Detect start of dollar-quoted blocks
+        if (!inDollarQuote) {
+          if (line.match(/DO\s+\$\$/i)) {
+            inDollarQuote = true;
+            blockType = 'DO';
+          } else if (
+            line.match(/CREATE\s+(OR\s+REPLACE\s+)?FUNCTION/i) ||
+            line.match(/RETURNS/i) ||
+            currentStatement.match(/CREATE\s+(OR\s+REPLACE\s+)?FUNCTION/i)
+          ) {
+            // Check if this line or current statement has AS $$ or just $$
+            if (line.match(/AS\s+\$\$/i) || line.match(/^\s*\$\$/)) {
+              inDollarQuote = true;
+              blockType = 'FUNCTION';
+            }
+          }
+        } else {
+          // Detect end of dollar-quoted blocks
+          if (blockType === 'DO' && line.match(/END\s+\$\$;/i)) {
+            // DO block ends with END $$;
+            inDollarQuote = false;
+            blockType = null;
+            // This line completes the statement
+            if (currentStatement.trim()) {
+              statements.push(currentStatement.trim());
+            }
+            currentStatement = '';
+            continue;
+          } else if (blockType === 'FUNCTION' && line.match(/\$\$\s*LANGUAGE/i)) {
+            // FUNCTION block ends with $$ LANGUAGE
+            inDollarQuote = false;
+            blockType = null;
+          }
+        }
+
+        // Check for statement end (semicolon not in DO/FUNCTION block)
+        if (!inDollarQuote && line.trim().endsWith(';')) {
+          if (currentStatement.trim()) {
+            statements.push(currentStatement.trim());
+          }
+          currentStatement = '';
+        }
+      }
+
+      // Add last statement if exists
+      if (currentStatement.trim()) {
+        statements.push(currentStatement.trim());
+      }
+
+      let successCount = 0;
+      let errorCount = 0;
+      const errors = [];
+
+      // Execute statements one by one
+      for (let i = 0; i < statements.length; i++) {
+        const statement = statements[i];
+
+        try {
+          await this.dataSource.query(statement);
+          successCount++;
+
+          // Log progress every 10 statements
+          if ((i + 1) % 10 === 0) {
+            console.log(`Progress: ${i + 1}/${statements.length} statements executed`);
+          }
+        } catch (error) {
+          errorCount++;
+          const preview = statement.substring(0, 100).replace(/\n/g, ' ');
+          errors.push({
+            statement: preview + '...',
+            error: error.message,
+          });
+
+          // Continue on errors that are acceptable
+          const acceptableErrors = ['already exists', 'does not exist', 'duplicate'];
+
+          const isAcceptable = acceptableErrors.some(msg =>
+            error.message.toLowerCase().includes(msg.toLowerCase()),
+          );
+
+          if (!isAcceptable) {
+            console.error(`Error executing statement ${i + 1}:`, error.message);
+          }
+        }
+      }
+
+      const executionTime = Date.now() - startTime;
+
+      // Get statistics after optimization
+      const vectorCoverage = await this.dataSource.query(`
+        SELECT 
+          COUNT(*) as total_documents,
+          COUNT(CASE WHEN weighted_search_vector IS NOT NULL THEN 1 END) as documents_with_vectors,
+          ROUND((COUNT(CASE WHEN weighted_search_vector IS NOT NULL THEN 1 END)::FLOAT / 
+                 NULLIF(COUNT(*), 0) * 100)::numeric, 2) as vector_coverage_percent
+        FROM documents
+      `);
+
+      const indexCount = await this.dataSource.query(`
+        SELECT COUNT(*) as index_count
+        FROM pg_indexes 
+        WHERE tablename = 'documents'
+      `);
+
+      const tableSize = await this.dataSource.query(`
+        SELECT pg_size_pretty(pg_total_relation_size('documents')) as table_size
+      `);
+
+      return {
+        status: errorCount > 0 ? 'partial_success' : 'success',
+        message:
+          errorCount > 0
+            ? `Optimization completed with ${errorCount} errors (some may be acceptable)`
+            : 'Complete search optimization executed successfully',
+        execution: {
+          total_statements: statements.length,
+          successful: successCount,
+          errors: errorCount,
+          error_details: errors.length > 0 ? errors.slice(0, 5) : undefined,
+        },
+        optimizations: [
+          'Materialized columns (name, category, description, location, filters)',
+          'Search vector generation functions with field weights',
+          'Automatic triggers for vector updates',
+          'Batch population of existing search vectors',
+          'GIN indexes on weighted_search_vector, search_vector, materialized_vector',
+          'Trigram indexes for wildcard searches (name, category, description)',
+          'Composite indexes for filtered queries',
+          'Materialized view for active documents',
+          'Helper functions (search_with_prefix, search_with_boost)',
+          'Maintenance procedures and performance monitoring views',
+          'PostgreSQL configuration optimization',
+        ],
+        statistics: {
+          ...vectorCoverage[0],
+          total_indexes: indexCount[0].index_count,
+          table_size: tableSize[0].table_size,
+        },
+        executionTime: `${(executionTime / 1000).toFixed(2)}s`,
+        nextSteps: [
+          'Restart PostgreSQL to apply configuration changes (ALTER SYSTEM settings)',
+          'Monitor query performance using slow_search_queries view',
+          'Run maintain_documents_table() daily for maintenance',
+          'Deploy updated application code with optimized queries',
+        ],
+        timestamp: new Date().toISOString(),
+      };
+    } catch (error) {
+      return {
+        status: 'error',
+        error: error.message,
+        errorDetail: error.detail || 'No additional details',
+        stack: error.stack,
+        timestamp: new Date().toISOString(),
+      };
+    }
+  }
+
+  @Get('verify-search-indexes')
+  @ApiOperation({
+    summary: 'Verify search engine indexes',
+    description:
+      'Lists all indexes on the documents table to verify that critical search indexes have been created. Should show at least 15 indexes including weighted_search_vector, name_trgm, and active_verified indexes.',
+  })
+  async verifySearchIndexes() {
+    try {
+      // Get all indexes on documents table
+      const indexes = await this.dataSource.query(`
+        SELECT 
+          indexname,
+          indexdef
+        FROM pg_indexes
+        WHERE tablename = 'documents'
+          AND schemaname = 'public'
+        ORDER BY indexname
+      `);
+
+      // Check for critical indexes
+      const criticalIndexes = [
+        'idx_documents_weighted_search_vector',
+        'idx_documents_name_trgm',
+        'idx_documents_active_verified',
+        'idx_documents_search_vector',
+        'idx_documents_category_trgm',
+        'idx_documents_index_filters',
+      ];
+
+      const foundCritical = criticalIndexes.filter(criticalIndex =>
+        indexes.some(idx => idx.indexname === criticalIndex),
+      );
+
+      const missingCritical = criticalIndexes.filter(
+        criticalIndex => !indexes.some(idx => idx.indexname === criticalIndex),
+      );
+
+      // Get index usage statistics
+      const indexUsage = await this.dataSource.query(`
+        SELECT 
+          schemaname,
+          relname as tablename,
+          indexrelname as indexname,
+          idx_scan as scans,
+          idx_tup_read as tuples_read,
+          idx_tup_fetch as tuples_fetched,
+          pg_size_pretty(pg_relation_size(indexrelid)) as size
+        FROM pg_stat_user_indexes
+        WHERE schemaname = 'public'
+          AND relname = 'documents'
+        ORDER BY idx_scan DESC
+        LIMIT 20
+      `);
+
+      // Get table statistics
+      const tableStats = await this.dataSource.query(`
+        SELECT 
+          COUNT(*) as total_documents,
+          COUNT(CASE WHEN weighted_search_vector IS NOT NULL THEN 1 END) as documents_with_weighted_vectors,
+          COUNT(CASE WHEN search_vector IS NOT NULL THEN 1 END) as documents_with_search_vectors,
+          pg_size_pretty(pg_total_relation_size('documents')) as total_table_size,
+          pg_size_pretty(pg_relation_size('documents')) as table_size,
+          pg_size_pretty(pg_total_relation_size('documents') - pg_relation_size('documents')) as indexes_size
+        FROM documents
+      `);
+
+      return {
+        status: foundCritical.length === criticalIndexes.length ? 'success' : 'warning',
+        message:
+          foundCritical.length === criticalIndexes.length
+            ? 'All critical indexes found'
+            : 'Some critical indexes are missing',
+        summary: {
+          total_indexes: indexes.length,
+          critical_indexes_found: foundCritical.length,
+          critical_indexes_missing: missingCritical.length,
+        },
+        criticalIndexes: {
+          found: foundCritical,
+          missing: missingCritical,
+        },
+        allIndexes: indexes,
+        indexUsage: indexUsage,
+        tableStatistics: tableStats[0],
+        recommendations:
+          missingCritical.length > 0
+            ? [
+                'Run POST /debug/complete-search-optimization to create missing indexes',
+                'Verify that the optimization script completed successfully',
+                'Check PostgreSQL logs for any index creation errors',
+              ]
+            : [
+                'All critical indexes are in place',
+                'Monitor index usage with this endpoint regularly',
+                'Run maintain_documents_table() for ongoing optimization',
+              ],
+        timestamp: new Date().toISOString(),
+      };
+    } catch (error) {
+      return {
+        status: 'error',
+        error: error.message,
+        timestamp: new Date().toISOString(),
       };
     }
   }
