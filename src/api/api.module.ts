@@ -9,6 +9,8 @@ import { IntelligentSearchController } from './controllers/intelligent-search.co
 import { WorkerManagementService } from './services/worker-management.service';
 import { MetricsController } from './controllers/metrics.controller';
 import { DebugController } from './controllers/debug.controller';
+import { DatabaseOptimizationService } from './services/database-optimization.service';
+import { DatabaseOptimizationProcessor } from './processors/database-optimization.processor';
 
 import { IndexModule } from '../index/index.module';
 import { DocumentModule } from '../document/document.module';
@@ -32,6 +34,9 @@ import { BullModule } from '@nestjs/bull';
     BullModule.registerQueue({
       name: 'bulk-indexing',
     }),
+    BullModule.registerQueue({
+      name: 'database-optimization',
+    }),
   ],
   controllers: [
     IndexController,
@@ -44,6 +49,6 @@ import { BullModule } from '@nestjs/bull';
     MetricsController,
     DebugController,
   ],
-  providers: [WorkerManagementService],
+  providers: [WorkerManagementService, DatabaseOptimizationService, DatabaseOptimizationProcessor],
 })
 export class ApiModule {}

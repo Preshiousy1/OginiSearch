@@ -1,9 +1,10 @@
 /* eslint-disable @typescript-eslint/no-var-requires */
-import { Controller, Get, Param, Post, Body } from '@nestjs/common';
+import { Controller, Get, Param, Post, Body, Delete } from '@nestjs/common';
 import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { DataSource } from 'typeorm';
 import { TypoToleranceService } from '../../search/typo-tolerance.service';
 import { FilterBuilderService } from '../../storage/postgresql/filter-builder.service';
+import { DatabaseOptimizationService } from '../services/database-optimization.service';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -18,6 +19,7 @@ export class DebugController {
     private readonly dataSource: DataSource,
     private readonly typoToleranceService: TypoToleranceService,
     private readonly filterBuilderService: FilterBuilderService,
+    private readonly optimizationService: DatabaseOptimizationService,
   ) {}
 
   @Get('health/:indexName')
@@ -416,7 +418,7 @@ export class DebugController {
             currentStatement.match(/CREATE\s+(OR\s+REPLACE\s+)?FUNCTION/i)
           ) {
             // Check if this line or current statement has AS $$ or just $$
-            if (line.match(/AS\s+\$\$/i) || line.match(/^\s*\$\$/)) {
+            if (line.match(/AS\s+\$\$/i) || line.match(/\)\s+AS\s+\$\$/i)) {
               inDollarQuote = true;
               blockType = 'FUNCTION';
             }
@@ -434,9 +436,18 @@ export class DebugController {
             currentStatement = '';
             continue;
           } else if (blockType === 'FUNCTION' && line.match(/\$\$\s*LANGUAGE/i)) {
-            // FUNCTION block ends with $$ LANGUAGE
+            // FUNCTION block ends with $$ LANGUAGE, but need to wait for semicolon
             inDollarQuote = false;
-            blockType = null;
+
+            // If semicolon is on same line, complete the statement
+            if (line.includes(';')) {
+              blockType = null;
+              if (currentStatement.trim()) {
+                statements.push(currentStatement.trim());
+              }
+              currentStatement = '';
+              continue;
+            }
           }
         }
 
@@ -446,6 +457,7 @@ export class DebugController {
             statements.push(currentStatement.trim());
           }
           currentStatement = '';
+          blockType = null;
         }
       }
 
@@ -659,6 +671,88 @@ export class DebugController {
                 'Monitor index usage with this endpoint regularly',
                 'Run maintain_documents_table() for ongoing optimization',
               ],
+        timestamp: new Date().toISOString(),
+      };
+    } catch (error) {
+      return {
+        status: 'error',
+        error: error.message,
+        timestamp: new Date().toISOString(),
+      };
+    }
+  }
+
+  // ============================================================================
+  // ASYNC DATABASE OPTIMIZATION ENDPOINTS (For large databases)
+  // ============================================================================
+
+  @Post('complete-search-optimization-async')
+  @ApiOperation({
+    summary: 'Queue database optimization job (RECOMMENDED for 1M+ records)',
+    description:
+      'Queues the comprehensive database optimization as a background job. This is the recommended approach for large databases (1M+ records) as it prevents HTTP timeouts. The job will run in the background and you can check its progress using the progress endpoint. Estimated runtime: 2-4 hours for 1M+ documents.',
+  })
+  async queueOptimization() {
+    try {
+      const result = await this.optimizationService.queueOptimization();
+      return {
+        status: 'queued',
+        ...result,
+        checkProgress: `/debug/optimization-progress/${result.jobId}`,
+        cancelJob: `/debug/optimization-cancel/${result.jobId}`,
+        timestamp: new Date().toISOString(),
+      };
+    } catch (error) {
+      return {
+        status: 'error',
+        error: error.message,
+        timestamp: new Date().toISOString(),
+      };
+    }
+  }
+
+  @Get('optimization-progress/:jobId')
+  @ApiOperation({
+    summary: 'Get optimization job progress',
+    description:
+      'Check the progress of a running database optimization job. Returns current statement number, phase, estimated time remaining, and any errors encountered.',
+  })
+  async getOptimizationProgress(@Param('jobId') jobId: string) {
+    try {
+      const progress = await this.optimizationService.getProgress(jobId);
+      if (!progress) {
+        return {
+          status: 'error',
+          error: 'Job not found',
+          timestamp: new Date().toISOString(),
+        };
+      }
+
+      return {
+        status: 'success',
+        progress,
+        timestamp: new Date().toISOString(),
+      };
+    } catch (error) {
+      return {
+        status: 'error',
+        error: error.message,
+        timestamp: new Date().toISOString(),
+      };
+    }
+  }
+
+  @Delete('optimization-cancel/:jobId')
+  @ApiOperation({
+    summary: 'Cancel optimization job',
+    description:
+      'Cancel a running or queued database optimization job. Note: If the job is already in progress, it may not stop immediately.',
+  })
+  async cancelOptimization(@Param('jobId') jobId: string) {
+    try {
+      const result = await this.optimizationService.cancelOptimization(jobId);
+      return {
+        ...result,
         timestamp: new Date().toISOString(),
       };
     } catch (error) {
