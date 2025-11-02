@@ -134,20 +134,16 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
 
       const queryTime = Date.now() - startTime;
 
-      // 🔍 PERFORMANCE DEBUGGING: Log EXPLAIN ANALYZE for slow queries
-      if (queryTime > 2000) {
-        this.logger.warn(
-          `🐌 VERY SLOW QUERY (${queryTime}ms) for "${searchTerm}" - Running EXPLAIN ANALYZE...`,
+      // 🐌 Simple warning for very slow queries
+      if (queryTime > 3000) {
+        this.logger.error(
+          `🐌 VERY SLOW QUERY (${queryTime}ms) for "${searchTerm}"! Consider:\n` +
+            `   1. Run ANALYZE documents;\n` +
+            `   2. Check if indexes exist: /debug/verify-search-indexes\n` +
+            `   3. Review query structure and filters`,
         );
-        try {
-          const explainQuery = `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ${dataSql}`;
-          const explainResult = await this.dataSource.query(explainQuery, dataParams);
-          this.logger.warn(
-            `📊 Query Plan:\n${JSON.stringify(explainResult[0]['QUERY PLAN'][0], null, 2)}`,
-          );
-        } catch (explainError) {
-          this.logger.error(`Failed to EXPLAIN query: ${explainError.message}`);
-        }
+      } else if (queryTime > 1000) {
+        this.logger.warn(`⚠️ Slow query (${queryTime}ms) for "${searchTerm}"`);
       }
 
       const total = parseInt(countResult[0]?.total_count || '0');
@@ -969,35 +965,34 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
     from: number,
     filterConditions?: string,
   ): { sql: string; params: any[] } {
-    // Convert wildcards to SQL pattern and clean for LIKE
-    // "fazsion*" -> "fazsion" for LIKE matching
-    // Remove wildcards for the actual comparison
+    // Clean wildcards for search
     const cleanTerm = pattern.replace(/[*?]/g, '');
 
+    // 🚀 OPTIMIZED: Use trigram indexes for fast wildcard search
+    // This query uses idx_documents_name_trgm and idx_documents_category_trgm
     const sql = `
       SELECT
         document_id,
         content,
         metadata,
-        -- Scoring based on match quality using materialized columns
-        CASE 
-          WHEN lower(name) = lower($1) THEN 1000.0
-          WHEN lower(name) LIKE lower($1) || '%' THEN 500.0
-          WHEN lower(name) LIKE '%' || lower($1) || '%' THEN 100.0
-          WHEN lower(category) LIKE '%' || lower($1) || '%' THEN 50.0
-          ELSE similarity(name, $1) * 100
-        END as rank
+        -- Ranking using trigram similarity (uses GIN index)
+        GREATEST(
+          word_similarity($1, name) * 1000,
+          word_similarity($1, category) * 500
+        ) as rank
       FROM documents
       WHERE index_name = $2
-        AND is_active = true
-        AND is_verified = true
-        AND is_blocked = false
+        -- Use materialized boolean columns (indexed)
+        AND (is_active IS NULL OR is_active = true)
+        AND (is_verified IS NULL OR is_verified = true)
+        AND (is_blocked IS NULL OR is_blocked = false)
+        -- Trigram index search (uses idx_documents_name_trgm, idx_documents_category_trgm)
         AND (
-          lower(name) LIKE '%' || lower($1) || '%'
-          OR lower(category) LIKE '%' || lower($1) || '%'
+          name % $1  -- Trigram similarity operator (uses GIN index!)
+          OR category % $1
         )
         ${filterConditions ? `AND ${filterConditions}` : ''}
-      ORDER BY rank DESC, name
+      ORDER BY rank DESC
       LIMIT $3 OFFSET $4
     `;
 
@@ -1053,12 +1048,26 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
 
   /**
    * Build condition for a single term filter
+   * Uses materialized columns when available for better performance
    */
   private buildTermCondition(termFilter: any): string {
     if (!termFilter || !termFilter.term) return '';
 
     const { field, value } = termFilter.term;
     if (!field || value === undefined) return '';
+
+    // 🚀 OPTIMIZATION: Use materialized columns for common boolean filters
+    // These have indexes and are MUCH faster than JSONB extraction
+    const materializedBooleans = {
+      is_active: 'is_active',
+      is_verified: 'is_verified',
+      is_blocked: 'is_blocked',
+    };
+
+    if (field in materializedBooleans && typeof value === 'boolean') {
+      const col = materializedBooleans[field];
+      return `(${col} IS NULL OR ${col} = ${value})`;
+    }
 
     // Fields that should use LIKE matching for partial text search
     const likeFields = [
@@ -1072,7 +1081,7 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
       'sub_category_name',
     ];
 
-    // Handle boolean values
+    // Handle boolean values (fallback to JSONB)
     if (typeof value === 'boolean') {
       return `content->>'${field}' = '${value}'`;
     }

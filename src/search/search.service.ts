@@ -151,6 +151,7 @@ export class SearchService {
       }
 
       // 🚀 PARALLEL SEARCH OPTIMIZATION: If we have multiple high-scoring suggestions, search them in parallel
+      // Skip if we already have good results from original query
       if (highScoringSuggestions.length > 1) {
         // 🚀 AGGRESSIVE OPTIMIZATION: Check if we have a single dominant suggestion
         if (
@@ -283,8 +284,8 @@ export class SearchService {
             `⚡ Optimized: ${topHits.length} unique results from ${highScoringSuggestions.length} parallel searches in ${parallelTime}ms`,
           );
         }
-      } else {
-        // Fallback: Execute single search for corrected query
+      } else if (highScoringSuggestions.length === 1 && !searchResults) {
+        // Only run corrected query if we have exactly 1 suggestion AND no results yet
         this.logger.log(`🔍 Executing single search for corrected query: "${queryTextToUse}"`);
         // OPTIMIZATION: Add Redis caching for search results
         const cacheKey = `search:${indexName}:${queryTextToUse}:${JSON.stringify(
@@ -301,6 +302,7 @@ export class SearchService {
           searchResults = cachedResult;
         }
       }
+      // If searchResults is already set (from original query), skip the else block entirely
 
       // 🚀 AGGRESSIVE OPTIMIZATION: Skip intelligent processing for speed
       let intelligentInfo = null;
