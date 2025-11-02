@@ -129,7 +129,7 @@ export class PostgreSQLService implements OnModuleInit {
       try {
         scriptContent = fs.readFileSync(scriptPath, 'utf8');
       } catch (fileError) {
-        this.logger.warn(`Migration file not found at ${scriptPath}, using fallback SQL`);
+        // Migration file not found - using fallback SQL (this is normal)
         // Fallback SQL for comprehensive migration
         scriptContent = `
           -- Add status column to indices table if it doesn't exist

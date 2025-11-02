@@ -132,6 +132,24 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
         this.dataSource.query(countSql, countParams),
       ]);
 
+      const queryTime = Date.now() - startTime;
+
+      // 🔍 PERFORMANCE DEBUGGING: Log EXPLAIN ANALYZE for slow queries
+      if (queryTime > 2000) {
+        this.logger.warn(
+          `🐌 VERY SLOW QUERY (${queryTime}ms) for "${searchTerm}" - Running EXPLAIN ANALYZE...`,
+        );
+        try {
+          const explainQuery = `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ${dataSql}`;
+          const explainResult = await this.dataSource.query(explainQuery, dataParams);
+          this.logger.warn(
+            `📊 Query Plan:\n${JSON.stringify(explainResult[0]['QUERY PLAN'][0], null, 2)}`,
+          );
+        } catch (explainError) {
+          this.logger.error(`Failed to EXPLAIN query: ${explainError.message}`);
+        }
+      }
+
       const total = parseInt(countResult[0]?.total_count || '0');
 
       const responseData = {
@@ -813,21 +831,56 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
         SELECT COUNT(*) as total_count
         FROM documents
         WHERE index_name = $1
+          AND is_active = true
+          AND is_verified = true
+          AND is_blocked = false
           ${filterConditions ? `AND ${filterConditions}` : ''}
       `;
       return { sql, params: [indexName] };
     }
 
-    // Use optimized count for search queries (use weighted_search_vector if available)
-    const sql = `
-      SELECT COUNT(*) as total_count
-      FROM documents
-      WHERE index_name = $2
-        AND search_vector IS NOT NULL
-        AND COALESCE(weighted_search_vector, search_vector) @@ plainto_tsquery('english', $1)
-        ${filterConditions ? `AND ${filterConditions}` : ''}
-    `;
-    return { sql, params: [normalizedTerm, indexName] };
+    // Check if wildcard query
+    const isWildcard = searchTerm.includes('*') || searchTerm.includes('?');
+    const cleanTerm = normalizedTerm.replace(/[*?]/g, '');
+
+    if (isWildcard) {
+      // Count for wildcard queries using materialized columns
+      return {
+        sql: `
+          SELECT COUNT(*) as total_count
+          FROM documents
+          WHERE index_name = $1
+            AND is_active = true
+            AND is_verified = true
+            AND is_blocked = false
+            AND (
+              lower(name) LIKE '%' || lower($2) || '%'
+              OR lower(category) LIKE '%' || lower($2) || '%'
+            )
+            ${filterConditions ? `AND ${filterConditions}` : ''}
+        `,
+        params: [indexName, cleanTerm],
+      };
+    }
+
+    // Use optimized count for full-text search queries
+    return {
+      sql: `
+        SELECT COUNT(*) as total_count
+        FROM documents,
+             plainto_tsquery('english', $1) query
+        WHERE index_name = $2
+          AND is_active = true
+          AND is_verified = true
+          AND is_blocked = false
+          AND (
+            lower(name) LIKE lower($1) || '%'
+            OR weighted_search_vector @@ query
+          )
+          ${filterConditions ? `AND ${filterConditions}` : ''}
+      `,
+      params: [normalizedTerm, indexName],
+    };
   }
 
   /**
@@ -840,7 +893,6 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
     from: number,
     filter?: any,
   ): { sql: string; params: any[] } {
-    // Normalize search term
     const normalizedTerm = this.normalizeSearchQuery(searchTerm);
     const filterConditions = this.buildFilterConditions(filter);
 
@@ -854,6 +906,9 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
           1.0 as rank
         FROM documents
         WHERE index_name = $1
+          AND is_active = true
+          AND is_verified = true
+          AND is_blocked = false
           ${filterConditions ? `AND ${filterConditions}` : ''}
         ORDER BY document_id
         LIMIT $2 OFFSET $3
@@ -861,132 +916,95 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
       return { sql, params: [indexName, size, from] };
     }
 
-    // Use optimized full-text search for basic queries with field-weighted ranking
-    if (this.shouldUseSimpleTextSearch(normalizedTerm)) {
-      const sql = `
-        WITH field_rankings AS (
-          SELECT
-            document_id,
-            content,
-            metadata,
-            -- Name/Title field matches (highest priority)
-            CASE 
-              WHEN content->>'name' ILIKE '%' || $1 || '%' THEN 100.0
-              WHEN content->>'title' ILIKE '%' || $1 || '%' THEN 100.0
-              ELSE 0.0
-            END as name_score,
-            
-            -- Category field matches (medium priority)
-            CASE 
-              WHEN content->>'category_name' ILIKE '%' || $1 || '%' THEN 20.0
-              WHEN content->>'sub_category_name' ILIKE '%' || $1 || '%' THEN 20.0
-              ELSE 0.0
-            END as category_score,
-            
-            -- Description field matches (lower priority)
-            CASE 
-              WHEN content->>'description' ILIKE '%' || $1 || '%' THEN 15.0
-              ELSE 0.0
-            END as description_score,
-            
-            -- Tags field matches (lowest priority)
-            CASE 
-              WHEN content->>'tags' ILIKE '%' || $1 || '%' THEN 10.0
-              ELSE 0.0
-            END as tags_score,
-            
-            -- Full-text search ranking as base (use weighted_search_vector if available)
-            COALESCE(
-              ts_rank_cd(COALESCE(weighted_search_vector, materialized_vector, search_vector), plainto_tsquery('english', $1)),
-              0.0
-            ) as base_rank
-          FROM documents
-          WHERE index_name = $2
-            AND (
-              (search_vector IS NOT NULL AND COALESCE(weighted_search_vector, materialized_vector, search_vector) @@ plainto_tsquery('english', $1))
-              OR content->>'name' ILIKE '%' || $1 || '%'
-              OR content->>'title' ILIKE '%' || $1 || '%'
-              OR content->>'category_name' ILIKE '%' || $1 || '%'
-              OR content->>'sub_category_name' ILIKE '%' || $1 || '%'
-              OR content->>'description' ILIKE '%' || $1 || '%'
-              OR content->>'tags' ILIKE '%' || $1 || '%'
-            )
-            ${filterConditions ? `AND ${filterConditions}` : ''}
-        )
-        SELECT
-          document_id,
-          content,
-          metadata,
-          (name_score + category_score + description_score + tags_score + base_rank) as rank
-        FROM field_rankings
-        ORDER BY rank DESC, document_id
-        LIMIT $3 OFFSET $4
-      `;
-      return { sql, params: [normalizedTerm, indexName, size, from] };
+    // Check if wildcard query (contains * or ?)
+    const isWildcard = searchTerm.includes('*') || searchTerm.includes('?');
+
+    if (isWildcard) {
+      // WILDCARD SEARCH - Uses trigram indexes
+      return this.buildWildcardQuery(indexName, searchTerm, size, from, filterConditions);
     }
 
-    // Use field-weighted ranking for better relevance
+    // STANDARD FULL-TEXT SEARCH - Uses GIN indexes on tsvector
+    // This is optimized to use materialized columns and avoid CTEs
     const sql = `
-      WITH field_rankings AS (
-        SELECT
-          document_id,
-          content,
-          metadata,
-          -- Name/Title field matches (highest priority)
-          CASE 
-            WHEN content->>'name' ILIKE '%' || $1 || '%' THEN 100.0
-            WHEN content->>'title' ILIKE '%' || $1 || '%' THEN 100.0
-            ELSE 0.0
-          END as name_score,
-          
-          -- Category field matches (medium priority)
-          CASE 
-            WHEN content->>'category_name' ILIKE '%' || $1 || '%' THEN 20.0
-            WHEN content->>'sub_category_name' ILIKE '%' || $1 || '%' THEN 20.0
-            ELSE 0.0
-          END as category_score,
-          
-          -- Description field matches (lower priority)
-          CASE 
-            WHEN content->>'description' ILIKE '%' || $1 || '%' THEN 15.0
-            ELSE 0.0
-          END as description_score,
-          
-          -- Tags field matches (lowest priority)
-          CASE 
-            WHEN content->>'tags' ILIKE '%' || $1 || '%' THEN 10.0
-            ELSE 0.0
-          END as tags_score,
-          
-          -- Full-text search ranking as base (use weighted_search_vector if available)
-          COALESCE(
-            ts_rank_cd(COALESCE(weighted_search_vector, materialized_vector, search_vector), plainto_tsquery('english', $1)),
-            0.0
-          ) as base_rank
-        FROM documents
-        WHERE index_name = $2
-          AND search_vector IS NOT NULL
-          AND (
-            COALESCE(weighted_search_vector, materialized_vector, search_vector) @@ plainto_tsquery('english', $1)
-            OR content->>'name' ILIKE '%' || $1 || '%'
-            OR content->>'title' ILIKE '%' || $1 || '%'
-            OR content->>'category_name' ILIKE '%' || $1 || '%'
-            OR content->>'sub_category_name' ILIKE '%' || $1 || '%'
-            OR content->>'description' ILIKE '%' || $1 || '%'
-            OR content->>'tags' ILIKE '%' || $1 || '%'
-          )
-          ${filterConditions ? `AND ${filterConditions}` : ''}
-      )
       SELECT
         document_id,
         content,
         metadata,
-        (name_score + category_score + description_score + tags_score + base_rank) as rank
-      FROM field_rankings
-      ORDER BY rank DESC, document_id
+        -- Boost exact matches using materialized columns
+        CASE 
+          WHEN lower(name) = lower($1) THEN 1000.0
+          WHEN lower(name) LIKE lower($1) || '%' THEN 500.0
+          ELSE ts_rank_cd(weighted_search_vector, query, 32) * 100
+        END as rank
+      FROM documents,
+           plainto_tsquery('english', $1) query
+      WHERE index_name = $2
+        AND is_active = true
+        AND is_verified = true
+        AND is_blocked = false
+        AND (
+          lower(name) LIKE lower($1) || '%'
+          OR weighted_search_vector @@ query
+        )
+        ${filterConditions ? `AND ${filterConditions}` : ''}
+      ORDER BY rank DESC, name
       LIMIT $3 OFFSET $4
     `;
-    return { sql, params: [normalizedTerm, indexName, size, from] };
+
+    return {
+      sql,
+      params: [normalizedTerm, indexName, size, from],
+    };
+  }
+
+  /**
+   * Build wildcard query - Uses trigram indexes for pattern matching
+   * Optimized for queries like "fazsion*" or "accurate* predict*"
+   */
+  private buildWildcardQuery(
+    indexName: string,
+    pattern: string,
+    size: number,
+    from: number,
+    filterConditions?: string,
+  ): { sql: string; params: any[] } {
+    // Convert wildcards to SQL pattern and clean for LIKE
+    // "fazsion*" -> "fazsion" for LIKE matching
+    // Remove wildcards for the actual comparison
+    const cleanTerm = pattern.replace(/[*?]/g, '');
+
+    const sql = `
+      SELECT
+        document_id,
+        content,
+        metadata,
+        -- Scoring based on match quality using materialized columns
+        CASE 
+          WHEN lower(name) = lower($1) THEN 1000.0
+          WHEN lower(name) LIKE lower($1) || '%' THEN 500.0
+          WHEN lower(name) LIKE '%' || lower($1) || '%' THEN 100.0
+          WHEN lower(category) LIKE '%' || lower($1) || '%' THEN 50.0
+          ELSE similarity(name, $1) * 100
+        END as rank
+      FROM documents
+      WHERE index_name = $2
+        AND is_active = true
+        AND is_verified = true
+        AND is_blocked = false
+        AND (
+          lower(name) LIKE '%' || lower($1) || '%'
+          OR lower(category) LIKE '%' || lower($1) || '%'
+        )
+        ${filterConditions ? `AND ${filterConditions}` : ''}
+      ORDER BY rank DESC, name
+      LIMIT $3 OFFSET $4
+    `;
+
+    return {
+      sql,
+      params: [cleanTerm, indexName, size, from],
+    };
   }
 
   /**
@@ -1264,11 +1282,16 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
   private normalizeSearchQuery(searchTerm: string): string {
     if (!searchTerm) return '';
 
-    // Strip all wildcard characters (* and ?) and trim
-    const normalized = searchTerm.replace(/[\*\?]/g, '').trim();
+    // Remove extra whitespace but PRESERVE wildcards (* and ?)
+    // We need wildcards for routing to wildcard query handler
+    const normalized = searchTerm.trim().replace(/\s+/g, ' ');
 
-    // If we end up with empty string, return original
-    return normalized || searchTerm;
+    // Handle empty or wildcard-only queries
+    if (normalized === '' || normalized === '*') {
+      return '*';
+    }
+
+    return normalized;
   }
 
   /**

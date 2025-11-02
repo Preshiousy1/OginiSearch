@@ -39,14 +39,16 @@ import { FieldWeightsService } from './field-weights.service';
             ? { rejectUnauthorized: false }
             : false,
         extra: {
-          max: 25,
-          min: 10,
-          poolSize: 25,
+          max: 100, // Increased for production (was 25)
+          min: 20, // Increased for better performance (was 10)
+          poolSize: 100, // Match max
           idleTimeoutMillis: 30000,
           connectTimeoutMS: 2000,
-          acquireTimeoutMillis: 5000,
+          acquireTimeoutMillis: 10000, // Increased from 5000
           keepAlive: true,
-          keepAliveInitialDelayMillis: 0,
+          keepAliveInitialDelayMillis: 10000, // Increased from 0
+          // Note: statement_timeout cannot be set as startup param with PgBouncer
+          // Set it via PostgreSQL config or per-session instead
         },
       }),
       inject: [ConfigService],
