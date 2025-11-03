@@ -333,7 +333,7 @@ export class SearchService {
         };
       }
 
-      // 🚀 AGGRESSIVE OPTIMIZATION: Skip multi-signal ranking for speed
+      // 🎯 MULTI-SIGNAL RANKING: Re-rank by health, rating, freshness, location, etc.
       if (finalResults.data.hits.length > 0) {
         // Only apply ranking if we have results
         const rankedResults = await this.multiSignalRankingService.rankResults(
@@ -342,11 +342,19 @@ export class SearchService {
           intelligentInfo,
         );
 
+        // 🎯 SLICE TO ORIGINAL REQUESTED SIZE: We fetched more for better ranking
+        const originalSize = finalResults._originalSize || parseInt(searchQuery.size?.toString() || '10');
+        const slicedResults = rankedResults.slice(0, originalSize);
+
+        this.logger.log(
+          `🎯 Multi-signal ranking: ${finalResults.data.hits.length} candidates → ${slicedResults.length} results`,
+        );
+
         finalResults = {
           ...finalResults,
           data: {
             ...finalResults.data,
-            hits: rankedResults,
+            hits: slicedResults,
           },
         };
       }
@@ -463,14 +471,24 @@ export class SearchService {
 
   /**
    * Execute the actual search with AGGRESSIVE optimization
+   * Fetches more candidates for better health-based ranking
    */
   private async executeSearch(indexName: string, searchQuery: SearchQueryDto): Promise<any> {
     const startTime = Date.now();
 
     try {
+      // 🎯 QUALITY OPTIMIZATION: Fetch more candidates for multi-signal re-ranking
+      // This allows health/rating to influence results without slowing down queries
+      const originalSize = parseInt(searchQuery.size?.toString() || '10');
+      const fetchMultiplier = 5; // Fetch 5x more for better ranking pool
+      const expandedQuery = {
+        ...searchQuery,
+        size: Math.min(originalSize * fetchMultiplier, 100), // Cap at 100 to avoid overhead
+      };
+
       // 🚀 OPTIMIZED: Increase timeout to 10 seconds for production reliability
       const result = await Promise.race([
-        this.postgresSearchEngine.search(indexName, searchQuery),
+        this.postgresSearchEngine.search(indexName, expandedQuery),
         new Promise((_, reject) =>
           setTimeout(() => reject(new Error('PostgreSQL search timeout')), 10000),
         ),
@@ -481,6 +499,9 @@ export class SearchService {
         const queryText = this.getQueryText(searchQuery);
         this.logger.warn(`⚠️ Slow search detected: ${searchTime}ms for "${queryText}"`);
       }
+
+      // Store original requested size for later slicing after multi-signal ranking
+      result._originalSize = originalSize;
 
       return result;
     } catch (error) {

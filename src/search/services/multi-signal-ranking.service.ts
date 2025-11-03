@@ -93,17 +93,48 @@ export class MultiSignalRankingService {
   }
 
   /**
-   * Calculate business popularity score
+   * Calculate business popularity/health score
+   * Combines health, rating, verification, and engagement
    */
   calculatePopularityScore(document: any): number {
-    const engagement = document.viewCount || document.views || 0;
-    const rating = document.rating || document.stars || 0;
+    // Handle both direct document and source-wrapped document
+    const source = document.source || document;
 
-    // Normalize engagement and rating
-    const normalizedEngagement = Math.min(1, engagement / 1000);
+    // 🎯 BUSINESS HEALTH: Primary quality indicator (40-100 scale)
+    const health = parseFloat(source.health || document.health) || 0;
+    const normalizedHealth = Math.min(1, Math.max(0, (health - 40) / 60)); // Normalize 40-100 to 0-1
+
+    // 🌟 RATING: Customer satisfaction (0-5 scale)
+    const rating =
+      parseFloat(source.average_rating || document.average_rating) ||
+      parseFloat(source.rating || document.rating) ||
+      source.stars ||
+      document.stars ||
+      0;
     const normalizedRating = Math.min(1, rating / 5);
 
-    return (normalizedEngagement + normalizedRating) / 2;
+    // 👁️ ENGAGEMENT: View count
+    const engagement =
+      source.viewCount || document.viewCount || source.views || document.views || 0;
+    const normalizedEngagement = Math.min(1, engagement / 1000);
+
+    // ✓ VERIFICATION: Verified businesses get a boost
+    const verificationBoost =
+      source.is_verified || document.is_verified || source.verified_at || document.verified_at
+        ? 0.2
+        : 0;
+
+    // ⭐ FEATURED: Featured businesses get a boost
+    const featuredBoost = source.is_featured || document.is_featured ? 0.15 : 0;
+
+    // WEIGHTED COMBINATION: Health is most important for business quality
+    return (
+      normalizedHealth * 0.4 + // 40% - Health is primary quality indicator
+      normalizedRating * 0.3 + // 30% - Customer satisfaction
+      normalizedEngagement * 0.1 + // 10% - Popularity/views
+      verificationBoost + // +20% boost for verified
+      featuredBoost // +15% boost for featured
+    );
   }
 
   /**
