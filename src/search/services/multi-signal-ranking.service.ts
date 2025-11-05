@@ -100,9 +100,9 @@ export class MultiSignalRankingService {
     // Handle both direct document and source-wrapped document
     const source = document.source || document;
 
-    // 🎯 BUSINESS HEALTH: Primary quality indicator (40-100 scale)
+    // 🎯 BUSINESS HEALTH: Primary quality indicator (0-100 scale)
     const health = parseFloat(source.health || document.health) || 0;
-    const normalizedHealth = Math.min(1, Math.max(0, (health - 40) / 60)); // Normalize 40-100 to 0-1
+    const normalizedHealth = Math.min(1, Math.max(0, health / 100)); // Normalize 0-100 to 0-1
 
     // 🌟 RATING: Customer satisfaction (0-5 scale)
     const rating =
@@ -144,11 +144,11 @@ export class MultiSignalRankingService {
     switch (queryType) {
       case 'location_based':
         return {
-          textRelevance: 0.25,
-          semanticSimilarity: 0.2,
+          textRelevance: 0.2,
+          semanticSimilarity: 0.15,
           locationProximity: 0.35, // Higher for location queries
           freshness: 0.1,
-          popularity: 0.1,
+          popularity: 0.2, // Increase from 0.1 - health important everywhere
         };
       case 'semantic':
         return {
@@ -160,19 +160,20 @@ export class MultiSignalRankingService {
         };
       case 'business_type':
         return {
-          textRelevance: 0.3,
-          semanticSimilarity: 0.25,
-          locationProximity: 0.2,
+          textRelevance: 0.25,
+          semanticSimilarity: 0.2,
+          locationProximity: 0.15,
           freshness: 0.1,
-          popularity: 0.15, // Higher for business queries
+          popularity: 0.3, // MUCH higher for business queries - health is critical
         };
       default:
+        // 🎯 HEALTH-FOCUSED: Give popularity (health + rating) significant weight
         return {
-          textRelevance: 0.35,
-          semanticSimilarity: 0.25,
-          locationProximity: 0.2,
-          freshness: 0.1,
-          popularity: 0.1,
+          textRelevance: 0.25, // Reduce from 0.35 - text still important
+          semanticSimilarity: 0.15, // Reduce from 0.25
+          locationProximity: 0.15, // Reduce from 0.2
+          freshness: 0.15, // Increase from 0.1 - reward fresh data
+          popularity: 0.3, // TRIPLE from 0.1 - Health is critical!
         };
     }
   }
