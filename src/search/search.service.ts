@@ -480,10 +480,10 @@ export class SearchService {
       // 🎯 QUALITY OPTIMIZATION: Fetch more candidates for multi-signal re-ranking
       // This allows health/rating to influence results without slowing down queries
       const originalSize = parseInt(searchQuery.size?.toString() || '10');
-      const fetchMultiplier = 5; // Fetch 5x more for better ranking pool
+      const fetchMultiplier = 3; // Fetch 3x more for better ranking pool (balanced speed vs quality)
       const expandedQuery = {
         ...searchQuery,
-        size: Math.min(originalSize * fetchMultiplier, 100), // Cap at 100 to avoid overhead
+        size: Math.min(originalSize * fetchMultiplier, 75), // Cap at 75 to optimize speed
       };
 
       // 🚀 OPTIMIZED: Increase timeout to 10 seconds for production reliability

@@ -179,6 +179,42 @@ export class MultiSignalRankingService {
   }
 
   /**
+   * Quick ranking for small result sets (< 20 results)
+   * Simply sort by: Featured > Confirmed > Health > Text relevance
+   */
+  private quickRankByHealth(results: any[]): any[] {
+    return results
+      .map(result => {
+        const source = result.source || result;
+        const health = parseFloat(source.health || result.health) || 0;
+        const isFeatured = source.is_featured || result.is_featured || false;
+        const isConfirmed =
+          source.is_verified ||
+          result.is_verified ||
+          source.verified_at ||
+          result.verified_at ||
+          false;
+
+        // Simple priority score
+        let quickScore = health; // 0-100
+        if (isConfirmed) quickScore += 1000; // Confirmed: +1000
+        if (isFeatured) quickScore += 10000; // Featured: +10000
+
+        return {
+          ...result,
+          rankingScores: {
+            quickScore,
+            healthScore: health,
+            isFeatured,
+            isConfirmed,
+            finalScore: quickScore,
+          },
+        };
+      })
+      .sort((a, b) => b.rankingScores.quickScore - a.rankingScores.quickScore);
+  }
+
+  /**
    * Detect query type for weight distribution
    */
   detectQueryType(query: string, hasLocation: boolean): string {
@@ -217,30 +253,81 @@ export class MultiSignalRankingService {
   }
 
   /**
-   * Rank results using multi-signal scoring
+   * Rank results using multi-signal scoring with business priority logic
+   * Priority: Featured > Confirmed > Health (primary) > Text Relevance
    */
   async rankResults(
     results: any[],
     query: string,
     userContext?: { userLocation?: LocationCoordinates; userId?: string },
   ): Promise<any[]> {
+    // 🚀 QUICK PATH: For very small result sets (< 20), skip complex ranking
+    // Users will scan all results anyway, so health-based ordering is sufficient
+    if (results.length < 20) {
+      return this.quickRankByHealth(results);
+    }
+
     const queryType = this.detectQueryType(query, !!userContext?.userLocation);
     const weights = this.getQueryWeights(queryType);
 
     const rankedResults = results.map(result => {
+      const source = result.source || result;
+
       const textScore = this.calculateTextScore(result, query);
       const semanticScore = this.calculateSemanticScore(result, query);
       const locationScore = this.calculateLocationScore(result, userContext?.userLocation);
       const freshnessScore = this.calculateFreshnessScore(result);
       const popularityScore = this.calculatePopularityScore(result);
 
-      // Calculate weighted final score
-      const finalScore =
-        textScore * weights.textRelevance +
-        semanticScore * weights.semanticSimilarity +
-        locationScore * weights.locationProximity +
-        freshnessScore * weights.freshness +
-        popularityScore * weights.popularity;
+      // Extract health for business logic
+      const health = parseFloat(source.health || result.health) || 0;
+      const normalizedHealth = health / 100;
+
+      // Check business status
+      const isFeatured = source.is_featured || result.is_featured || false;
+      const isConfirmed =
+        source.is_verified ||
+        result.is_verified ||
+        source.verified_at ||
+        result.verified_at ||
+        false;
+
+      // 🎯 BUSINESS RANKING LOGIC:
+      // 1. Featured businesses get massive boost
+      // 2. Confirmed businesses rank above unconfirmed
+      // 3. Within confirmed: Health is PRIMARY determinant (50% weight)
+
+      let baseScore = 0;
+
+      if (isConfirmed) {
+        // For confirmed businesses: Health is PRIMARY determinant (70%)
+        // Text relevance is secondary (20%) - enough to distinguish relevant matches
+        baseScore =
+          normalizedHealth * 700 + // 70% - HEALTH DOMINATES
+          textScore * 0.2 + // 20% - Text relevance (still important for finding right results)
+          locationScore * 50 + // 5% - Location
+          freshnessScore * 30 + // 3% - Freshness
+          semanticScore * 20; // 2% - Semantic similarity
+      } else {
+        // For unconfirmed: Text relevance matters more (they're already ranked lower)
+        baseScore =
+          textScore * 0.4 + // 40% - Text relevance
+          normalizedHealth * 300 + // 30% - Health still important
+          locationScore * 150 + // 15% - Location
+          freshnessScore * 100 + // 10% - Freshness
+          semanticScore * 50; // 5% - Semantic similarity
+      }
+
+      // Apply tier boosts
+      let finalScore = baseScore;
+
+      if (isFeatured) {
+        // Featured businesses: Add 10,000 to ensure they rank first
+        finalScore += 10000;
+      } else if (isConfirmed) {
+        // Confirmed businesses: Add 5,000 to ensure they rank above unconfirmed
+        finalScore += 5000;
+      }
 
       return {
         ...result,
@@ -250,7 +337,11 @@ export class MultiSignalRankingService {
           locationScore,
           freshnessScore,
           popularityScore,
+          healthScore: normalizedHealth * 100, // For debugging
+          baseScore,
           finalScore,
+          isFeatured,
+          isConfirmed,
         },
         weights,
       };
