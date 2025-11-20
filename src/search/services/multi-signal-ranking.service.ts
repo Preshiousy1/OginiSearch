@@ -49,15 +49,65 @@ export class MultiSignalRankingService {
   constructor(private readonly configService?: ConfigService) {}
 
   /**
-   * Calculate text relevance score using existing BM25
+   * Calculate text relevance score with exact match boosting
    */
   calculateTextScore(document: any, query: string): number {
-    return document.score || 1.0;
+    const baseScore = document.score || 1.0;
+
+    // Extract business name from various possible locations
+    const name = (document.source?.name || document.name || document.source?.business_name || '')
+      .toLowerCase()
+      .trim();
+
+    const normalizedQuery = query.toLowerCase().trim();
+
+    // 🎯 EXACT MATCH DETECTION:
+    // If the query matches the business name exactly (or very closely),
+    // this business should rank MUCH higher
+
+    // 1. Perfect exact match (e.g., "ovena luxury hotel" === "ovena luxury hotel")
+    if (name === normalizedQuery) {
+      return baseScore * 10.0; // 10x boost for perfect match
+    }
+
+    // 2. Name starts with query (e.g., "ovena" matches "ovena luxury hotel")
+    if (name.startsWith(normalizedQuery)) {
+      return baseScore * 5.0; // 5x boost for prefix match
+    }
+
+    // 3. Query is contained in name (e.g., "luxury hotel" in "ovena luxury hotel")
+    if (name.includes(normalizedQuery)) {
+      return baseScore * 3.0; // 3x boost for substring match
+    }
+
+    // 4. Check if all query words are in the name
+    const queryWords = normalizedQuery.split(/\s+/);
+    const nameWords = name.split(/\s+/);
+    const allWordsPresent = queryWords.every(qWord =>
+      nameWords.some(nWord => nWord.includes(qWord) || qWord.includes(nWord)),
+    );
+
+    if (allWordsPresent && queryWords.length >= 2) {
+      return baseScore * 2.5; // 2.5x boost if all query words are in name
+    }
+
+    // 5. Calculate word overlap percentage
+    const matchedWords = queryWords.filter(qWord =>
+      nameWords.some(nWord => nWord.includes(qWord) || qWord.includes(nWord)),
+    );
+    const overlapRatio = matchedWords.length / queryWords.length;
+
+    if (overlapRatio >= 0.5) {
+      return baseScore * (1 + overlapRatio); // Boost by overlap percentage
+    }
+
+    return baseScore;
   }
 
   /**
    * Calculate semantic similarity score
    */
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   calculateSemanticScore(document: any, query: string): number {
     return document.semanticScore || 0.0;
   }
@@ -180,9 +230,9 @@ export class MultiSignalRankingService {
 
   /**
    * Quick ranking for small result sets (< 20 results)
-   * Simply sort by: Featured > Confirmed > Health > Text relevance
+   * Priority: Featured > Confirmed > Exact Match > Health > Text relevance
    */
-  private quickRankByHealth(results: any[]): any[] {
+  private quickRankByHealth(results: any[], query?: string): any[] {
     return results
       .map(result => {
         const source = result.source || result;
@@ -195,9 +245,33 @@ export class MultiSignalRankingService {
           result.verified_at ||
           false;
 
-        // Simple priority score
-        let quickScore = health; // 0-100
-        if (isConfirmed) quickScore += 1000; // Confirmed: +1000
+        // ✨ EXACT MATCH DETECTION: Compare business name directly with query
+        let exactMatchBoost = 0;
+        let isPerfectMatch = false;
+        let startsWithQuery = false;
+        let containsQuery = false;
+
+        if (query) {
+          const name = (source.name || result.name || '').toLowerCase().trim();
+          const normalizedQuery = query.toLowerCase().trim();
+
+          isPerfectMatch = name === normalizedQuery;
+          startsWithQuery = name.startsWith(normalizedQuery);
+          containsQuery = name.includes(normalizedQuery);
+
+          // Calculate exact match boost based on match quality
+          if (isPerfectMatch) {
+            exactMatchBoost = 2000; // Perfect match: +2000
+          } else if (startsWithQuery) {
+            exactMatchBoost = 1000; // Starts with query: +1000
+          } else if (containsQuery) {
+            exactMatchBoost = 500; // Contains query: +500
+          }
+        }
+
+        // Priority score: Tier boosts + Exact match + Health
+        let quickScore = health + exactMatchBoost; // 0-100 + exact match boost
+        if (isConfirmed) quickScore += 5000; // Confirmed: +5000 (match main ranking)
         if (isFeatured) quickScore += 10000; // Featured: +10000
 
         return {
@@ -205,6 +279,10 @@ export class MultiSignalRankingService {
           rankingScores: {
             quickScore,
             healthScore: health,
+            exactMatchBoost,
+            isPerfectMatch,
+            startsWithQuery,
+            containsQuery,
             isFeatured,
             isConfirmed,
             finalScore: quickScore,
@@ -264,7 +342,7 @@ export class MultiSignalRankingService {
     // 🚀 QUICK PATH: For very small result sets (< 20), skip complex ranking
     // Users will scan all results anyway, so health-based ordering is sufficient
     if (results.length < 20) {
-      return this.quickRankByHealth(results);
+      return this.quickRankByHealth(results, query);
     }
 
     const queryType = this.detectQueryType(query, !!userContext?.userLocation);
@@ -295,31 +373,80 @@ export class MultiSignalRankingService {
       // 🎯 BUSINESS RANKING LOGIC:
       // 1. Featured businesses get massive boost
       // 2. Confirmed businesses rank above unconfirmed
-      // 3. Within confirmed: Health is PRIMARY determinant (50% weight)
+      // 3. Within same tier: EXACT TEXT MATCH trumps health
+      // 4. Within same tier (no exact match): Health is PRIMARY determinant
+
+      // ✨ EXACT MATCH DETECTION: Compare business name directly with query
+      const businessName = (source.name || result.name || '').toLowerCase().trim();
+      const normalizedQuery = query.toLowerCase().trim();
+
+      // Check various levels of match quality
+      const isPerfectMatch = businessName === normalizedQuery;
+      const startsWithQuery = businessName.startsWith(normalizedQuery);
+      const containsQuery = businessName.includes(normalizedQuery);
+
+      // Consider it an "exact match" if:
+      // 1. Name matches query exactly, OR
+      // 2. Name starts with query, OR
+      // 3. Text score is very high (>= 5.0 from BM25)
+      const isExactMatch = isPerfectMatch || startsWithQuery || textScore >= 5.0;
+
+      // 🎯 NORMALIZE TEXT SCORE: PostgreSQL BM25 scores can be 0-1000+
+      // We need to normalize to 0-100 scale for fair comparison with health
+      // Using logarithmic scaling to handle extreme values
+      const normalizedTextScore = Math.min(100, Math.log10(Math.max(1, textScore)) * 25);
 
       let baseScore = 0;
 
       if (isConfirmed) {
-        // For confirmed businesses: Health is PRIMARY determinant (70%)
-        // Text relevance is secondary (20%) - enough to distinguish relevant matches
-        baseScore =
-          normalizedHealth * 700 + // 70% - HEALTH DOMINATES
-          textScore * 0.2 + // 20% - Text relevance (still important for finding right results)
-          locationScore * 50 + // 5% - Location
-          freshnessScore * 30 + // 3% - Freshness
-          semanticScore * 20; // 2% - Semantic similarity
+        if (isExactMatch) {
+          // For confirmed businesses with EXACT name match: Text score dominates
+          baseScore =
+            textScore * 400 + // 40% - TEXT DOMINATES for exact matches
+            normalizedHealth * 400 + // 40% - Health is still very important
+            locationScore * 100 + // 10% - Location
+            freshnessScore * 60 + // 6% - Freshness
+            semanticScore * 40; // 4% - Semantic similarity
+        } else {
+          // For confirmed businesses WITHOUT exact match: Health dominates
+          baseScore =
+            normalizedHealth * 700 + // 70% - HEALTH DOMINATES
+            textScore * 0.2 + // 20% - Text relevance (BM25/FTS score)
+            locationScore * 50 + // 5% - Location
+            freshnessScore * 30 + // 3% - Freshness
+            semanticScore * 20; // 2% - Semantic similarity
+        }
       } else {
-        // For unconfirmed: Text relevance matters more (they're already ranked lower)
-        baseScore =
-          textScore * 0.4 + // 40% - Text relevance
-          normalizedHealth * 300 + // 30% - Health still important
-          locationScore * 150 + // 15% - Location
-          freshnessScore * 100 + // 10% - Freshness
-          semanticScore * 50; // 5% - Semantic similarity
+        if (isExactMatch) {
+          // For unconfirmed with exact match: Text trumps health
+          baseScore =
+            textScore * 500 + // 50% - TEXT DOMINATES
+            normalizedHealth * 300 + // 30% - Health
+            locationScore * 100 + // 10% - Location
+            freshnessScore * 60 + // 6% - Freshness
+            semanticScore * 40; // 4% - Semantic similarity
+        } else {
+          // For unconfirmed without exact match: Text relevance matters more
+          baseScore =
+            textScore * 0.4 + // 40% - Text relevance
+            normalizedHealth * 300 + // 30% - Health still important
+            locationScore * 150 + // 15% - Location
+            freshnessScore * 100 + // 10% - Freshness
+            semanticScore * 50; // 5% - Semantic similarity
+        }
       }
 
-      // Apply tier boosts
+      // Apply tier boosts with exact match consideration
       let finalScore = baseScore;
+
+      // 🎯 PERFECT MATCH SUPER BOOST: Within each tier, perfect matches rank highest
+      if (isPerfectMatch) {
+        finalScore += 2000; // Perfect name match gets +2000 within tier
+      } else if (startsWithQuery) {
+        finalScore += 1000; // Starts with query gets +1000 within tier
+      } else if (containsQuery) {
+        finalScore += 500; // Contains query gets +500 within tier
+      }
 
       if (isFeatured) {
         // Featured businesses: Add 10,000 to ensure they rank first
@@ -342,6 +469,11 @@ export class MultiSignalRankingService {
           finalScore,
           isFeatured,
           isConfirmed,
+          isExactMatch, // For debugging exact match detection
+          isPerfectMatch, // For debugging - exact name match
+          startsWithQuery, // For debugging - name starts with query
+          containsQuery, // For debugging - name contains query
+          exactMatchBoost: isPerfectMatch ? 2000 : startsWithQuery ? 1000 : containsQuery ? 500 : 0,
         },
         weights,
       };
