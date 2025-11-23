@@ -22,4 +22,18 @@ export class DatabaseOptimizationProcessor {
       throw error;
     }
   }
+
+  @Process('run-search-performance-optimization')
+  async handleSearchPerformanceOptimization(job: Job): Promise<any> {
+    this.logger.log(`Processing search performance optimization job ${job.id}`);
+
+    try {
+      const result = await this.optimizationService.processSearchPerformanceOptimization(job);
+      this.logger.log(`Search performance optimization completed: ${job.id}`);
+      return result;
+    } catch (error) {
+      this.logger.error(`Search performance optimization failed: ${job.id}`, error.stack);
+      throw error;
+    }
+  }
 }

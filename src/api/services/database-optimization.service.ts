@@ -46,6 +46,23 @@ export class DatabaseOptimizationService {
   }
 
   /**
+   * Queue search performance optimization job
+   */
+  async queueSearchPerformanceOptimization(): Promise<{ jobId: string; message: string }> {
+    const job = await this.optimizationQueue.add('run-search-performance-optimization', {
+      startedAt: Date.now(),
+    });
+
+    this.logger.log(`Search performance optimization job queued: ${job.id}`);
+
+    return {
+      jobId: job.id.toString(),
+      message:
+        'Search performance optimization queued. This will run in the background and may take 5-15 minutes.',
+    };
+  }
+
+  /**
    * Get optimization progress
    */
   async getProgress(jobId: string): Promise<OptimizationProgress | null> {
@@ -369,5 +386,238 @@ export class DatabaseOptimizationService {
     } else {
       return `${seconds}s`;
     }
+  }
+
+  /**
+   * Process search performance optimization (called by Bull processor)
+   */
+  async processSearchPerformanceOptimization(job: any): Promise<any> {
+    const startTime = Date.now();
+    this.logger.log('Starting search performance optimization process...');
+
+    try {
+      const scriptPath = path.join(
+        process.cwd(),
+        'scripts',
+        'optimizations',
+        '01-add-search-performance-indexes.sql',
+      );
+
+      if (!fs.existsSync(scriptPath)) {
+        throw new Error('Search performance optimization script not found');
+      }
+
+      const script = fs.readFileSync(scriptPath, 'utf8');
+
+      // Clean the script
+      const cleanScript = this.cleanSearchPerformanceScript(script);
+
+      // Parse statements
+      const statements = this.parseStatements(cleanScript);
+
+      this.logger.log(`Parsed ${statements.length} statements for search performance optimization`);
+
+      await job.progress({
+        currentStatement: 0,
+        totalStatements: statements.length,
+        currentPhase: 'Starting search performance optimization',
+        errorCount: 0,
+        errors: [],
+        startTime,
+      });
+
+      let successCount = 0;
+      let errorCount = 0;
+      const errors = [];
+
+      // Execute statements with progress updates
+      for (let i = 0; i < statements.length; i++) {
+        const statement = statements[i];
+        const phase = this.identifySearchPerformancePhase(statement, i, statements.length);
+
+        try {
+          await this.dataSource.query(statement);
+          successCount++;
+
+          // Update progress every statement
+          const progress = {
+            currentStatement: i + 1,
+            totalStatements: statements.length,
+            currentPhase: phase,
+            errorCount,
+            errors: errors.slice(-5), // Keep last 5 errors
+            startTime,
+            estimatedTimeRemaining: this.estimateTimeRemaining(i + 1, statements.length, startTime),
+          };
+
+          await job.progress(progress);
+
+          // Log progress every 5 statements
+          if ((i + 1) % 5 === 0) {
+            this.logger.log(
+              `Search optimization progress: ${i + 1}/${statements.length} - ${phase} - ETA: ${this.formatTime(
+                progress.estimatedTimeRemaining,
+              )}`,
+            );
+          }
+        } catch (error) {
+          errorCount++;
+          const preview = statement.substring(0, 100).replace(/\n/g, ' ');
+          errors.push({
+            statement: preview + '...',
+            error: error.message,
+          });
+
+          // Continue on acceptable errors
+          const acceptableErrors = [
+            'already exists',
+            'does not exist',
+            'duplicate',
+            'concurrently',
+            'cannot run inside a transaction block',
+          ];
+
+          const isAcceptable = acceptableErrors.some(msg =>
+            error.message.toLowerCase().includes(msg.toLowerCase()),
+          );
+
+          if (!isAcceptable) {
+            this.logger.warn(`Error executing statement ${i + 1}: ${error.message}`);
+          }
+        }
+      }
+
+      const endTime = Date.now();
+      const duration = endTime - startTime;
+
+      // Get final statistics
+      const indexCheck = await this.dataSource.query(`
+        SELECT 
+          indexname,
+          indexdef
+        FROM pg_indexes
+        WHERE tablename = 'documents'
+          AND schemaname = 'public'
+          AND (indexname LIKE '%name_lower%' OR indexname LIKE '%category_lower%')
+        ORDER BY indexname
+      `);
+
+      const columnCheck = await this.dataSource.query(`
+        SELECT 
+          column_name,
+          data_type
+        FROM information_schema.columns
+        WHERE table_name = 'documents'
+          AND (column_name = 'name_lower' OR column_name = 'category_lower')
+        ORDER BY column_name
+      `);
+
+      const tableStats = await this.dataSource.query(`
+        SELECT 
+          COUNT(*) as total_documents,
+          COUNT(name_lower) as documents_with_name_lower,
+          COUNT(category_lower) as documents_with_category_lower,
+          pg_size_pretty(pg_total_relation_size('documents')) as total_table_size
+        FROM documents
+      `);
+
+      await job.progress({
+        currentStatement: statements.length,
+        totalStatements: statements.length,
+        currentPhase: 'Completed',
+        errorCount,
+        errors: errors.slice(-10),
+        startTime,
+        endTime,
+      });
+
+      return {
+        status: errorCount === 0 ? 'success' : 'partial_success',
+        message:
+          errorCount === 0
+            ? 'Search performance optimization executed successfully'
+            : `Search performance optimization completed with ${errorCount} errors (some may be acceptable)`,
+        execution: {
+          total_statements: statements.length,
+          successful: successCount,
+          errors: errorCount,
+          error_details: errors.slice(-10),
+        },
+        optimizations: [
+          'name_lower column and index (for fast prefix matching)',
+          'category_lower column and index (for fast category searches)',
+          'Automatic triggers to keep lowercase columns updated',
+          'Composite index for filtered searches',
+          'Optimized GIN index settings',
+          'Database configuration tuning',
+          'Table statistics refresh (ANALYZE)',
+        ],
+        createdIndexes: indexCheck.map(idx => ({
+          name: idx.indexname,
+          definition: idx.indexdef.substring(0, 100) + '...',
+        })),
+        createdColumns: columnCheck.map(col => ({
+          name: col.column_name,
+          type: col.data_type,
+        })),
+        statistics: {
+          ...tableStats[0],
+          indexes_created: indexCheck.length,
+          columns_created: columnCheck.length,
+        },
+        executionTime: `${(duration / 1000).toFixed(2)}s`,
+        expectedImprovement: {
+          before: '400-500ms',
+          after: '120-200ms',
+          improvement: '60-75% faster',
+        },
+        timestamp: new Date().toISOString(),
+      };
+    } catch (error) {
+      this.logger.error('Search performance optimization process failed:', error);
+      throw error;
+    }
+  }
+
+  private cleanSearchPerformanceScript(script: string): string {
+    return script
+      .replace(/\\echo.*/g, '')
+      .replace(/\\timing on/g, '')
+      .replace(/\\set ON_ERROR_STOP on/g, '')
+      .replace(/\\di.*/g, '')
+      .replace(/^BEGIN;/gm, '')
+      .replace(/^COMMIT;/gm, '')
+      .trim();
+  }
+
+  private identifySearchPerformancePhase(statement: string, index: number, total: number): string {
+    const upper = statement.toUpperCase();
+
+    if (upper.includes('ALTER TABLE') && upper.includes('ADD COLUMN') && upper.includes('name_lower'))
+      return 'Adding name_lower column';
+    if (upper.includes('ALTER TABLE') && upper.includes('ADD COLUMN') && upper.includes('category_lower'))
+      return 'Adding category_lower column';
+    if (upper.includes('UPDATE documents') && upper.includes('name_lower'))
+      return 'Populating name_lower column';
+    if (upper.includes('UPDATE documents') && upper.includes('category_lower'))
+      return 'Populating category_lower column';
+    if (upper.includes('CREATE INDEX') && upper.includes('name_lower'))
+      return 'Creating name_lower index';
+    if (upper.includes('CREATE INDEX') && upper.includes('category_lower'))
+      return 'Creating category_lower index';
+    if (upper.includes('CREATE TRIGGER') && upper.includes('name_lower'))
+      return 'Setting up name_lower trigger';
+    if (upper.includes('CREATE TRIGGER') && upper.includes('category_lower'))
+      return 'Setting up category_lower trigger';
+    if (upper.includes('CREATE INDEX') && upper.includes('active_verified'))
+      return 'Creating composite index';
+    if (upper.includes('REINDEX') || upper.includes('CREATE INDEX') && upper.includes('search_vector'))
+      return 'Optimizing GIN indexes';
+    if (upper.includes('ALTER DATABASE') || upper.includes('SET work_mem'))
+      return 'Configuring database settings';
+    if (upper.includes('ANALYZE'))
+      return 'Analyzing table statistics';
+
+    return 'Processing...';
   }
 }

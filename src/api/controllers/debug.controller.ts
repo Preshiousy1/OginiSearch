@@ -763,4 +763,335 @@ export class DebugController {
       };
     }
   }
+
+  @Post('optimize-search-performance-async')
+  @ApiOperation({
+    summary: 'Queue search performance optimization job (RECOMMENDED)',
+    description:
+      'Queues the search performance optimization as a background job. This is the recommended approach as it prevents HTTP timeouts. The job will run in the background and you can check its progress using the progress endpoint. Estimated runtime: 5-15 minutes depending on table size.',
+  })
+  async queueSearchPerformanceOptimization() {
+    try {
+      const result = await this.optimizationService.queueSearchPerformanceOptimization();
+      return {
+        status: 'queued',
+        ...result,
+        checkProgress: `/debug/search-optimization-progress/${result.jobId}`,
+        cancelJob: `/debug/search-optimization-cancel/${result.jobId}`,
+        timestamp: new Date().toISOString(),
+      };
+    } catch (error) {
+      return {
+        status: 'error',
+        error: error.message,
+        timestamp: new Date().toISOString(),
+      };
+    }
+  }
+
+  @Get('search-optimization-progress/:jobId')
+  @ApiOperation({
+    summary: 'Get search performance optimization job progress',
+    description:
+      'Check the progress of a running search performance optimization job. Returns current statement number, phase, estimated time remaining, and any errors encountered.',
+  })
+  async getSearchOptimizationProgress(@Param('jobId') jobId: string) {
+    try {
+      const progress = await this.optimizationService.getProgress(jobId);
+      if (!progress) {
+        return {
+          status: 'error',
+          error: 'Job not found',
+          timestamp: new Date().toISOString(),
+        };
+      }
+
+      return {
+        status: 'success',
+        progress,
+        timestamp: new Date().toISOString(),
+      };
+    } catch (error) {
+      return {
+        status: 'error',
+        error: error.message,
+        timestamp: new Date().toISOString(),
+      };
+    }
+  }
+
+  @Delete('search-optimization-cancel/:jobId')
+  @ApiOperation({
+    summary: 'Cancel search performance optimization job',
+    description:
+      'Cancel a running or queued search performance optimization job. Note: If the job is already in progress, it may not stop immediately.',
+  })
+  async cancelSearchOptimization(@Param('jobId') jobId: string) {
+    try {
+      const result = await this.optimizationService.cancelOptimization(jobId);
+      return {
+        ...result,
+        timestamp: new Date().toISOString(),
+      };
+    } catch (error) {
+      return {
+        status: 'error',
+        error: error.message,
+        timestamp: new Date().toISOString(),
+      };
+    }
+  }
+
+  @Post('optimize-search-performance')
+  @ApiOperation({
+    summary: 'Optimize search performance indexes (SYNC - may timeout)',
+    description:
+      'Runs the search performance optimization script synchronously. WARNING: This may timeout for large tables. Use optimize-search-performance-async instead. Estimated runtime: 5-15 minutes depending on table size.',
+  })
+  async optimizeSearchPerformance() {
+    try {
+      const scriptPath = path.join(
+        process.cwd(),
+        'scripts',
+        'optimizations',
+        '01-add-search-performance-indexes.sql',
+      );
+
+      // Check if script exists
+      if (!fs.existsSync(scriptPath)) {
+        return {
+          status: 'error',
+          error: 'Search performance optimization script not found',
+          scriptPath,
+          timestamp: new Date().toISOString(),
+        };
+      }
+
+      const script = fs.readFileSync(scriptPath, 'utf8');
+      const startTime = Date.now();
+
+      // Clean the script for Node.js execution
+      const cleanScript = script
+        // Remove psql-specific commands
+        .replace(/\\echo.*/g, '')
+        .replace(/\\timing on/g, '')
+        .replace(/\\set ON_ERROR_STOP on/g, '')
+        .replace(/\\di.*/g, '')
+        // Remove BEGIN/COMMIT that wrap sections (not inside DO blocks)
+        .replace(/^BEGIN;/gm, '')
+        .replace(/^COMMIT;/gm, '')
+        // Handle CONCURRENTLY - keep it but note it can't be in transactions
+        // CONCURRENTLY is fine for direct execution, just remove transaction wrappers
+        .trim();
+
+      // Smart statement splitting that respects DO $$ and FUNCTION $$ blocks
+      const statements: string[] = [];
+      let currentStatement = '';
+      let inDollarQuote = false;
+      let blockType: 'DO' | 'FUNCTION' | null = null;
+
+      const lines = cleanScript.split('\n');
+
+      for (const line of lines) {
+        // Skip empty lines and comments when not in a statement
+        if (!currentStatement && (line.trim() === '' || line.trim().startsWith('--'))) {
+          continue;
+        }
+
+        currentStatement += line + '\n';
+
+        // Detect start of dollar-quoted blocks
+        if (!inDollarQuote) {
+          if (line.match(/DO\s+\$\$/i)) {
+            inDollarQuote = true;
+            blockType = 'DO';
+          } else if (
+            line.match(/CREATE\s+(OR\s+REPLACE\s+)?FUNCTION/i) ||
+            line.match(/RETURNS/i) ||
+            currentStatement.match(/CREATE\s+(OR\s+REPLACE\s+)?FUNCTION/i)
+          ) {
+            if (line.match(/AS\s+\$\$/i) || line.match(/\)\s+AS\s+\$\$/i)) {
+              inDollarQuote = true;
+              blockType = 'FUNCTION';
+            }
+          }
+        } else {
+          // Detect end of dollar-quoted blocks
+          if (blockType === 'DO' && line.match(/END\s+\$\$;/i)) {
+            inDollarQuote = false;
+            blockType = null;
+            if (currentStatement.trim()) {
+              statements.push(currentStatement.trim());
+            }
+            currentStatement = '';
+            continue;
+          } else if (blockType === 'FUNCTION' && line.match(/\$\$\s*LANGUAGE/i)) {
+            inDollarQuote = false;
+            if (line.includes(';')) {
+              blockType = null;
+              if (currentStatement.trim()) {
+                statements.push(currentStatement.trim());
+              }
+              currentStatement = '';
+              continue;
+            }
+          }
+        }
+
+        // Check for statement end (semicolon not in DO/FUNCTION block)
+        if (!inDollarQuote && line.trim().endsWith(';')) {
+          if (currentStatement.trim()) {
+            statements.push(currentStatement.trim());
+          }
+          currentStatement = '';
+          blockType = null;
+        }
+      }
+
+      // Add last statement if exists
+      if (currentStatement.trim()) {
+        statements.push(currentStatement.trim());
+      }
+
+      let successCount = 0;
+      let errorCount = 0;
+      const errors = [];
+
+      // Execute statements one by one
+      for (let i = 0; i < statements.length; i++) {
+        const statement = statements[i];
+
+        // Skip empty statements
+        if (!statement.trim() || statement.trim() === ';') {
+          continue;
+        }
+
+        try {
+          await this.dataSource.query(statement);
+          successCount++;
+
+          // Log progress every 5 statements
+          if ((i + 1) % 5 === 0) {
+            console.log(
+              `Search optimization progress: ${i + 1}/${statements.length} statements executed`,
+            );
+          }
+        } catch (error) {
+          errorCount++;
+          const preview = statement.substring(0, 100).replace(/\n/g, ' ');
+          errors.push({
+            statement: preview + '...',
+            error: error.message,
+          });
+
+          // Continue on errors that are acceptable
+          const acceptableErrors = [
+            'already exists',
+            'does not exist',
+            'duplicate',
+            'concurrently',
+            'cannot run inside a transaction block',
+          ];
+
+          const isAcceptable = acceptableErrors.some(msg =>
+            error.message.toLowerCase().includes(msg.toLowerCase()),
+          );
+
+          if (!isAcceptable) {
+            console.error(`Error executing statement ${i + 1}:`, error.message);
+          }
+        }
+      }
+
+      const executionTime = Date.now() - startTime;
+
+      // Get statistics after optimization
+      const indexCheck = await this.dataSource.query(`
+        SELECT 
+          indexname,
+          indexdef
+        FROM pg_indexes
+        WHERE tablename = 'documents'
+          AND schemaname = 'public'
+          AND (indexname LIKE '%name_lower%' OR indexname LIKE '%category_lower%')
+        ORDER BY indexname
+      `);
+
+      const columnCheck = await this.dataSource.query(`
+        SELECT 
+          column_name,
+          data_type
+        FROM information_schema.columns
+        WHERE table_name = 'documents'
+          AND (column_name = 'name_lower' OR column_name = 'category_lower')
+        ORDER BY column_name
+      `);
+
+      const tableStats = await this.dataSource.query(`
+        SELECT 
+          COUNT(*) as total_documents,
+          COUNT(name_lower) as documents_with_name_lower,
+          COUNT(category_lower) as documents_with_category_lower,
+          pg_size_pretty(pg_total_relation_size('documents')) as total_table_size
+        FROM documents
+      `);
+
+      return {
+        status: errorCount > 0 ? 'partial_success' : 'success',
+        message:
+          errorCount > 0
+            ? `Search performance optimization completed with ${errorCount} errors (some may be acceptable)`
+            : 'Search performance optimization executed successfully',
+        execution: {
+          total_statements: statements.length,
+          successful: successCount,
+          errors: errorCount,
+          error_details: errors.length > 0 ? errors.slice(0, 10) : undefined,
+        },
+        optimizations: [
+          'name_lower column and index (for fast prefix matching)',
+          'category_lower column and index (for fast category searches)',
+          'Automatic triggers to keep lowercase columns updated',
+          'Composite index for filtered searches (index_name, is_active, is_verified, name_lower)',
+          'Optimized GIN index settings',
+          'Database configuration tuning (work_mem, effective_cache_size, random_page_cost)',
+          'Table statistics refresh (ANALYZE)',
+        ],
+        createdIndexes: indexCheck.map(idx => ({
+          name: idx.indexname,
+          definition: idx.indexdef.substring(0, 100) + '...',
+        })),
+        createdColumns: columnCheck.map(col => ({
+          name: col.column_name,
+          type: col.data_type,
+        })),
+        statistics: {
+          ...tableStats[0],
+          indexes_created: indexCheck.length,
+          columns_created: columnCheck.length,
+        },
+        executionTime: `${(executionTime / 1000).toFixed(2)}s`,
+        expectedImprovement: {
+          before: '400-500ms',
+          after: '120-200ms',
+          improvement: '60-75% faster',
+        },
+        nextSteps: [
+          'Test search performance with: GET /debug/test-search/:indexName/:term',
+          'Verify indexes are being used: GET /debug/verify-search-indexes',
+          'Monitor search query times in application logs',
+          'Expected: Search queries should now complete in < 200ms',
+        ],
+        timestamp: new Date().toISOString(),
+      };
+    } catch (error) {
+      return {
+        status: 'error',
+        error: error.message,
+        errorDetail: error.detail || 'No additional details',
+        stack: error.stack,
+        timestamp: new Date().toISOString(),
+      };
+    }
+  }
 }

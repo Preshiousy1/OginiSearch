@@ -9,6 +9,8 @@ import { QueryExpansionService } from './services/query-expansion.service';
 import { SemanticSearchService } from './services/semantic-search.service';
 import { GeographicFilterService } from './services/geographic-filter.service';
 import { MultiSignalRankingService } from './services/multi-signal-ranking.service';
+import { MatchQualityClassifierService } from './services/match-quality-classifier.service';
+import { TieredRankingService } from './services/tiered-ranking.service';
 import { DictionaryService } from './services/dictionary.service';
 import { SpellCheckerService } from './spell-checker.service';
 import { AnalysisModule } from '../analysis/analysis.module';
@@ -31,6 +33,8 @@ import { PostgreSQLModule } from '../storage/postgresql/postgresql.module';
     SemanticSearchService,
     GeographicFilterService,
     MultiSignalRankingService,
+    MatchQualityClassifierService,
+    TieredRankingService,
     DictionaryService,
   ],
   exports: [
@@ -44,6 +48,8 @@ import { PostgreSQLModule } from '../storage/postgresql/postgresql.module';
     SemanticSearchService,
     GeographicFilterService,
     MultiSignalRankingService,
+    MatchQualityClassifierService,
+    TieredRankingService,
     DictionaryService,
   ],
 })

@@ -64,6 +64,17 @@ interface SearchMetrics {
 @Injectable()
 export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
   private readonly logger = new Logger(PostgreSQLSearchEngine.name);
+  private hasNameLowerColumn: boolean | null = null; // Cache column existence check
+  private hasCategoryLowerColumn: boolean | null = null;
+
+  /**
+   * Clear column cache (call after optimization completes)
+   */
+  clearColumnCache(): void {
+    this.hasNameLowerColumn = null;
+    this.hasCategoryLowerColumn = null;
+    this.logger.log('Column existence cache cleared - will recheck on next query');
+  }
   private readonly indices = new Map<string, IndexConfig>();
 
   constructor(
@@ -111,7 +122,7 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
 
     try {
       // Build optimized data query
-      const { sql: dataSql, params: dataParams } = this.buildOptimizedSingleQuery(
+      const { sql: dataSql, params: dataParams } = await this.buildOptimizedSingleQuery(
         indexName,
         searchTerm,
         size,
@@ -120,7 +131,7 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
       );
 
       // Build optimized count query
-      const { sql: countSql, params: countParams } = this.buildCountQuery(
+      const { sql: countSql, params: countParams } = await this.buildCountQuery(
         indexName,
         searchTerm,
         searchQuery.filter,
@@ -813,13 +824,17 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
   /**
    * Build optimized count query
    */
-  private buildCountQuery(
+  private async buildCountQuery(
     indexName: string,
     searchTerm: string,
     filter?: any,
-  ): { sql: string; params: any[] } {
+  ): Promise<{ sql: string; params: any[] }> {
     const normalizedTerm = this.normalizeSearchQuery(searchTerm);
+    const lowercasedTerm = normalizedTerm.toLowerCase(); // For comparison with name_lower index
     const filterConditions = this.buildFilterConditions(filter);
+
+    // Check if optimized columns exist (once for the whole function)
+    const { nameLower, categoryLower } = await this.checkOptimizedColumnsExist();
 
     // Handle match_all queries
     if (normalizedTerm === '*' || normalizedTerm === '') {
@@ -837,12 +852,15 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
 
     // Check if wildcard query
     const isWildcard = searchTerm.includes('*') || searchTerm.includes('?');
-    const cleanTerm = normalizedTerm.replace(/[*?]/g, '');
+    const cleanTerm = normalizedTerm.replace(/[*?]/g, '').toLowerCase(); // Lowercase for name_lower comparison
 
     if (isWildcard) {
-      // Count for wildcard queries using materialized columns
-      return {
-        sql: `
+      // Count for wildcard queries
+      let sql: string;
+
+      if (nameLower && categoryLower) {
+        // FAST PATH: Use indexed columns
+        sql = `
           SELECT COUNT(*) as total_count
           FROM documents
           WHERE index_name = $1
@@ -850,47 +868,129 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
             AND is_verified = true
             AND is_blocked = false
             AND (
-              lower(name) LIKE '%' || lower($2) || '%'
-              OR lower(category) LIKE '%' || lower($2) || '%'
+              name_lower LIKE '%' || $2 || '%'
+              OR category_lower LIKE '%' || $2 || '%'
             )
             ${filterConditions ? `AND ${filterConditions}` : ''}
-        `,
+        `;
+      } else {
+        // FALLBACK PATH: Use original query
+        sql = `
+          SELECT COUNT(*) as total_count
+          FROM documents
+          WHERE index_name = $1
+            AND is_active = true
+            AND is_verified = true
+            AND is_blocked = false
+            AND (
+              lower(COALESCE(content->>'name', content->>'business_name', '')) LIKE '%' || $2 || '%'
+              OR lower(COALESCE(content->>'category_name', content->>'category', '')) LIKE '%' || $2 || '%'
+            )
+            ${filterConditions ? `AND ${filterConditions}` : ''}
+        `;
+      }
+
+      return {
+        sql,
         params: [indexName, cleanTerm],
       };
     }
 
     // Use optimized count for full-text search queries
-    return {
-      sql: `
+    let sql: string;
+
+    if (nameLower) {
+      // FAST PATH: Use indexed name_lower column
+      sql = `
         SELECT COUNT(*) as total_count
-        FROM documents,
-             plainto_tsquery('english', $1) query
+        FROM documents
         WHERE index_name = $2
           AND is_active = true
           AND is_verified = true
           AND is_blocked = false
           AND (
-            lower(name) LIKE lower($1) || '%'
-            OR weighted_search_vector @@ query
+            name_lower LIKE $1 || '%'
+            OR weighted_search_vector @@ plainto_tsquery('english', $1)
           )
           ${filterConditions ? `AND ${filterConditions}` : ''}
-      `,
-      params: [normalizedTerm, indexName],
+      `;
+    } else {
+      // FALLBACK PATH: Use original query
+      sql = `
+        SELECT COUNT(*) as total_count
+        FROM documents
+        WHERE index_name = $2
+          AND is_active = true
+          AND is_verified = true
+          AND is_blocked = false
+          AND (
+            lower(COALESCE(content->>'name', content->>'business_name', '')) LIKE $1 || '%'
+            OR weighted_search_vector @@ plainto_tsquery('english', $1)
+          )
+          ${filterConditions ? `AND ${filterConditions}` : ''}
+      `;
+    }
+
+    return {
+      sql,
+      params: [lowercasedTerm, indexName],
     };
+  }
+
+  /**
+   * Check if optimized columns exist (cached)
+   */
+  private async checkOptimizedColumnsExist(): Promise<{
+    nameLower: boolean;
+    categoryLower: boolean;
+  }> {
+    if (this.hasNameLowerColumn !== null && this.hasCategoryLowerColumn !== null) {
+      return {
+        nameLower: this.hasNameLowerColumn,
+        categoryLower: this.hasCategoryLowerColumn,
+      };
+    }
+
+    try {
+      const result = await this.dataSource.query(`
+        SELECT column_name 
+        FROM information_schema.columns 
+        WHERE table_name = 'documents' 
+          AND column_name IN ('name_lower', 'category_lower')
+      `);
+
+      const columns = result.map((r: any) => r.column_name);
+      this.hasNameLowerColumn = columns.includes('name_lower');
+      this.hasCategoryLowerColumn = columns.includes('category_lower');
+
+      return {
+        nameLower: this.hasNameLowerColumn,
+        categoryLower: this.hasCategoryLowerColumn,
+      };
+    } catch (error) {
+      // If check fails, assume columns don't exist
+      this.hasNameLowerColumn = false;
+      this.hasCategoryLowerColumn = false;
+      return { nameLower: false, categoryLower: false };
+    }
   }
 
   /**
    * Build optimized single query with window function for count
    */
-  private buildOptimizedSingleQuery(
+  private async buildOptimizedSingleQuery(
     indexName: string,
     searchTerm: string,
     size: number,
     from: number,
     filter?: any,
-  ): { sql: string; params: any[] } {
+  ): Promise<{ sql: string; params: any[] }> {
     const normalizedTerm = this.normalizeSearchQuery(searchTerm);
+    const lowercasedTerm = normalizedTerm.toLowerCase(); // For comparison with name_lower index
     const filterConditions = this.buildFilterConditions(filter);
+
+    // Check if optimized columns exist
+    const { nameLower, categoryLower } = await this.checkOptimizedColumnsExist();
 
     // Handle match_all queries
     if (normalizedTerm === '*' || normalizedTerm === '') {
@@ -920,37 +1020,69 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
       return this.buildWildcardQuery(indexName, searchTerm, size, from, filterConditions);
     }
 
-    // STANDARD FULL-TEXT SEARCH - Uses GIN indexes on tsvector
-    // This is optimized to use materialized columns and avoid CTEs
-    const sql = `
-      SELECT
-        document_id,
-        content,
-        metadata,
-        -- Boost exact matches using materialized columns
-        CASE 
-          WHEN lower(name) = lower($1) THEN 1000.0
-          WHEN lower(name) LIKE lower($1) || '%' THEN 500.0
-          ELSE ts_rank_cd(weighted_search_vector, query, 32) * 100
-        END as rank
-      FROM documents,
-           plainto_tsquery('english', $1) query
-      WHERE index_name = $2
-        AND is_active = true
-        AND is_verified = true
-        AND is_blocked = false
-        AND (
-          lower(name) LIKE lower($1) || '%'
-          OR weighted_search_vector @@ query
-        )
-        ${filterConditions ? `AND ${filterConditions}` : ''}
-      ORDER BY rank DESC, name
-      LIMIT $3 OFFSET $4
-    `;
+    // STANDARD FULL-TEXT SEARCH - Optimized with indexed lowercase columns
+    // Uses name_lower and category_lower indexes for fast prefix matching when available
+    // Removed expensive ts_rank_cd calculation (tiered ranking handles scoring)
+
+    let sql: string;
+
+    if (nameLower) {
+      // FAST PATH: Use indexed name_lower column directly
+      sql = `
+        SELECT
+          document_id,
+          content,
+          metadata,
+          -- Simplified ranking (tiered ranking service handles detailed scoring)
+          CASE 
+            WHEN name_lower = $1 THEN 1000.0
+            WHEN name_lower LIKE $1 || '%' THEN 500.0
+            ELSE 100.0
+          END as rank
+        FROM documents
+        WHERE index_name = $2
+          AND is_active = true
+          AND is_verified = true
+          AND is_blocked = false
+          AND (
+            name_lower LIKE $1 || '%'
+            OR weighted_search_vector @@ plainto_tsquery('english', $1)
+          )
+          ${filterConditions ? `AND ${filterConditions}` : ''}
+        ORDER BY rank DESC, name_lower
+        LIMIT $3 OFFSET $4
+      `;
+    } else {
+      // FALLBACK PATH: Use original query (before optimization) - no COALESCE overhead
+      sql = `
+        SELECT
+          document_id,
+          content,
+          metadata,
+          -- Simplified ranking (tiered ranking service handles detailed scoring)
+          CASE 
+            WHEN lower(COALESCE(content->>'name', content->>'business_name', '')) = $1 THEN 1000.0
+            WHEN lower(COALESCE(content->>'name', content->>'business_name', '')) LIKE $1 || '%' THEN 500.0
+            ELSE 100.0
+          END as rank
+        FROM documents
+        WHERE index_name = $2
+          AND is_active = true
+          AND is_verified = true
+          AND is_blocked = false
+          AND (
+            lower(COALESCE(content->>'name', content->>'business_name', '')) LIKE $1 || '%'
+            OR weighted_search_vector @@ plainto_tsquery('english', $1)
+          )
+          ${filterConditions ? `AND ${filterConditions}` : ''}
+        ORDER BY rank DESC, lower(COALESCE(content->>'name', content->>'business_name', ''))
+        LIMIT $3 OFFSET $4
+      `;
+    }
 
     return {
       sql,
-      params: [normalizedTerm, indexName, size, from],
+      params: [lowercasedTerm, indexName, size, from],
     };
   }
 

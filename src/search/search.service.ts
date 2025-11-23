@@ -12,6 +12,7 @@ import { LocationProcessorService } from './services/location-processor.service'
 import { QueryExpansionService } from './services/query-expansion.service';
 import { GeographicFilterService } from './services/geographic-filter.service';
 import { MultiSignalRankingService } from './services/multi-signal-ranking.service';
+import { TieredRankingService } from './services/tiered-ranking.service';
 import { TypoToleranceService, TypoCorrection } from './typo-tolerance.service';
 import { DictionaryService } from './services/dictionary.service';
 
@@ -26,6 +27,7 @@ export class SearchService {
     private readonly queryExpansionService: QueryExpansionService,
     private readonly geographicFilterService: GeographicFilterService,
     private readonly multiSignalRankingService: MultiSignalRankingService,
+    private readonly tieredRankingService: TieredRankingService,
     private readonly typoToleranceService: TypoToleranceService,
     private readonly dataSource: DataSource,
     private readonly dictionaryService: DictionaryService,
@@ -333,21 +335,28 @@ export class SearchService {
         };
       }
 
-      // 🎯 MULTI-SIGNAL RANKING: Re-rank by health, rating, freshness, location, etc.
+      // 🎯 TIERED RANKING: Re-rank by match quality, confirmation, and health
       if (finalResults.data.hits.length > 0) {
         // Only apply ranking if we have results
-        const rankedResults = await this.multiSignalRankingService.rankResults(
+        const rankedResults = await this.tieredRankingService.rankResults(
           finalResults.data.hits,
           queryTextToUse,
+          typoCorrection,
           intelligentInfo,
         );
 
         // 🎯 SLICE TO ORIGINAL REQUESTED SIZE: We fetched more for better ranking
-        const originalSize = finalResults._originalSize || parseInt(searchQuery.size?.toString() || '10');
+        const originalSize =
+          finalResults._originalSize || parseInt(searchQuery.size?.toString() || '10');
         const slicedResults = rankedResults.slice(0, originalSize);
 
+        // 📊 Log detailed ranking breakdown for monitoring
+        const rankingBreakdown = this.tieredRankingService.getRankingBreakdown(rankedResults);
         this.logger.log(
-          `🎯 Multi-signal ranking: ${finalResults.data.hits.length} candidates → ${slicedResults.length} results`,
+          `🎯 Tiered ranking: ${finalResults.data.hits.length} candidates → ${slicedResults.length} results | ` +
+            `Tiers: Exact(C:${rankingBreakdown.tierBreakdown.exact.confirmed}/U:${rankingBreakdown.tierBreakdown.exact.unconfirmed}), ` +
+            `Close(C:${rankingBreakdown.tierBreakdown.close.confirmed}/U:${rankingBreakdown.tierBreakdown.close.unconfirmed}), ` +
+            `Other(C:${rankingBreakdown.tierBreakdown.other.confirmed}/U:${rankingBreakdown.tierBreakdown.other.unconfirmed})`,
         );
 
         finalResults = {
@@ -369,9 +378,10 @@ export class SearchService {
           });
 
           if (fallbackResults.data.hits.length > 0) {
-            const fallbackRankedResults = await this.multiSignalRankingService.rankResults(
+            const fallbackRankedResults = await this.tieredRankingService.rankResults(
               fallbackResults.data.hits,
               simplifiedQuery,
+              typoCorrection,
               intelligentInfo,
             );
 
