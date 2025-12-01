@@ -39,8 +39,8 @@ ENV DOCKER=true
 
 WORKDIR /usr/src/app
 
-# Install runtime dependencies
-RUN apk add --no-cache ca-certificates bash
+# Install runtime dependencies (procps for ps command, wget for healthcheck)
+RUN apk add --no-cache ca-certificates bash procps wget
 
 # Copy package files
 COPY package*.json ./

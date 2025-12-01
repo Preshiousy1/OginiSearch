@@ -34,12 +34,13 @@ FROM node:20-slim AS production
 
 WORKDIR /usr/src/app
 
-# Install Python and wget for production
+# Install Python, wget, and procps for production
 RUN apt-get update && apt-get install -y \
     python3 \
     make \
     g++ \
-    wget
+    wget \
+    procps
 
 # Set Python path for node-gyp
 ENV PYTHON=/usr/bin/python3

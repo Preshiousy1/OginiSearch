@@ -66,7 +66,6 @@ export class RedisCacheService {
         return null;
       }
 
-      this.logger.debug(`Cache hit for key: ${key}`);
       return entry.data;
     } catch (error) {
       this.logger.warn(`Cache get error: ${error.message}`);
@@ -85,10 +84,16 @@ export class RedisCacheService {
         ttl: ttlSeconds,
       };
 
-      await this.redis.setex(key, ttlSeconds, JSON.stringify(entry));
-      this.logger.debug(`Cache set for key: ${key} with TTL: ${ttlSeconds}s`);
+      const serialized = JSON.stringify(entry);
+      const result = await this.redis.setex(key, ttlSeconds, serialized);
+      // Verify the key was actually stored
+      const verify = await this.redis.exists(key);
+      if (verify === 0) {
+        this.logger.warn(`⚠️ Cache key ${key} was not stored`);
+      }
     } catch (error) {
-      this.logger.warn(`Cache set error: ${error.message}`);
+      this.logger.error(`❌ Cache set error for key ${key}: ${error.message}`, error.stack);
+      // Don't throw - let the caller handle it gracefully
     }
   }
 
@@ -98,7 +103,6 @@ export class RedisCacheService {
   async del(key: string): Promise<void> {
     try {
       await this.redis.del(key);
-      this.logger.debug(`Cache deleted for key: ${key}`);
     } catch (error) {
       this.logger.warn(`Cache delete error: ${error.message}`);
     }

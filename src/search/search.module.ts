@@ -19,7 +19,7 @@ import { PostgreSQLModule } from '../storage/postgresql/postgresql.module';
 @Module({
   imports: [
     AnalysisModule,
-    PostgreSQLModule,
+    PostgreSQLModule, // Provides RedisCacheService via exports
     TypeOrmModule.forFeature(), // This provides DataSource
   ],
   providers: [

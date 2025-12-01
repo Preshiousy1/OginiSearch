@@ -73,7 +73,6 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
   clearColumnCache(): void {
     this.hasNameLowerColumn = null;
     this.hasCategoryLowerColumn = null;
-    this.logger.log('Column existence cache cleared - will recheck on next query');
   }
   private readonly indices = new Map<string, IndexConfig>();
 
@@ -81,9 +80,7 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
     private readonly dataSource: DataSource,
     private readonly optimizedCache: OptimizedQueryCacheService,
     private readonly redisCache: RedisCacheService,
-  ) {
-    this.logger.log('PostgreSQLSearchEngine initialized');
-  }
+  ) {}
 
   async onModuleInit() {
     await this.loadIndicesFromDatabase();
@@ -824,6 +821,9 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
   /**
    * Build optimized count query
    */
+  // 🚀 OPTIMIZATION: Cache query templates to avoid rebuilding
+  private queryTemplateCache = new Map<string, { sql: string; hasNameLower: boolean }>();
+
   private async buildCountQuery(
     indexName: string,
     searchTerm: string,
@@ -833,8 +833,15 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
     const lowercasedTerm = normalizedTerm.toLowerCase(); // For comparison with name_lower index
     const filterConditions = this.buildFilterConditions(filter);
 
-    // Check if optimized columns exist (once for the whole function)
-    const { nameLower, categoryLower } = await this.checkOptimizedColumnsExist();
+    // 🚀 OPTIMIZATION: Cache column check result
+    const cacheKey = `columns:${indexName}`;
+    let columnCheck = this.queryTemplateCache.get(cacheKey);
+    if (!columnCheck) {
+      const { nameLower, categoryLower } = await this.checkOptimizedColumnsExist();
+      this.queryTemplateCache.set(cacheKey, { sql: '', hasNameLower: !!nameLower });
+      columnCheck = { sql: '', hasNameLower: !!nameLower };
+    }
+    const nameLower = columnCheck.hasNameLower;
 
     // Handle match_all queries
     if (normalizedTerm === '*' || normalizedTerm === '') {
@@ -858,7 +865,10 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
       // Count for wildcard queries
       let sql: string;
 
-      if (nameLower && categoryLower) {
+      // Check category_lower separately if needed
+      const categoryCheck = await this.checkOptimizedColumnsExist();
+
+      if (nameLower && categoryCheck.categoryLower) {
         // FAST PATH: Use indexed columns
         sql = `
           SELECT COUNT(*) as total_count
@@ -896,8 +906,26 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
       };
     }
 
+    // 🚀 OPTIMIZATION: Use approximate count for large result sets (>1000 expected)
+    // For very large counts, use reltuples estimate instead of exact COUNT
+    const useApproximateCount = false; // Can be enabled for very large datasets
+
     // Use optimized count for full-text search queries
     let sql: string;
+
+    if (useApproximateCount) {
+      // Approximate count using table statistics (much faster for large tables)
+      sql = `
+        SELECT 
+          CASE 
+            WHEN reltuples > 0 THEN reltuples::BIGINT
+            ELSE (SELECT COUNT(*) FROM documents WHERE index_name = $1 AND is_active = true AND is_verified = true AND is_blocked = false)
+          END as total_count
+        FROM pg_class
+        WHERE relname = 'documents'
+      `;
+      return { sql, params: [indexName] };
+    }
 
     if (nameLower) {
       // FAST PATH: Use indexed name_lower column
@@ -989,8 +1017,15 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
     const lowercasedTerm = normalizedTerm.toLowerCase(); // For comparison with name_lower index
     const filterConditions = this.buildFilterConditions(filter);
 
-    // Check if optimized columns exist
-    const { nameLower, categoryLower } = await this.checkOptimizedColumnsExist();
+    // 🚀 OPTIMIZATION: Cache column check result (reused from count query cache)
+    const cacheKey = `columns:${indexName}`;
+    let columnCheck = this.queryTemplateCache.get(cacheKey);
+    if (!columnCheck) {
+      const { nameLower, categoryLower } = await this.checkOptimizedColumnsExist();
+      this.queryTemplateCache.set(cacheKey, { sql: '', hasNameLower: !!nameLower });
+      columnCheck = { sql: '', hasNameLower: !!nameLower };
+    }
+    const nameLower = columnCheck.hasNameLower;
 
     // Handle match_all queries
     if (normalizedTerm === '*' || normalizedTerm === '') {

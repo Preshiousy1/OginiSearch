@@ -6,8 +6,9 @@
   "private": true,
   "license": "UNLICENSED",
   "scripts": {
-    "build": "nest build && npm run copy-docs",
+    "build": "nest build && npm run copy-docs && npm run copy-workers",
     "copy-docs": "mkdir -p dist/api/documentation/docs && cp -r src/api/documentation/docs/* dist/api/documentation/docs/ || true",
+    "copy-workers": "mkdir -p dist/src/search/workers && (find src/search/workers -name '*.ts' -exec sh -c 'cp \"$1\" \"dist/src/search/workers/$(basename \"$1\" .ts).js\"' _ {} \\; || true)",
     "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\"",
     "start": "nest start",
     "start:dev": "nest start --watch",

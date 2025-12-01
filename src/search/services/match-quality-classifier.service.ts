@@ -1,4 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 
 /**
  * Match Quality Tiers - Determines result grouping priority
@@ -51,10 +52,25 @@ export interface TypoCorrectionInfo {
  * - Early exit patterns
  * - Cached calculations
  * - Minimal string operations
+ * - Configurable parallelization
  */
 @Injectable()
 export class MatchQualityClassifierService {
   private readonly logger = new Logger(MatchQualityClassifierService.name);
+  private readonly parallelChunkSize: number;
+  private readonly classificationThreshold: number;
+
+  constructor(private readonly configService: ConfigService) {
+    // 🚀 OPTIMIZATION: Make parallelization configurable
+    this.parallelChunkSize = parseInt(
+      this.configService.get<string>('RANKING_PARALLEL_CHUNK_SIZE', '10'),
+      10,
+    );
+    this.classificationThreshold = parseInt(
+      this.configService.get<string>('RANKING_CLASSIFICATION_THRESHOLD', '10'),
+      10,
+    );
+  }
 
   /**
    * Classify a single result's match quality
@@ -171,9 +187,19 @@ export class MatchQualityClassifierService {
 
     const classifications = new Map<any, MatchQualityClassification>();
 
+    // 🚀 OPTIMIZATION: Use configurable chunk size for parallelization
+    // Only parallelize if results exceed threshold
+    if (results.length <= this.classificationThreshold) {
+      // Fast path: sequential processing for small arrays
+      results.forEach(result => {
+        classifications.set(result, this.classifyMatchQuality(result, query, typoCorrection));
+      });
+      return classifications;
+    }
+
     // Parallelize classification in chunks
-    // Use 4 parallel chunks for optimal balance between parallelism and overhead
-    const chunkSize = Math.max(10, Math.ceil(results.length / 4));
+    // Use configurable chunk size for optimal balance between parallelism and overhead
+    const chunkSize = Math.max(this.parallelChunkSize, Math.ceil(results.length / 4));
     const chunks: any[][] = [];
 
     // Split results into chunks

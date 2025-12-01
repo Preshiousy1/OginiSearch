@@ -1,4 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import {
   MatchQualityClassifierService,
   MatchQualityClassification,
@@ -27,13 +28,15 @@ interface TieredResult {
 }
 
 /**
- * Ranking configuration
+ * Ranking configuration - now configurable via environment variables
  */
 interface RankingConfig {
   useWorkerThreads: boolean;
   workerThreshold: number;
   enableDebugLogging: boolean;
   includeRankingMetadata: boolean; // Include rankingScores in results (disabled for performance)
+  parallelChunkSize: number; // Chunk size for parallel processing
+  classificationThreshold: number; // Use parallel classification if results > this
 }
 
 /**
@@ -55,18 +58,39 @@ interface RankingConfig {
  * - Optimized sorting with cached scores
  * - Worker threads for large result sets (optional)
  * - Early exit patterns throughout
+ * - Configurable parallelization
  */
 @Injectable()
 export class TieredRankingService {
   private readonly logger = new Logger(TieredRankingService.name);
-  private readonly config: RankingConfig = {
-    useWorkerThreads: false, // Disabled by default for simplicity
-    workerThreshold: 500,
-    enableDebugLogging: true,
-    includeRankingMetadata: false, // Disabled by default for performance (reduces serialization overhead)
-  };
+  private readonly config: RankingConfig;
 
-  constructor(private readonly matchQualityClassifier: MatchQualityClassifierService) {}
+  constructor(
+    private readonly matchQualityClassifier: MatchQualityClassifierService,
+    private readonly configService: ConfigService,
+  ) {
+    // 🚀 OPTIMIZATION: Make parallelization configurable via environment variables
+    this.config = {
+      useWorkerThreads:
+        this.configService.get<string>('RANKING_USE_WORKER_THREADS', 'false') === 'true',
+      workerThreshold: parseInt(
+        this.configService.get<string>('RANKING_WORKER_THRESHOLD', '50'), // Lowered from 500 to 50 - check actual results, not requested size
+        10,
+      ),
+      enableDebugLogging:
+        this.configService.get<string>('RANKING_DEBUG_LOGGING', 'true') === 'true',
+      includeRankingMetadata:
+        this.configService.get<string>('RANKING_INCLUDE_METADATA', 'false') === 'true',
+      parallelChunkSize: parseInt(
+        this.configService.get<string>('RANKING_PARALLEL_CHUNK_SIZE', '10'),
+        10,
+      ),
+      classificationThreshold: parseInt(
+        this.configService.get<string>('RANKING_CLASSIFICATION_THRESHOLD', '10'),
+        10,
+      ),
+    };
+  }
 
   /**
    * Rank results using tiered algorithm
@@ -76,7 +100,12 @@ export class TieredRankingService {
     results: any[],
     query: string,
     typoCorrection?: TypoCorrectionInfo,
-    userContext?: { userLocation?: LocationCoordinates; userId?: string },
+    userContext?: {
+      userLocation?: LocationCoordinates;
+      userId?: string;
+      requestedSize?: number;
+      totalResults?: number;
+    },
   ): Promise<any[]> {
     const startTime = Date.now();
 
@@ -91,13 +120,23 @@ export class TieredRankingService {
     }
 
     // Decide whether to use worker threads
-    const useWorkers =
-      this.config.useWorkerThreads && results.length >= this.config.workerThreshold;
+    // 🚀 OPTIMIZATION: Always use worker threads if enabled, OR check actual returned results
+    // The database may return many results even if requested size is small (for better ranking)
+    // So we check the actual results.length from the database, not requestedSize
+    // This ensures we use workers when we actually have many results to process
+    const shouldUseWorkers =
+      this.config.useWorkerThreads &&
+      (results.length >= this.config.workerThreshold ||
+        (userContext?.totalResults && userContext.totalResults >= this.config.workerThreshold));
 
-    if (useWorkers) {
-      this.logger.log(
-        `📊 Using worker threads for ${results.length} results (threshold: ${this.config.workerThreshold})`,
-      );
+    if (shouldUseWorkers) {
+      // Determine the actual reason that triggered worker threads
+      const reason =
+        results.length >= this.config.workerThreshold
+          ? `returned results (${results.length})`
+          : `total results (${userContext.totalResults})`;
+
+      this.logger.log(`📊 Using worker threads for ${results.length} results (reason: ${reason})`);
       return this.rankWithWorkers(results, query, typoCorrection, userContext);
     }
 
@@ -260,7 +299,6 @@ export class TieredRankingService {
           health: tr.debugInfo.health,
           score: tr.finalScore,
         }));
-        this.logger.debug(`🏆 Top 5 Results: ${JSON.stringify(top5, null, 2)}`);
       }
     }
 
@@ -406,7 +444,7 @@ export class TieredRankingService {
 
   /**
    * Rank with worker threads (for large result sets)
-   * TODO: Implement when needed for >500 results
+   * Uses worker threads for parallel ranking of large result sets
    */
   private async rankWithWorkers(
     results: any[],
@@ -414,10 +452,91 @@ export class TieredRankingService {
     typoCorrection?: TypoCorrectionInfo,
     userContext?: { userLocation?: LocationCoordinates; userId?: string },
   ): Promise<any[]> {
-    // For now, fall back to main thread
-    // Worker implementation can be added later if needed
-    this.logger.warn('Worker threads requested but not implemented - using main thread');
-    return await this.rankInMainThread(results, query, typoCorrection, userContext);
+    const { Worker } = await import('worker_threads');
+    const path = await import('path');
+    const fs = await import('fs');
+
+    return new Promise((resolve, reject) => {
+      // Try multiple possible paths for the worker file
+      const possiblePaths = [
+        path.join(__dirname, '../workers/ranking.worker.js'), // dist/search/workers/ (TypeScript output)
+        path.join(__dirname, '../../workers/ranking.worker.js'), // dist/search/services/../workers/
+        path.join(process.cwd(), 'dist/search/workers/ranking.worker.js'), // Absolute from cwd (TypeScript output)
+        path.join(process.cwd(), 'dist/src/search/workers/ranking.worker.js'), // Alternative location
+        path.join(process.cwd(), 'src/search/workers/ranking.worker.ts'), // Development mode
+      ];
+
+      let workerPath: string | null = null;
+      for (const possiblePath of possiblePaths) {
+        try {
+          if (fs.existsSync(possiblePath)) {
+            workerPath = possiblePath;
+            break;
+          }
+        } catch (e) {
+          // Continue to next path
+        }
+      }
+
+      if (!workerPath) {
+        this.logger.warn(
+          `Worker file not found in any of these paths: ${possiblePaths.join(
+            ', ',
+          )} - falling back to main thread`,
+        );
+        this.rankInMainThread(results, query, typoCorrection, userContext)
+          .then(resolve)
+          .catch(reject);
+        return;
+      }
+
+      this.logger.log(`📦 Using worker thread from: ${workerPath}`);
+      const worker = new Worker(workerPath, {
+        workerData: {
+          results,
+          query,
+          typoCorrection: typoCorrection
+            ? {
+                correctedQuery: typoCorrection.correctedQuery,
+                corrections: typoCorrection.corrections,
+              }
+            : undefined,
+        },
+      });
+
+      const timeout = setTimeout(() => {
+        worker.terminate();
+        this.logger.warn('Worker thread timeout - falling back to main thread');
+        this.rankInMainThread(results, query, typoCorrection, userContext)
+          .then(resolve)
+          .catch(reject);
+      }, 10000); // 10 second timeout
+
+      worker.on('message', (result: { success: boolean; ranked?: any[]; error?: string }) => {
+        clearTimeout(timeout);
+        if (result.success && result.ranked) {
+          // Convert worker results back to expected format
+          const rankedResults = result.ranked.map((r: any) => r.result);
+          this.logger.log(`✅ Worker thread completed ranking for ${rankedResults.length} results`);
+          resolve(rankedResults);
+        } else {
+          this.logger.warn(`Worker thread error: ${result.error} - falling back to main thread`);
+          this.rankInMainThread(results, query, typoCorrection, userContext)
+            .then(resolve)
+            .catch(reject);
+        }
+        worker.terminate();
+      });
+
+      worker.on('error', error => {
+        clearTimeout(timeout);
+        this.logger.warn(`Worker thread error: ${error.message} - falling back to main thread`);
+        this.rankInMainThread(results, query, typoCorrection, userContext)
+          .then(resolve)
+          .catch(reject);
+        worker.terminate();
+      });
+    });
   }
 
   /**

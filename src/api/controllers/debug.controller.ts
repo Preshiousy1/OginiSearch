@@ -5,6 +5,9 @@ import { DataSource } from 'typeorm';
 import { TypoToleranceService } from '../../search/typo-tolerance.service';
 import { FilterBuilderService } from '../../storage/postgresql/filter-builder.service';
 import { DatabaseOptimizationService } from '../services/database-optimization.service';
+import { RedisCacheService } from '../../storage/postgresql/redis-cache.service';
+import { PostgreSQLSearchEngine } from '../../storage/postgresql/postgresql-search-engine';
+import { SearchService } from '../../search/search.service';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -20,6 +23,9 @@ export class DebugController {
     private readonly typoToleranceService: TypoToleranceService,
     private readonly filterBuilderService: FilterBuilderService,
     private readonly optimizationService: DatabaseOptimizationService,
+    private readonly redisCache: RedisCacheService,
+    private readonly postgresSearchEngine: PostgreSQLSearchEngine,
+    private readonly searchService: SearchService,
   ) {}
 
   @Get('health/:indexName')
@@ -1293,6 +1299,313 @@ export class DebugController {
         error: error.message,
         errorDetail: error.detail || 'No additional details',
         stack: error.stack,
+        timestamp: new Date().toISOString(),
+      };
+    }
+  }
+
+  @Post('optimize-indexes')
+  @ApiOperation({
+    summary: 'Optimize index strategy',
+    description:
+      'Analyzes and optimizes indexes on documents table. Identifies unused indexes, duplicates, and recommends consolidation.',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Index optimization analysis completed',
+  })
+  async optimizeIndexes() {
+    try {
+      const startTime = Date.now();
+
+      // Get all indexes
+      const allIndexes = await this.dataSource.query(`
+        SELECT 
+          indexname,
+          indexdef,
+          pg_size_pretty(pg_relation_size(indexname::regclass)) as index_size
+        FROM pg_indexes
+        WHERE tablename = 'documents'
+          AND schemaname = 'public'
+        ORDER BY indexname
+      `);
+
+      // Get index usage statistics
+      const indexUsage = await this.dataSource.query(`
+        SELECT 
+          indexrelname as indexname,
+          idx_scan as scans,
+          idx_tup_read as tuples_read,
+          idx_tup_fetch as tuples_fetched,
+          pg_size_pretty(pg_relation_size(indexrelid)) as size
+        FROM pg_stat_user_indexes
+        WHERE schemaname = 'public'
+          AND relname = 'documents'
+        ORDER BY idx_scan DESC
+      `);
+
+      // Analyze indexes
+      const analysis = {
+        total: allIndexes.length,
+        used: indexUsage.filter((idx: any) => idx.scans > 0).length,
+        unused: indexUsage.filter((idx: any) => idx.scans === 0).length,
+        duplicates: [] as string[],
+        recommendations: [] as string[],
+      };
+
+      // Find duplicate indexes (same columns, different names)
+      const indexGroups = new Map<string, string[]>();
+      for (const idx of allIndexes) {
+        const key = idx.indexdef
+          .replace(/CREATE\s+(UNIQUE\s+)?INDEX\s+\w+\s+ON\s+\w+\.\w+\s+USING\s+\w+\s*\(/i, '')
+          .replace(/\)\s*.*$/i, '')
+          .toLowerCase();
+        if (!indexGroups.has(key)) {
+          indexGroups.set(key, []);
+        }
+        const group = indexGroups.get(key);
+        if (group) {
+          group.push(idx.indexname);
+        }
+      }
+
+      // Find duplicates
+      for (const [key, names] of indexGroups.entries()) {
+        if (names.length > 1) {
+          analysis.duplicates.push(...names);
+          analysis.recommendations.push(
+            `Consider consolidating duplicate indexes: ${names.join(', ')}`,
+          );
+        }
+      }
+
+      // Find unused indexes
+      const unusedIndexes = indexUsage
+        .filter((idx: any) => idx.scans === 0)
+        .map((idx: any) => idx.indexname);
+
+      if (unusedIndexes.length > 0) {
+        analysis.recommendations.push(
+          `Found ${
+            unusedIndexes.length
+          } unused indexes. Consider removing if not needed: ${unusedIndexes
+            .slice(0, 5)
+            .join(', ')}${unusedIndexes.length > 5 ? '...' : ''}`,
+        );
+      }
+
+      // Calculate total index size
+      const totalSize = await this.dataSource.query(`
+        SELECT 
+          pg_size_pretty(SUM(pg_relation_size(indexrelid))) as total_index_size
+        FROM pg_stat_user_indexes
+        WHERE schemaname = 'public'
+          AND relname = 'documents'
+      `);
+
+      const executionTime = Date.now() - startTime;
+
+      return {
+        status: 'success',
+        message: 'Index optimization analysis completed',
+        executionTime: `${executionTime}ms`,
+        analysis,
+        totalIndexSize: totalSize[0]?.total_index_size || '0 bytes',
+        indexes: allIndexes.map((idx: any) => ({
+          name: idx.indexname,
+          definition: idx.indexdef.substring(0, 100) + '...',
+          size: idx.index_size,
+          usage: indexUsage.find((u: any) => u.indexname === idx.indexname) || {
+            scans: 0,
+            tuples_read: 0,
+          },
+        })),
+        recommendations: analysis.recommendations,
+        timestamp: new Date().toISOString(),
+      };
+    } catch (error) {
+      return {
+        status: 'error',
+        error: error.message,
+        timestamp: new Date().toISOString(),
+      };
+    }
+  }
+
+  @Get('cache-stats')
+  @ApiOperation({
+    summary: 'Get cache statistics',
+    description: 'Returns Redis cache statistics including hit rate, keys, and memory usage',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Cache statistics',
+  })
+  async getCacheStats() {
+    try {
+      const redisStats = await this.redisCache.getStats();
+      const queryCacheStats = this.postgresSearchEngine.getCacheStats();
+
+      return {
+        status: 'success',
+        redis: redisStats,
+        queryCache: queryCacheStats,
+        timestamp: new Date().toISOString(),
+      };
+    } catch (error) {
+      return {
+        status: 'error',
+        error: error.message,
+        timestamp: new Date().toISOString(),
+      };
+    }
+  }
+
+  @Post('profile-query-overhead')
+  @ApiOperation({
+    summary: 'Profile query overhead',
+    description: 'Execute a search query and return detailed timing breakdown to identify overhead',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Query overhead analysis',
+  })
+  async profileQueryOverhead(@Body() body: { query: string; indexName?: string; size?: number }) {
+    try {
+      const { query, indexName = 'businesses', size = 10 } = body;
+      const startTime = Date.now();
+
+      // Execute search with detailed timing
+      const result = await this.searchService.search(indexName, {
+        query,
+        size,
+      });
+
+      const totalTime = Date.now() - startTime;
+
+      return {
+        status: 'success',
+        query,
+        indexName,
+        totalTime,
+        resultTook: result.took,
+        overhead: totalTime - result.took,
+        overheadPercent: (((totalTime - result.took) / totalTime) * 100).toFixed(2),
+        breakdown: {
+          databaseQuery: result.took,
+          processingOverhead: totalTime - result.took,
+          totalTime,
+        },
+        resultCount: result.data?.hits?.length || 0,
+        timestamp: new Date().toISOString(),
+      };
+    } catch (error) {
+      return {
+        status: 'error',
+        error: error.message,
+        timestamp: new Date().toISOString(),
+      };
+    }
+  }
+
+  @Post('analyze-query-plan')
+  @ApiOperation({
+    summary: 'Analyze query execution plan',
+    description: 'Execute EXPLAIN ANALYZE on a search query to identify performance bottlenecks',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Query plan analysis',
+  })
+  async analyzeQueryPlan(@Body() body: { query: string; indexName?: string; size?: number }) {
+    try {
+      const { query, indexName = 'businesses', size = 10 } = body;
+      const normalizedTerm = query.trim().toLowerCase();
+
+      // Build the actual query that would be executed (matching postgresql-search-engine.ts)
+      const explainQuery = `
+        EXPLAIN (ANALYZE, BUFFERS, VERBOSE, FORMAT JSON)
+        SELECT
+          document_id,
+          content,
+          metadata,
+          1.0 as rank
+        FROM documents
+        WHERE index_name = $1
+          AND is_active = true
+          AND is_blocked = false
+          AND weighted_search_vector @@ plainto_tsquery('english', $2)
+        ORDER BY document_id
+        LIMIT $3
+      `;
+
+      const planResult = await this.dataSource.query(explainQuery, [
+        indexName,
+        normalizedTerm,
+        size,
+      ]);
+
+      // Extract execution time and cost from plan
+      // EXPLAIN ANALYZE FORMAT JSON returns: [{ "QUERY PLAN": [{ "Execution Time": ..., "Plan": {...} }] }]
+      let executionTime = 0;
+      let totalCost = 0;
+      let planData = null;
+
+      if (
+        planResult &&
+        planResult[0] &&
+        planResult[0]['QUERY PLAN'] &&
+        Array.isArray(planResult[0]['QUERY PLAN'])
+      ) {
+        planData = planResult[0]['QUERY PLAN'][0];
+        // Execution time is directly on the plan object
+        executionTime = parseFloat(planData['Execution Time'] || '0');
+        // Total cost is in Plan.Total Cost
+        totalCost = parseFloat(planData['Plan']?.['Total Cost'] || '0');
+      }
+
+      // Also execute the actual search to compare
+      let searchResult;
+      try {
+        searchResult = await this.searchService.search(indexName, { query, size });
+      } catch (error) {
+        return {
+          status: 'error',
+          error: `Search execution failed: ${error.message}`,
+          query,
+          indexName,
+          planExecutionTime: executionTime,
+          planTotalCost: totalCost,
+          plan: planData,
+          timestamp: new Date().toISOString(),
+        };
+      }
+
+      const searchTook = searchResult?.took || 0;
+
+      return {
+        status: 'success',
+        query,
+        indexName,
+        searchTook,
+        planExecutionTime: executionTime,
+        planTotalCost: totalCost,
+        plan: planData,
+        analysis: {
+          databaseTime: executionTime,
+          totalTime: searchTook,
+          overhead: searchTook - executionTime,
+          overheadPercent:
+            executionTime > 0 && searchTook > 0
+              ? (((searchTook - executionTime) / searchTook) * 100).toFixed(2)
+              : '0.00',
+        },
+        timestamp: new Date().toISOString(),
+      };
+    } catch (error) {
+      return {
+        status: 'error',
+        error: error.message,
         timestamp: new Date().toISOString(),
       };
     }
