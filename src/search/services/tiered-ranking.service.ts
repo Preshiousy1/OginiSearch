@@ -226,6 +226,10 @@ export class TieredRankingService {
         setImmediate(() => {
           const result = { ...tr.result };
 
+          // Update the score field to reflect the finalScore used for ranking
+          // This ensures the displayed score matches the actual ranking order
+          result.score = tr.finalScore;
+
           // Only include ranking metadata if enabled (disabled by default for performance)
           if (this.config.includeRankingMetadata) {
             result.rankingScores = {
@@ -425,6 +429,9 @@ export class TieredRankingService {
 
     const enrichedResult = { ...result };
 
+    // Update score field to reflect finalScore used for ranking
+    enrichedResult.score = tieredResult.finalScore;
+
     // Only include ranking metadata if enabled (disabled by default for performance)
     if (this.config.includeRankingMetadata) {
       enrichedResult.rankingScores = {
@@ -516,7 +523,12 @@ export class TieredRankingService {
         clearTimeout(timeout);
         if (result.success && result.ranked) {
           // Convert worker results back to expected format
-          const rankedResults = result.ranked.map((r: any) => r.result);
+          // Update score field to reflect finalScore used for ranking
+          const rankedResults = result.ranked.map((r: any) => {
+            const res = { ...r.result };
+            res.score = r.finalScore; // Update score to match ranking
+            return res;
+          });
           this.logger.log(`✅ Worker thread completed ranking for ${rankedResults.length} results`);
           resolve(rankedResults);
         } else {
