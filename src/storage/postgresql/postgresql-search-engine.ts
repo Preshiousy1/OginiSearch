@@ -1027,13 +1027,13 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
     let sql: string;
 
     if (nameLower) {
-      // FAST PATH: Use indexed name_lower column directly
+      // 🚀 OPTIMIZED: Prioritize full-text search with GIN index, then filter by name
+      // This uses the GIN index efficiently while still checking name_lower for ranking
       sql = `
         SELECT
           document_id,
           content,
           metadata,
-          -- Simplified ranking (tiered ranking service handles detailed scoring)
           CASE 
             WHEN name_lower = $1 THEN 1000.0
             WHEN name_lower LIKE $1 || '%' THEN 500.0
@@ -1044,10 +1044,7 @@ export class PostgreSQLSearchEngine implements SearchEngine, OnModuleInit {
           AND is_active = true
           AND is_verified = true
           AND is_blocked = false
-          AND (
-            name_lower LIKE $1 || '%'
-            OR weighted_search_vector @@ plainto_tsquery('english', $1)
-          )
+          AND weighted_search_vector @@ plainto_tsquery('english', $1)
           ${filterConditions ? `AND ${filterConditions}` : ''}
         ORDER BY rank DESC, name_lower
         LIMIT $3 OFFSET $4

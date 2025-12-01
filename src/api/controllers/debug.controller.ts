@@ -575,6 +575,209 @@ export class DebugController {
     }
   }
 
+  @Post('analyze-documents')
+  @ApiOperation({
+    summary: 'Run ANALYZE on documents table',
+    description:
+      'Updates PostgreSQL statistics for the documents table. This is critical for query planner to use indexes efficiently. Should be run after bulk data loads or periodically.',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'ANALYZE completed successfully',
+  })
+  async analyzeDocuments() {
+    try {
+      const startTime = Date.now();
+
+      // Run ANALYZE on documents table
+      await this.dataSource.query('ANALYZE documents');
+
+      // Get updated statistics
+      const stats = await this.dataSource.query(`
+        SELECT 
+          schemaname,
+          relname as tablename,
+          n_live_tup as live_rows,
+          n_dead_tup as dead_rows,
+          last_analyze,
+          last_autoanalyze,
+          pg_size_pretty(pg_total_relation_size(schemaname||'.'||relname)) as total_size,
+          pg_size_pretty(pg_relation_size(schemaname||'.'||relname)) as table_size
+        FROM pg_stat_user_tables
+        WHERE relname = 'documents'
+      `);
+
+      const executionTime = Date.now() - startTime;
+
+      return {
+        status: 'success',
+        message: 'ANALYZE completed successfully',
+        executionTime: `${executionTime}ms`,
+        statistics: stats[0] || null,
+        timestamp: new Date().toISOString(),
+      };
+    } catch (error) {
+      return {
+        status: 'error',
+        error: error.message,
+        timestamp: new Date().toISOString(),
+      };
+    }
+  }
+
+  @Post('analyze-verbose')
+  @ApiOperation({
+    summary: 'Run ANALYZE VERBOSE on documents table',
+    description:
+      'Updates PostgreSQL statistics with verbose output showing progress. Useful for large tables.',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'ANALYZE VERBOSE completed',
+  })
+  async analyzeDocumentsVerbose() {
+    try {
+      const startTime = Date.now();
+
+      // Run ANALYZE VERBOSE on documents table
+      await this.dataSource.query('ANALYZE VERBOSE documents');
+
+      // Get updated statistics
+      const stats = await this.dataSource.query(`
+        SELECT 
+          schemaname,
+          relname as tablename,
+          n_live_tup as live_rows,
+          n_dead_tup as dead_rows,
+          last_analyze,
+          last_autoanalyze
+        FROM pg_stat_user_tables
+        WHERE relname = 'documents'
+      `);
+
+      const executionTime = Date.now() - startTime;
+
+      return {
+        status: 'success',
+        message: 'ANALYZE VERBOSE completed successfully',
+        executionTime: `${executionTime}ms`,
+        statistics: stats[0] || null,
+        timestamp: new Date().toISOString(),
+      };
+    } catch (error) {
+      return {
+        status: 'error',
+        error: error.message,
+        timestamp: new Date().toISOString(),
+      };
+    }
+  }
+
+  @Get('table-statistics')
+  @ApiOperation({
+    summary: 'Get table statistics for documents',
+    description:
+      'Returns current statistics for the documents table including row counts, last analyze time, and table size.',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Table statistics',
+  })
+  async getTableStatistics() {
+    try {
+      const stats = await this.dataSource.query(`
+        SELECT 
+          schemaname,
+          relname as tablename,
+          n_live_tup as live_rows,
+          n_dead_tup as dead_rows,
+          n_mod_since_analyze as modified_since_analyze,
+          last_vacuum,
+          last_autovacuum,
+          last_analyze,
+          last_autoanalyze,
+          pg_size_pretty(pg_total_relation_size(schemaname||'.'||relname)) as total_size,
+          pg_size_pretty(pg_relation_size(schemaname||'.'||relname)) as table_size,
+          CASE 
+            WHEN last_analyze IS NULL AND last_autoanalyze IS NULL THEN 'NEVER'
+            WHEN last_analyze > last_autoanalyze THEN last_analyze::text
+            ELSE last_autoanalyze::text
+          END as last_stats_update,
+          CASE 
+            WHEN last_analyze IS NULL AND last_autoanalyze IS NULL THEN true
+            WHEN (last_analyze IS NOT NULL AND last_analyze < NOW() - INTERVAL '24 hours')
+                 OR (last_autoanalyze IS NOT NULL AND last_autoanalyze < NOW() - INTERVAL '24 hours')
+            THEN true
+            ELSE false
+          END as needs_analyze
+        FROM pg_stat_user_tables
+        WHERE relname = 'documents'
+      `);
+
+      return {
+        status: 'success',
+        statistics: stats[0] || null,
+        timestamp: new Date().toISOString(),
+      };
+    } catch (error) {
+      return {
+        status: 'error',
+        error: error.message,
+        timestamp: new Date().toISOString(),
+      };
+    }
+  }
+
+  @Post('vacuum-analyze')
+  @ApiOperation({
+    summary: 'Run VACUUM ANALYZE on documents table',
+    description:
+      'Runs both VACUUM and ANALYZE on the documents table. VACUUM reclaims storage and ANALYZE updates statistics. Use this for maintenance after large data changes.',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'VACUUM ANALYZE completed',
+  })
+  async vacuumAnalyzeDocuments() {
+    try {
+      const startTime = Date.now();
+
+      // Run VACUUM ANALYZE on documents table
+      await this.dataSource.query('VACUUM ANALYZE documents');
+
+      // Get updated statistics
+      const stats = await this.dataSource.query(`
+        SELECT 
+          schemaname,
+          relname as tablename,
+          n_live_tup as live_rows,
+          n_dead_tup as dead_rows,
+          last_vacuum,
+          last_analyze,
+          pg_size_pretty(pg_total_relation_size(schemaname||'.'||relname)) as total_size,
+          pg_size_pretty(pg_relation_size(schemaname||'.'||relname)) as table_size
+        FROM pg_stat_user_tables
+        WHERE relname = 'documents'
+      `);
+
+      const executionTime = Date.now() - startTime;
+
+      return {
+        status: 'success',
+        message: 'VACUUM ANALYZE completed successfully',
+        executionTime: `${executionTime}ms`,
+        statistics: stats[0] || null,
+        timestamp: new Date().toISOString(),
+      };
+    } catch (error) {
+      return {
+        status: 'error',
+        error: error.message,
+        timestamp: new Date().toISOString(),
+      };
+    }
+  }
+
   @Get('verify-search-indexes')
   @ApiOperation({
     summary: 'Verify search engine indexes',

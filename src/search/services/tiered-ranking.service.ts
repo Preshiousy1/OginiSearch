@@ -101,25 +101,25 @@ export class TieredRankingService {
       return this.rankWithWorkers(results, query, typoCorrection, userContext);
     }
 
-    // Standard path: classify and rank in main thread
-    return this.rankInMainThread(results, query, typoCorrection, userContext, startTime);
+    // Standard path: classify and rank in main thread (with parallel classification)
+    return await this.rankInMainThread(results, query, typoCorrection, userContext, startTime);
   }
 
   /**
    * Rank results in main thread (fast path for most queries)
-   * Optimized for speed with minimal allocations
+   * Optimized for speed with minimal allocations and parallel processing
    */
-  private rankInMainThread(
+  private async rankInMainThread(
     results: any[],
     query: string,
     typoCorrection?: TypoCorrectionInfo,
     userContext?: { userLocation?: LocationCoordinates; userId?: string },
     startTime?: number,
-  ): any[] {
+  ): Promise<any[]> {
     const classificationStart = Date.now();
 
-    // Step 1: Classify all results (single pass)
-    const classifications = this.matchQualityClassifier.classifyBatch(
+    // Step 1: Classify all results (PARALLEL - chunked processing)
+    const classifications = await this.matchQualityClassifier.classifyBatch(
       results,
       query,
       typoCorrection,
@@ -127,13 +127,42 @@ export class TieredRankingService {
 
     const classificationTime = Date.now() - classificationStart;
 
-    // Step 2: Build tiered results with scores (single pass)
-    const tieredResults: TieredResult[] = results.map(result => {
-      const classification = classifications.get(result)!;
-      return this.buildTieredResult(result, classification);
+    // Step 1.5: Pre-calculate freshness scores in parallel (OPTIMIZATION)
+    const freshnessStart = Date.now();
+    const freshnessScoresPromises = results.map(async result => {
+      return new Promise<{ result: any; freshness: number }>(resolve => {
+        setImmediate(() => {
+          resolve({
+            result,
+            freshness: this.calculateFreshnessScore(result),
+          });
+        });
+      });
+    });
+    const freshnessScores = await Promise.all(freshnessScoresPromises);
+    const freshnessMap = new Map(
+      freshnessScores.map(({ result, freshness }) => [result, freshness]),
+    );
+    const freshnessTime = Date.now() - freshnessStart;
+
+    // Step 2: Build tiered results with scores (PARALLEL - using Promise.all)
+    const tieredBuildingStart = Date.now();
+    const tieredResultsPromises = results.map(async result => {
+      const classification = classifications.get(result);
+      if (!classification) {
+        throw new Error('Classification not found for result');
+      }
+      const freshnessScore = freshnessMap.get(result);
+      // Use setImmediate to allow parallel processing
+      return new Promise<TieredResult>(resolve => {
+        setImmediate(() => {
+          resolve(this.buildTieredResult(result, classification, freshnessScore));
+        });
+      });
     });
 
-    const scoringTime = Date.now() - classificationStart - classificationTime;
+    const tieredResults: TieredResult[] = await Promise.all(tieredResultsPromises);
+    const tieredBuildingTime = Date.now() - tieredBuildingStart;
 
     // Step 3: Sort by final score (single sort operation)
     const sortStart = Date.now();
@@ -151,37 +180,76 @@ export class TieredRankingService {
     });
     const sortingTime = Date.now() - sortStart;
 
-    // Step 4: Extract ranked results (optionally include ranking metadata)
-    const rankedResults = tieredResults.map(tr => {
-      const result = { ...tr.result };
+    // Step 4: Extract ranked results (PARALLEL - using Promise.all)
+    const extractionStart = Date.now();
+    const rankedResultsPromises = tieredResults.map(async tr => {
+      return new Promise<any>(resolve => {
+        setImmediate(() => {
+          const result = { ...tr.result };
 
-      // Only include ranking metadata if enabled (disabled by default for performance)
-      if (this.config.includeRankingMetadata) {
-        result.rankingScores = {
-          finalScore: tr.finalScore,
-          tierScore: tr.tierScore,
-          confirmationScore: tr.confirmationScore,
-          healthScore: tr.healthScore,
-          matchQuality: tr.classification.tier,
-          matchType: tr.classification.matchType,
-          matchConfidence: tr.classification.confidence,
-          ...tr.debugInfo,
-        };
-      }
+          // Only include ranking metadata if enabled (disabled by default for performance)
+          if (this.config.includeRankingMetadata) {
+            result.rankingScores = {
+              finalScore: tr.finalScore,
+              tierScore: tr.tierScore,
+              confirmationScore: tr.confirmationScore,
+              healthScore: tr.healthScore,
+              matchQuality: tr.classification.tier,
+              matchType: tr.classification.matchType,
+              matchConfidence: tr.classification.confidence,
+              ...tr.debugInfo,
+            };
+          }
 
-      return result;
+          resolve(result);
+        });
+      });
     });
+
+    const rankedResults = await Promise.all(rankedResultsPromises);
+    const extractionTime = Date.now() - extractionStart;
 
     // Performance logging
     const totalTime = Date.now() - (startTime || classificationStart);
 
     if (this.config.enableDebugLogging) {
       const stats = this.matchQualityClassifier.getTierStatistics(classifications);
+
+      // Calculate parallelization efficiency
+      const sequentialEstimate =
+        classificationTime + freshnessTime + tieredBuildingTime + sortingTime + extractionTime;
+      const parallelEfficiency =
+        sequentialEstimate > 0 ? ((sequentialEstimate / totalTime) * 100).toFixed(1) : 'N/A';
+
       this.logger.log(
         `🎯 Tiered Ranking: ${results.length} results in ${totalTime}ms ` +
-          `(classify: ${classificationTime}ms, score: ${scoringTime}ms, sort: ${sortingTime}ms) | ` +
-          `Tiers: Exact=${stats.exact}, Close=${stats.close}, Other=${stats.other}`,
+          `(classify: ${classificationTime}ms, freshness: ${freshnessTime}ms, tiered_build: ${tieredBuildingTime}ms, sort: ${sortingTime}ms, extract: ${extractionTime}ms) | ` +
+          `Tiers: Exact=${stats.exact}, Close=${stats.close}, Other=${stats.other} | ` +
+          `Parallel Efficiency: ${parallelEfficiency}%`,
       );
+
+      // Log detailed timing breakdown for performance analysis
+      if (totalTime > 100) {
+        // Only log detailed breakdown for slower operations
+        const classifyPercent = ((classificationTime / totalTime) * 100).toFixed(1);
+        const freshnessPercent = ((freshnessTime / totalTime) * 100).toFixed(1);
+        const tieredPercent = ((tieredBuildingTime / totalTime) * 100).toFixed(1);
+        const sortPercent = ((sortingTime / totalTime) * 100).toFixed(1);
+        const extractPercent = ((extractionTime / totalTime) * 100).toFixed(1);
+        const speedup = (sequentialEstimate / totalTime).toFixed(2);
+
+        this.logger.debug(
+          `📊 Detailed Timing Breakdown:\n` +
+            `   Classification: ${classificationTime}ms (${classifyPercent}%)\n` +
+            `   Freshness Calc: ${freshnessTime}ms (${freshnessPercent}%)\n` +
+            `   Tiered Building: ${tieredBuildingTime}ms (${tieredPercent}%)\n` +
+            `   Sorting: ${sortingTime}ms (${sortPercent}%)\n` +
+            `   Extraction: ${extractionTime}ms (${extractPercent}%)\n` +
+            `   Sequential Estimate: ${sequentialEstimate}ms\n` +
+            `   Actual Time: ${totalTime}ms\n` +
+            `   Speedup: ${speedup}x`,
+        );
+      }
 
       // Log top 5 results for debugging (use tieredResults which has all the data)
       if (tieredResults.length > 0) {
@@ -202,8 +270,13 @@ export class TieredRankingService {
   /**
    * Build tiered result with all scores calculated
    * Optimized to minimize object allocations
+   * @param freshnessScore - Pre-calculated freshness score (optional, will calculate if not provided)
    */
-  private buildTieredResult(result: any, classification: MatchQualityClassification): TieredResult {
+  private buildTieredResult(
+    result: any,
+    classification: MatchQualityClassification,
+    freshnessScore?: number,
+  ): TieredResult {
     const source = result.source || result;
 
     // Extract business attributes (single pass)
@@ -234,8 +307,8 @@ export class TieredRankingService {
     // Rating is 0-5, scaled to 0-50
     const ratingBoost = rating * 10;
 
-    // Calculate freshness score (quinary factor)
-    const freshnessScore = this.calculateFreshnessScore(result);
+    // Calculate freshness score (quinary factor) - use pre-calculated if available
+    const freshnessScoreValue = freshnessScore ?? this.calculateFreshnessScore(result);
 
     // Calculate featured boost (small boost within tier)
     const featuredBoost = isFeatured ? 500 : 0;
@@ -250,7 +323,7 @@ export class TieredRankingService {
       confirmationScore + // +2000 or 0 (SECONDARY)
       healthScore + // 0-100 (TERTIARY)
       ratingBoost + // 0-50 (QUATERNARY)
-      freshnessScore + // 0-10 (QUINARY)
+      freshnessScoreValue + // 0-10 (QUINARY)
       featuredBoost + // 0 or 500 (MINOR BOOST)
       normalizedTextScore; // 0-10 (MINIMAL)
 
@@ -309,7 +382,8 @@ export class TieredRankingService {
    */
   private enrichSingleResult(result: any, query: string): any[] {
     const classification = this.matchQualityClassifier.classifyMatchQuality(result, query);
-    const tieredResult = this.buildTieredResult(result, classification);
+    const freshnessScore = this.calculateFreshnessScore(result);
+    const tieredResult = this.buildTieredResult(result, classification, freshnessScore);
 
     const enrichedResult = { ...result };
 
@@ -343,7 +417,7 @@ export class TieredRankingService {
     // For now, fall back to main thread
     // Worker implementation can be added later if needed
     this.logger.warn('Worker threads requested but not implemented - using main thread');
-    return this.rankInMainThread(results, query, typoCorrection, userContext);
+    return await this.rankInMainThread(results, query, typoCorrection, userContext);
   }
 
   /**

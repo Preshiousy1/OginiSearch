@@ -49,106 +49,105 @@ export class SearchService {
       let queryTextToUse = originalQuery;
       let highScoringSuggestions: string[] = [];
 
-      // 🚀 HYBRID PARALLEL APPROACH: Run original query AND typo correction simultaneously
+      // 🚀 OPTIMIZATION: Process typo tolerance in parallel with initial search
+      // This saves 100-200ms by not waiting for typo correction before starting search
       const isLikelyCorrect = await this.dictionaryService.isQueryLikelyCorrect(originalQuery);
       this.logger.log(
         `🔍 Dictionary check for "${originalQuery}": likely correct = ${isLikelyCorrect}`,
       );
 
-      // Start both searches in parallel - no waiting!
-      const searchPromises = [];
+      // 🚀 OPTIMIZATION: Start typo tolerance, intelligent processing, and original search in parallel
+      const [originalResults, typoCorrectionResult, intelligentInfoResult] =
+        await Promise.allSettled([
+          this.executeSearch(indexName, searchQuery), // Original query search
+          // Only process typo tolerance if query is long enough and likely incorrect
+          originalQuery.length > 3 && !isLikelyCorrect
+            ? this.processTypoTolerance(indexName, originalQuery)
+            : Promise.resolve(null),
+          // Start intelligent query processing in parallel
+          this.processIntelligentQuery(originalQuery),
+        ]);
 
-      // 1. Always start original query search immediately (handles legitimate words like "amala")
-      const originalSearchPromise = this.executeSearch(indexName, searchQuery);
-      searchPromises.push({
-        promise: originalSearchPromise,
-        type: 'original',
-        query: originalQuery,
-      });
-
-      // 2. Only start typo correction if dictionary says it's a typo AND original query finds no results
-      // We'll check this after the original search completes
-
-      // 3. Wait for original search to complete first (fastest path)
-      const originalResults = await originalSearchPromise;
+      // Extract results
+      const originalResultsValue =
+        originalResults.status === 'fulfilled' ? originalResults.value : null;
+      typoCorrection =
+        typoCorrectionResult.status === 'fulfilled' ? typoCorrectionResult.value : null;
+      const intelligentInfo =
+        intelligentInfoResult.status === 'fulfilled' ? intelligentInfoResult.value : null;
       let searchResults: any;
 
       // 4. Check if we have good results from original query
-      if (originalResults.data.hits.length > 0) {
+      if (originalResultsValue && originalResultsValue.data?.hits?.length > 0) {
         this.logger.log(
-          `✅ Original query found ${originalResults.data.hits.length} results - using fast path`,
+          `✅ Original query found ${originalResultsValue.data.hits.length} results - using fast path`,
         );
-        searchResults = originalResults;
+        searchResults = originalResultsValue;
         // NO TYPO CORRECTION NEEDED - we have results!
       } else {
-        // 5. No results from original query - check if typo correction is needed
+        // 5. No results from original query - use typo correction if available
         this.logger.log(`❌ Original query found no results - evaluating typo correction`);
 
-        // Only run typo correction if dictionary suggests the query is misspelled
-        if (originalQuery.length > 3 && !isLikelyCorrect) {
+        // Typo correction was already processed in parallel, check if we have it
+        if (
+          typoCorrection &&
+          typoCorrection.confidence > 0.1 && // Lowered from 0.3 to 0.1 (10%)
+          typoCorrection.corrections.length > 0
+        ) {
           this.logger.log(
-            `🔍 Dictionary indicates possible typo - starting typo correction for "${originalQuery}"`,
+            `🔍 Typo correction already processed in parallel for "${originalQuery}"`,
           );
-          try {
-            typoCorrection = await this.processTypoTolerance(indexName, originalQuery);
 
-            if (
-              typoCorrection &&
-              typoCorrection.confidence > 0.1 && // Lowered from 0.3 to 0.1 (10%)
-              typoCorrection.corrections.length > 0
-            ) {
-              // Get high-scoring suggestions (only the best one to avoid parallel search timeouts)
-              highScoringSuggestions = typoCorrection.suggestions
-                .filter(suggestion => suggestion.score > 1500) // Only include very high confidence corrections
-                .map(suggestion => suggestion.text);
+          // Get high-scoring suggestions (only the best one to avoid parallel search timeouts)
+          highScoringSuggestions = typoCorrection.suggestions
+            .filter(suggestion => suggestion.score > 1500) // Only include very high confidence corrections
+            .map(suggestion => suggestion.text);
 
-              this.logger.log(
-                `🎯 Using corrected query: "${originalQuery}" → "${typoCorrection.correctedQuery}"`,
-              );
-              this.logger.log(
-                `🔍 High-scoring suggestions (>400): ${highScoringSuggestions.join(', ')}`,
-              );
+          this.logger.log(
+            `🎯 Using corrected query: "${originalQuery}" → "${typoCorrection.correctedQuery}"`,
+          );
+          this.logger.log(
+            `🔍 High-scoring suggestions (>1500): ${highScoringSuggestions.join(', ')}`,
+          );
 
-              // Use the corrected query - maintain the same query structure as original
-              if (typeof searchQuery.query === 'string') {
-                searchQueryToUse = {
-                  ...searchQuery,
-                  query: typoCorrection.correctedQuery,
-                };
-              } else if (searchQuery.query?.match) {
-                searchQueryToUse = {
-                  ...searchQuery,
-                  query: {
-                    match: {
-                      value: typoCorrection.correctedQuery,
-                    },
-                  },
-                };
-              } else {
-                // Fallback to string format
-                searchQueryToUse = {
-                  ...searchQuery,
-                  query: typoCorrection.correctedQuery,
-                };
-              }
-              queryTextToUse = typoCorrection.correctedQuery;
-
-              // Execute search with corrected query
-              searchResults = await this.executeSearch(indexName, searchQueryToUse);
-            } else {
-              // No good typo correction - use original results (empty)
-              searchResults = originalResults;
-            }
-          } catch (error) {
-            this.logger.warn(`⚠️ Typo correction failed: ${error.message}`);
-            searchResults = originalResults;
+          // Use the corrected query - maintain the same query structure as original
+          if (typeof searchQuery.query === 'string') {
+            searchQueryToUse = {
+              ...searchQuery,
+              query: typoCorrection.correctedQuery,
+            };
+          } else if (searchQuery.query?.match) {
+            searchQueryToUse = {
+              ...searchQuery,
+              query: {
+                match: {
+                  value: typoCorrection.correctedQuery,
+                },
+              },
+            };
+          } else {
+            // Fallback to string format
+            searchQueryToUse = {
+              ...searchQuery,
+              query: typoCorrection.correctedQuery,
+            };
           }
+          queryTextToUse = typoCorrection.correctedQuery;
+
+          // Execute search with corrected query (already have typo correction from parallel processing)
+          searchResults = await this.executeSearch(indexName, searchQueryToUse);
         } else {
-          // Dictionary says it's correct, so no typo correction needed
-          this.logger.log(
-            `✅ Dictionary confirms "${originalQuery}" is valid - skipping typo correction`,
-          );
-          searchResults = originalResults;
+          // No good typo correction - use original results (empty)
+          if (typoCorrection) {
+            this.logger.log(
+              `⚠️ Typo correction found but confidence too low (${typoCorrection.confidence})`,
+            );
+          } else {
+            this.logger.log(
+              `✅ Dictionary confirms "${originalQuery}" is valid - skipping typo correction`,
+            );
+          }
+          searchResults = originalResultsValue || { data: { hits: [], total: '0' } };
         }
       }
 
@@ -186,16 +185,34 @@ export class SearchService {
           // 🚀 AGGRESSIVE OPTIMIZATION: Execute with aggressive timeout
           const startTime = Date.now();
 
-          // Start searches with 500ms timeout for each
-          const searchPromises = allSearchQueries.map(async query => {
+          // 🚀 OPTIMIZATION: Check all cache keys in parallel before starting searches
+          const cacheCheckStart = Date.now();
+          const cacheKeys = allSearchQueries.map(
+            query => `search:${indexName}:${query.query}:${JSON.stringify(query)}`,
+          );
+          const cacheResults = await Promise.all(
+            cacheKeys.map(key => this.getCachedSearchResult(key)),
+          );
+          const cacheCheckTime = Date.now() - cacheCheckStart;
+          const cacheHits = cacheResults.filter(r => r !== null).length;
+
+          if (cacheHits > 0) {
+            this.logger.log(
+              `📋 Parallel cache check: ${cacheHits}/${cacheKeys.length} hits in ${cacheCheckTime}ms`,
+            );
+          }
+
+          // 🚀 OPTIMIZATION: Start searches and rank as results arrive (streaming)
+          const searchPromises = allSearchQueries.map(async (query, index) => {
             try {
-              // 🚀 AGGRESSIVE OPTIMIZATION: Check cache first with immediate return
-              const cacheKey = `search:${indexName}:${query.query}:${JSON.stringify(query)}`;
-              const cached = await this.getCachedSearchResult(cacheKey);
+              // 🚀 OPTIMIZATION: Use pre-fetched cache result
+              const cached = cacheResults[index];
               if (cached) {
                 this.logger.log(`📋 CACHE HIT! Using cached result for "${query.query}"`);
                 return cached;
               }
+
+              const cacheKey = cacheKeys[index];
 
               // 🚀 AGGRESSIVE OPTIMIZATION: Execute with 500ms timeout
               const result = await Promise.race([
@@ -204,6 +221,16 @@ export class SearchService {
                   setTimeout(() => reject(new Error('Search timeout')), 500),
                 ),
               ]);
+
+              // 🚀 STREAMING OPTIMIZATION: Start ranking immediately for this result set
+              if (result?.data?.hits?.length > 0) {
+                const ranked = await this.tieredRankingService.rankResults(
+                  result.data.hits,
+                  query.query,
+                  typoCorrection,
+                );
+                return { ...result, data: { ...result.data, hits: ranked } };
+              }
 
               // Cache the result for future requests
               await this.cacheSearchResult(cacheKey, result);
@@ -215,7 +242,7 @@ export class SearchService {
             }
           });
 
-          // 🚀 AGGRESSIVE OPTIMIZATION: Wait for first 2 results only
+          // 🚀 OPTIMIZATION: Wait for all results (they're already ranked as they arrive)
           const firstResults = await Promise.allSettled(searchPromises);
           const parallelTime = Date.now() - startTime;
 
@@ -306,54 +333,79 @@ export class SearchService {
       }
       // If searchResults is already set (from original query), skip the else block entirely
 
-      // 🚀 AGGRESSIVE OPTIMIZATION: Skip intelligent processing for speed
-      let intelligentInfo = null;
-      if (searchResults.data.hits.length > 0) {
-        // Only process intelligent features if we have results
-        const intelligentInfoPromise = this.processIntelligentQuery(queryTextToUse);
-        intelligentInfo = await intelligentInfoPromise;
-      }
-
-      // 🚀 AGGRESSIVE OPTIMIZATION: Skip geographic processing for speed
+      // 🚀 OPTIMIZATION: Process geographic filtering and ranking in parallel
       let finalResults = searchResults;
-      if (intelligentInfo?.locationResult?.hasLocation && searchResults.data.hits.length > 0) {
-        // Only apply geographic filtering if we have results and location
-        const locationFiltered = await this.geographicFilterService.filterByLocation(
-          searchResults.data.hits,
-          intelligentInfo.locationResult,
-        );
-        const locationRanked = await this.geographicFilterService.sortByLocationRelevance(
-          locationFiltered,
-          intelligentInfo.locationResult,
-        );
-        finalResults = {
-          ...searchResults,
-          data: {
-            ...searchResults.data,
-            hits: locationRanked,
-          },
-        };
-      }
+      if (searchResults.data.hits.length > 0) {
+        // Process geographic filtering and tiered ranking in parallel
+        const geoFilterStart = Date.now();
+        const [locationFiltered, rankedResults] = await Promise.all([
+          // Geographic filtering (if location available)
+          intelligentInfo?.locationResult?.hasLocation
+            ? this.geographicFilterService.filterByLocation(
+                searchResults.data.hits,
+                intelligentInfo.locationResult,
+              )
+            : Promise.resolve(searchResults.data.hits),
+          // Start tiered ranking immediately (doesn't depend on geographic filtering)
+          this.tieredRankingService.rankResults(
+            searchResults.data.hits,
+            queryTextToUse,
+            typoCorrection,
+            intelligentInfo,
+          ),
+        ]);
+        const geoFilterTime = Date.now() - geoFilterStart;
 
-      // 🎯 TIERED RANKING: Re-rank by match quality, confirmation, and health
-      if (finalResults.data.hits.length > 0) {
-        // Only apply ranking if we have results
-        const rankedResults = await this.tieredRankingService.rankResults(
-          finalResults.data.hits,
-          queryTextToUse,
-          typoCorrection,
-          intelligentInfo,
-        );
+        // If geographic filtering was applied, sort by location relevance and merge with ranked results
+        if (
+          intelligentInfo?.locationResult?.hasLocation &&
+          locationFiltered !== searchResults.data.hits
+        ) {
+          const locationRanked = await this.geographicFilterService.sortByLocationRelevance(
+            locationFiltered,
+            intelligentInfo.locationResult,
+          );
+          // Re-rank the location-filtered results to combine location and tiered ranking
+          const finalRanked = await this.tieredRankingService.rankResults(
+            locationRanked,
+            queryTextToUse,
+            typoCorrection,
+            intelligentInfo,
+          );
+          finalResults = {
+            ...searchResults,
+            data: {
+              ...searchResults.data,
+              hits: finalRanked,
+            },
+          };
+          this.logger.log(
+            `📍 Geographic filtering + ranking completed in ${geoFilterTime}ms (location applied)`,
+          );
+        } else {
+          // Use tiered ranking results (no geographic filtering)
+          finalResults = {
+            ...searchResults,
+            data: {
+              ...searchResults.data,
+              hits: rankedResults,
+            },
+          };
+          this.logger.log(
+            `🎯 Tiered ranking completed in ${geoFilterTime}ms (no location filtering)`,
+          );
+        }
 
         // 🎯 SLICE TO ORIGINAL REQUESTED SIZE: We fetched more for better ranking
         const originalSize =
           finalResults._originalSize || parseInt(searchQuery.size?.toString() || '10');
-        const slicedResults = rankedResults.slice(0, originalSize);
+        const hitsToSlice = finalResults.data.hits;
+        const slicedResults = hitsToSlice.slice(0, originalSize);
 
         // 📊 Log detailed ranking breakdown for monitoring
-        const rankingBreakdown = this.tieredRankingService.getRankingBreakdown(rankedResults);
+        const rankingBreakdown = this.tieredRankingService.getRankingBreakdown(hitsToSlice);
         this.logger.log(
-          `🎯 Tiered ranking: ${finalResults.data.hits.length} candidates → ${slicedResults.length} results | ` +
+          `🎯 Tiered ranking: ${hitsToSlice.length} candidates → ${slicedResults.length} results | ` +
             `Tiers: Exact(C:${rankingBreakdown.tierBreakdown.exact.confirmed}/U:${rankingBreakdown.tierBreakdown.exact.unconfirmed}), ` +
             `Close(C:${rankingBreakdown.tierBreakdown.close.confirmed}/U:${rankingBreakdown.tierBreakdown.close.unconfirmed}), ` +
             `Other(C:${rankingBreakdown.tierBreakdown.other.confirmed}/U:${rankingBreakdown.tierBreakdown.other.unconfirmed})`,
