@@ -348,19 +348,89 @@ export class BulkIndexingController {
     try {
       const failedJobs = await this.bulkIndexingService.getFailedJobs();
       return {
-        failedJobs: failedJobs.map(job => ({
-          id: job.id,
-          type: job.name,
-          failedReason: job.failedReason,
-          attemptsMade: job.attemptsMade,
-          data: job.data,
-          timestamp: job.finishedOn,
-        })),
+        failedJobs: failedJobs.map(job => {
+          // Extract summary information instead of full data to avoid huge responses
+          const jobData = job.data || {};
+          let dataSummary: any = {};
+
+          if (job.name === 'batch' && jobData.documents) {
+            // For batch jobs, provide summary only
+            dataSummary = {
+              indexName: jobData.indexName,
+              batchId: jobData.batchId,
+              batchNumber: jobData.batchNumber,
+              totalBatches: jobData.totalBatches,
+              documentCount: Array.isArray(jobData.documents) ? jobData.documents.length : 0,
+              // Include first document ID as reference, but not full documents
+              firstDocumentId:
+                Array.isArray(jobData.documents) && jobData.documents.length > 0
+                  ? jobData.documents[0].id || jobData.documents[0]?.document?.id || 'unknown'
+                  : null,
+              options: jobData.options,
+            };
+          } else if (job.name === 'single' && jobData.document) {
+            // For single jobs, include basic document info
+            dataSummary = {
+              indexName: jobData.indexName,
+              documentId: jobData.document?.id || jobData.id || 'unknown',
+            };
+          } else {
+            // Fallback: include all data but limit size
+            dataSummary = jobData;
+          }
+
+          return {
+            id: job.id,
+            type: job.name,
+            failedReason: job.failedReason,
+            attemptsMade: job.attemptsMade,
+            data: dataSummary,
+            timestamp: job.finishedOn ? new Date(job.finishedOn).toISOString() : null,
+            createdAt: job.timestamp ? new Date(job.timestamp).toISOString() : null,
+          };
+        }),
         total: failedJobs.length,
       };
     } catch (error) {
       this.logger.error(`Failed to get failed jobs: ${error.message}`);
       throw new BadRequestException(`Failed to get failed jobs: ${error.message}`);
+    }
+  }
+
+  @Get('failed-jobs/:jobId')
+  @ApiOperation({ summary: 'Get full details of a specific failed job' })
+  @ApiParam({ name: 'jobId', description: 'The ID of the failed job' })
+  @ApiResponse({
+    status: HttpStatus.OK,
+    description: 'Full details of the failed job including all document data',
+  })
+  @ApiResponse({
+    status: HttpStatus.NOT_FOUND,
+    description: 'Failed job not found',
+  })
+  async getFailedJobDetails(@Param('jobId') jobId: string) {
+    try {
+      const job = await this.bulkIndexingService.getFailedJob(jobId);
+      if (!job) {
+        throw new NotFoundException(`Failed job with ID ${jobId} not found`);
+      }
+
+      return {
+        id: job.id,
+        type: job.name,
+        failedReason: job.failedReason,
+        attemptsMade: job.attemptsMade,
+        data: job.data,
+        timestamp: job.finishedOn ? new Date(job.finishedOn).toISOString() : null,
+        createdAt: job.timestamp ? new Date(job.timestamp).toISOString() : null,
+        processedOn: job.processedOn ? new Date(job.processedOn).toISOString() : null,
+      };
+    } catch (error) {
+      if (error instanceof NotFoundException) {
+        throw error;
+      }
+      this.logger.error(`Failed to get failed job details: ${error.message}`);
+      throw new BadRequestException(`Failed to get failed job details: ${error.message}`);
     }
   }
 }

@@ -296,6 +296,28 @@ export class BulkIndexingService {
     }
   }
 
+  /**
+   * Get a specific failed job by ID
+   */
+  async getFailedJob(jobId: string): Promise<Bull.Job | null> {
+    try {
+      const job = await this.bulkIndexingQueue.getJob(jobId);
+      if (!job) {
+        return null;
+      }
+
+      const state = await job.getState();
+      if (state !== 'failed') {
+        return null;
+      }
+
+      return job;
+    } catch (error) {
+      this.logger.error(`Failed to get failed job ${jobId}: ${error.message}`);
+      throw error;
+    }
+  }
+
   async retryFailedJob(jobId: string): Promise<void> {
     try {
       const job = await this.bulkIndexingQueue.getJob(jobId);
