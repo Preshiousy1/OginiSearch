@@ -65,6 +65,7 @@ export class SearchService {
       return response;
     } catch (error) {
       this.logger.error(`Search error: ${error.message}`, error.stack);
+      if (error instanceof NotFoundException) throw error;
       throw new BadRequestException(`Search error: ${error.message}`);
     }
   }

@@ -774,6 +774,83 @@ export class InMemoryTermDictionary implements TermDictionary, OnModuleInit {
 
     return removed;
   }
+
+  /**
+   * Persist posting list for an index-aware term to RocksDB (in-memory list already updated).
+   * Used when removing a document from a term so RocksDB stays in sync with MongoDB.
+   */
+  async persistPostingListForIndex(
+    indexName: string,
+    term: string,
+    postingList: PostingList,
+  ): Promise<void> {
+    this.ensureInitialized();
+    if (!this.options.persistToDisk || !this.rocksDBService) return;
+
+    const indexAwareTerm = this.createIndexAwareTerm(indexName, term);
+    const serialized = postingList.serialize();
+    await this.rocksDBService.put(this.getTermKey(indexAwareTerm), serialized);
+  }
+
+  /**
+   * Remove a term completely for a specific index (index-aware).
+   * Keys are stored as indexName:field:term; this removes that key.
+   */
+  async removeTermForIndex(indexName: string, term: string): Promise<boolean> {
+    this.ensureInitialized();
+
+    const indexAwareTerm = this.createIndexAwareTerm(indexName, term);
+    const wasInCache = this.lruCache.delete(indexAwareTerm);
+    const wasInTermList = this.termList.delete(indexAwareTerm);
+
+    if (wasInTermList && this.options.persistToDisk && this.rocksDBService) {
+      try {
+        await this.rocksDBService.delete(this.getTermKey(indexAwareTerm));
+        await this.saveTermList();
+      } catch (error) {
+        this.logger.error(
+          `Failed to remove term ${term} for index ${indexName} from storage: ${error.message}`,
+        );
+      }
+    }
+
+    return wasInCache || wasInTermList;
+  }
+
+  /**
+   * Remove a document from a term's posting list for a specific index (index-aware).
+   * Term key format is indexName:field:term so searches are distinguishable between indexes.
+   */
+  async removePostingForIndex(
+    indexName: string,
+    term: string,
+    docId: number | string,
+  ): Promise<boolean> {
+    const postingList = await this.getPostingListForIndex(indexName, term);
+    if (!postingList) {
+      return false;
+    }
+
+    const removed = postingList.removeEntry(docId);
+
+    if (removed && this.options.persistToDisk && this.rocksDBService) {
+      try {
+        if (postingList.size() === 0) {
+          await this.removeTermForIndex(indexName, term);
+        } else {
+          const indexAwareTerm = this.createIndexAwareTerm(indexName, term);
+          const serialized = postingList.serialize();
+          await this.rocksDBService.put(this.getTermKey(indexAwareTerm), serialized);
+        }
+      } catch (error) {
+        this.logger.error(
+          `Failed to update postings for term ${term} in index ${indexName}: ${error.message}`,
+        );
+      }
+    }
+
+    return removed;
+  }
 }
 
 // Re-export types for compatibility

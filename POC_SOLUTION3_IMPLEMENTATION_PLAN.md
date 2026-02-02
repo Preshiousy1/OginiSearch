@@ -1,8 +1,10 @@
 # Solution #3 POC: Implementation Plan
 
-**Branch:** `legacy-mongodb-architecture`  
-**Scope:** Proof-of-concept for storing posting entries as **separate MongoDB documents** to eliminate the 16MB limit and data loss.  
+**Branch:** `new-mongodb-poc` (from `legacy-mongodb-architecture`)  
+**Scope:** Proof-of-concept to eliminate the 16MB limit by storing posting lists as a **chunked tree** (max 5000 postings per MongoDB doc) in the existing `term_postings` collection.  
 **References:** [ARCHITECTURE_COMPARISON.md](./ARCHITECTURE_COMPARISON.md#critical-unknown-solution-3-performance), [MONGODB_ROCKSDB_ARCHITECTURE_ANALYSIS.md](./MONGODB_ROCKSDB_ARCHITECTURE_ANALYSIS.md)
+
+**Implementation approach:** The plan below (Sections 3–5) originally described a separate `term_posting_entries` collection. The **implemented** design is the **chunked model** in Section 7: one collection `term_postings`, multiple docs per term (chunkIndex 0,1,2…), max 5000 postings per doc.
 
 ---
 
@@ -67,10 +69,10 @@ Identify every place that assumes “one MongoDB document per term” (with nest
 
 ### 2.3 Audit Checklist
 
-- [ ] **Schema:** Enumerate all usages of `TermPostings` and `term_postings` collection. Confirm no other code assumes one-doc-per-term except the files above.
-- [ ] **Repository:** Confirm `findByIndexAwareTerm` is the **only** MongoDB read used to build posting lists in the search path. (Greps for `findByIndexAwareTerm`, `getPostingListByIndexAwareTerm` are done; re-verify before implementing.)
-- [ ] **Search path:** Trace `executeTermStep` / `executeBooleanStep` → `getIndexAwareTermPostings` → `getPostingListByIndexAwareTerm` → `termPostingsRepository.findByIndexAwareTerm`. Ensure the POC branch injects “aggregate from new collection” only in this chain.
-- [ ] **Restoration:** Confirm `restoreTermPostings` and `migrateTermPostings` never need to read from the new “posting entries” collection for the POC (they can stay on current schema).
+- [x] **Schema:** Enumerate all usages of `TermPostings` and `term_postings` collection. Confirm no other code assumes one-doc-per-term except the files above.
+- [x] **Repository:** Confirm `findByIndexAwareTerm` is the **only** MongoDB read used to build posting lists in the search path. (Greps for `findByIndexAwareTerm`, `getPostingListByIndexAwareTerm` are done; re-verify before implementing.)
+- [x] **Search path:** Trace `executeTermStep` / `executeBooleanStep` → `getIndexAwareTermPostings` → `getPostingListByIndexAwareTerm` → `termPostingsRepository.findByIndexAwareTerm`. Ensure the POC branch injects “aggregate from new collection” only in this chain.
+- [x] **Restoration:** Confirm `restoreTermPostings` and `migrateTermPostings` never need to read from the new “posting entries” collection for the POC (they can stay on current schema).
 
 ### 2.4 Risk Summary
 
@@ -191,5 +193,75 @@ Validate full search flow for a term that has **500K posting entries** in the ne
 
 ---
 
-**Document status:** Implementation plan for Solution #3 POC.  
+---
+
+## 7. Implementation Status (refactor: single chunked model)
+
+**Design:** One collection `term_postings`, tree of chunks per term (max 5000 postings per doc). No separate posting-entries collection.
+
+- **Schema:** `term-postings.schema.ts` – added `chunkIndex`, `MAX_POSTINGS_PER_CHUNK = 5000`, index `{ indexName, term, chunkIndex }` unique.
+- **Repository:** `term-postings.repository.ts` – `findByIndexAwareTerm` loads all chunks and merges; `update`/`create` split postings into chunks of 5000; `deleteByIndexAwareTerm` deletes all chunks; `findByIndex` returns chunk docs (restoration merges by term); `getTermCount` uses distinct term count; `bulkUpsert` chunks.
+- **Persistent-term-dictionary:** Restore groups chunks by term and merges before building PostingList; save/delete unchanged (repo handles chunking).
+- **Search executor:** Single path using `TermPostingsRepository.findByIndexAwareTerm` (merged). Removed `TermPostingEntriesRepository`, `USE_POSTING_ENTRIES_FOR_READS`, and ConfigModule from SearchModule.
+- **Removed:** `term-posting-entry.schema.ts`, `term-posting-entries.repository.ts`, `term-posting-entries.repository.spec.ts`.
+- **Tests:** `term-postings.repository.spec.ts` (chunked read/merge, update chunking, delete); `search-executor.service.spec.ts` (chunked MongoDB fallback test); E2E seeds via `TermPostingsRepository.update()` with large postings.
+- **Migration:** `scripts/migrate-term-postings-to-chunked.ts` – set `chunkIndex: 0` where missing; split docs with >5000 postings into chunks.
+
+### How to run
+
+```bash
+# Unit tests
+npm run test -- --testPathPattern="term-postings.repository.spec|search-executor.service.spec"
+
+# E2E chunked postings (writes performance-results/poc-solution3-report.json when WRITE_POC_REPORT=1)
+WRITE_POC_REPORT=1 npm run test:e2e -- --testPathPattern="search.solution3-poc"
+
+# Migration (existing DBs)
+MONGODB_URI=... npx ts-node -r tsconfig-paths/register scripts/migrate-term-postings-to-chunked.ts
+```
+
+For 500K benchmark: `POC_ENTRIES_COUNT=500000 npm run test:e2e -- --testPathPattern="search.solution3-poc"`.
+
+**E4 (Regression):** Run the full e2e suite so `search.controller.e2e-spec.ts` passes (no POC flag; exercises chunked path via normal MongoDB fallback):  
+`npm run test:e2e`.
+
+---
+
+## 8. POC Report Template (fill after benchmark)
+
+After running the chunked-postings e2e with `POC_ENTRIES_COUNT=500000` and (optional) `WRITE_POC_REPORT=1`, fill:
+
+| Field | Value |
+|-------|--------|
+| **Date** | |
+| **Branch** | new-mongodb-poc |
+| **Posting count** | 500,000 |
+| **p50 latency (ms)** | |
+| **p95 latency (ms)** | |
+| **p99 latency (ms)** | |
+| **totalHits** | 500,000 (pass) / other |
+| **Storage (term_postings docs for 1 term)** | e.g. 100 chunks |
+| **Go/no-go** | p95 &lt; 500ms → go; p95 ≥ 2s → no-go; else document and decide |
+
+Artifact path when `WRITE_POC_REPORT=1`: `performance-results/poc-solution3-report.json`.
+
+---
+
+## 9. Implementation Complete
+
+| Plan item | Status |
+|-----------|--------|
+| Code audit (Section 2) | Done; checklist checked. |
+| Chunked schema + repo (Section 3–5, as Section 7) | Done. |
+| Persistent-term-dictionary restore/save | Done (merge on restore; chunk on save). |
+| Search executor single path | Done. |
+| E2E E1–E3 (latency + completeness) | Done. |
+| E4 regression (existing search e2e) | Documented; run full test:e2e. |
+| Specs (term-postings, search-executor) | Done. |
+| Migration script | Done (`scripts/migrate-term-postings-to-chunked.ts`). |
+| POC report artifact | E2E writes `poc-solution3-report.json` when `WRITE_POC_REPORT=1`; template in Section 8. |
+
+---
+
+**Document status:** Implementation plan for Solution #3 POC; implementation completed on branch `new-mongodb-poc`.  
 **Last updated:** January 2025.

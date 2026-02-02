@@ -1,6 +1,7 @@
 import { INestApplication } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { ValidationPipe } from '@nestjs/common';
+import { ConfigModule } from '@nestjs/config';
 import { IndexSettings, IndexMappings } from '../../src/index/interfaces/index.interface';
 import { RocksDBService } from '../../src/storage/rocksdb/rocksdb.service';
 import { MockRocksDBService } from './test-database.module';
@@ -42,7 +43,11 @@ export const overrideRocksDBProvider = (builder: any) =>
 
 export const setupTestApp = async (modules: any[]): Promise<INestApplication> => {
   let builder = Test.createTestingModule({
-    imports: [MongooseModule.forRoot(process.env.MONGODB_URI), ...modules],
+    imports: [
+      ConfigModule.forRoot({ isGlobal: true }),
+      MongooseModule.forRoot(process.env.MONGODB_URI || ''),
+      ...modules,
+    ],
   });
   builder = overrideRocksDBProvider(builder);
 

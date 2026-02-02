@@ -15,34 +15,42 @@ export class PersistentTermDictionaryService {
   ) {}
 
   /**
-   * Restore term postings from MongoDB to RocksDB for an index
+   * Restore term postings from MongoDB to RocksDB for an index.
+   * Chunked model: groups chunks by term, merges postings, then writes one PostingList per term.
    */
   async restoreTermPostings(indexName: string): Promise<number> {
     try {
       this.logger.log(`Restoring term postings for index: ${indexName}`);
 
-      const mongoTermPostings = await this.termPostingsRepository.findByIndex(indexName);
-
-      if (mongoTermPostings.length === 0) {
+      const chunks = await this.termPostingsRepository.findByIndex(indexName);
+      if (chunks.length === 0) {
         this.logger.debug(`No term postings found in MongoDB for index: ${indexName}`);
         return 0;
       }
 
+      // Group chunks by term and merge postings
+      const byTerm = new Map<string, Record<string, PostingEntry>>();
+      for (const ch of chunks) {
+        const term = ch.term;
+        let merged = byTerm.get(term);
+        if (!merged) {
+          merged = {};
+          byTerm.set(term, merged);
+        }
+        for (const [docId, entry] of Object.entries(ch.postings || {})) {
+          merged[docId] = entry;
+        }
+      }
+
       let restoredCount = 0;
-
-      for (const termPosting of mongoTermPostings) {
+      for (const [term, postings] of byTerm) {
         try {
-          const rocksDBKey = this.getTermKey(termPosting.term);
-
-          // Check if already exists in RocksDB
+          const rocksDBKey = this.getTermKey(term);
           const existingData = await this.rocksDBService.get(rocksDBKey);
-          if (existingData) {
-            continue; // Skip if already exists
-          }
+          if (existingData) continue;
 
-          // Convert MongoDB postings to PostingList format
           const postingList = new SimplePostingList();
-          for (const [docId, posting] of Object.entries(termPosting.postings)) {
+          for (const [docId, posting] of Object.entries(postings)) {
             postingList.addEntry({
               docId,
               frequency: posting.frequency,
@@ -50,17 +58,11 @@ export class PersistentTermDictionaryService {
               metadata: posting.metadata || {},
             });
           }
-
-          // Store in RocksDB
-          const serialized = postingList.serialize();
-          await this.rocksDBService.put(rocksDBKey, serialized);
-
+          await this.rocksDBService.put(rocksDBKey, postingList.serialize());
           restoredCount++;
-          this.logger.debug(`Restored term postings for: ${termPosting.term}`);
+          this.logger.debug(`Restored term postings for: ${term}`);
         } catch (error) {
-          this.logger.warn(
-            `Failed to restore term postings for ${termPosting.term}: ${error.message}`,
-          );
+          this.logger.warn(`Failed to restore term postings for ${term}: ${error.message}`);
         }
       }
 

@@ -27,6 +27,14 @@ import {
   BulkIndexingOptions,
 } from '../indexing/services/bulk-indexing.service';
 
+/** Safely coerce terms to string[] (array, Set, or object from serialization). */
+function toTermArray(terms: any): string[] {
+  if (Array.isArray(terms)) return terms;
+  if (terms && typeof terms[Symbol.iterator] === 'function') return Array.from(terms);
+  if (terms && typeof terms === 'object') return Object.keys(terms);
+  return [];
+}
+
 @Injectable()
 export class DocumentService implements OnModuleInit {
   private readonly logger = new Logger(DocumentService.name);
@@ -328,7 +336,10 @@ export class DocumentService implements OnModuleInit {
     } catch (error) {
       this.logger.error(`Bulk indexing failed: ${error.message}`);
 
-      // Return error response in expected format
+      // Rethrow so controller returns 404 for missing index
+      if (error instanceof NotFoundException) throw error;
+
+      // Return error response in expected format for other errors
       return {
         took: Date.now() - startTime,
         errors: true,
@@ -495,13 +506,15 @@ export class DocumentService implements OnModuleInit {
     await this.checkIndexExists(indexName);
 
     // Get document terms before deletion
+    // Term keys are index-aware (indexName:field:term) so we use removePostingForIndex
     const processedDoc = await this.indexingService.getProcessedDocument(indexName, id);
     if (processedDoc) {
-      // Remove document from all term posting lists
+      // Remove document from all term posting lists (terms may be array, Set, or object from serialization)
       for (const [field, fieldData] of Object.entries(processedDoc.fields)) {
-        for (const term of fieldData.terms) {
-          const termKey = `${field}:${term}`;
-          await this.termDictionary.removePosting(termKey, id);
+        const terms = toTermArray(fieldData?.terms);
+        for (const term of terms) {
+          const fieldTerm = `${field}:${term}`;
+          await this.termDictionary.removePostingForIndex(indexName, fieldTerm, id);
         }
       }
     }
@@ -513,17 +526,22 @@ export class DocumentService implements OnModuleInit {
       throw new NotFoundException(`Document with id ${id} not found in index ${indexName}`);
     }
 
-    // Get all terms for this document
-    const terms = this.termDictionary.getTerms();
-
-    // Remove document from all posting lists
+    // Remove document from any remaining posting lists for this index (index-aware terms)
+    const allTerms = this.termDictionary.getTerms();
+    const indexPrefix = `${indexName}:`;
     await Promise.all(
-      terms.map(async term => {
-        const postingList = await this.termDictionary.getPostingList(term);
-        if (postingList && postingList.getEntry(id)) {
-          await this.termDictionary.removePosting(term, id);
-        }
-      }),
+      allTerms
+        .filter(term => term.startsWith(indexPrefix))
+        .map(async indexAwareTerm => {
+          const fieldTerm = indexAwareTerm.slice(indexPrefix.length);
+          const postingList = await this.termDictionary.getPostingListForIndex(
+            indexName,
+            fieldTerm,
+          );
+          if (postingList?.getEntry(id)) {
+            await this.termDictionary.removePostingForIndex(indexName, fieldTerm, id);
+          }
+        }),
     );
 
     // Remove from index

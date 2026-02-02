@@ -161,9 +161,8 @@ export class SearchExecutorService {
       // Fallback to MongoDB if no terms in memory (ALWAYS works even if Redis is down)
       this.logger.debug(`Falling back to MongoDB for terms in index: ${indexName}`);
       const termPostings = await this.termPostingsRepository.findByIndex(indexName);
-
-      // MongoDB now stores terms in index-aware format (index:field:term) - no conversion needed
-      const mongoTerms = termPostings.map(tp => tp.term);
+      // Chunked model: multiple docs per term; dedupe by term
+      const mongoTerms = [...new Set(termPostings.map(tp => tp.term))];
       this.logger.debug(
         `Found ${mongoTerms.length} index-aware terms in MongoDB for index: ${indexName}`,
       );
@@ -186,7 +185,7 @@ export class SearchExecutorService {
   }
 
   /**
-   * Get posting list for a specific index-aware term from MongoDB storage
+   * Get posting list for a specific index-aware term from MongoDB (chunked model; merged on read).
    */
   private async getPostingListByIndexAwareTerm(
     indexAwareTerm: string,
@@ -198,11 +197,8 @@ export class SearchExecutorService {
         this.logger.debug(`No term posting found in MongoDB for: ${indexAwareTerm}`);
         return null;
       }
-
       this.logger.debug(
-        `Found term posting for: ${indexAwareTerm} with ${
-          Object.keys(termPosting.postings).length
-        } documents`,
+        `Found term posting for: ${indexAwareTerm} with ${termPosting.documentCount} documents`,
       );
       const postingList = new SimplePostingList();
       for (const [docId, posting] of Object.entries(termPosting.postings)) {
@@ -213,7 +209,6 @@ export class SearchExecutorService {
           metadata: posting.metadata || {},
         });
       }
-
       this.logger.debug(
         `Created posting list for: ${indexAwareTerm} with ${postingList.size()} entries`,
       );

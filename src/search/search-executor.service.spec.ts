@@ -3,6 +3,8 @@ import { SearchExecutorService } from './search-executor.service';
 import { PostingList } from '../index/interfaces/posting.interface';
 import { DocumentStorageService } from '../storage/document-storage/document-storage.service';
 import { IndexStatsService } from '../index/index-stats.service';
+import { AnalyzerRegistryService } from '../analysis/analyzer-registry.service';
+import { TermPostingsRepository } from '../storage/mongodb/repositories/term-postings.repository';
 import { QueryExecutionPlan, TermQueryStep } from './interfaces/query-processor.interface';
 import { InMemoryTermDictionary } from 'src/index/term-dictionary';
 
@@ -49,18 +51,19 @@ describe('SearchExecutorService', () => {
 
     const titleEnginePostings = [createPosting('doc1', 1, [2]), createPosting('doc5', 1, [2])];
 
-    // Create mock term dictionary
+    // Create mock term dictionary (executor uses getPostingListForIndex(indexName, term))
+    const getListForTerm = (term: string) => {
+      const postings = {
+        'title:search': titleSearchPostings,
+        'content:search': contentSearchPostings,
+        'title:engine': titleEnginePostings,
+      }[term];
+      return postings ? createPostingList(postings) : null;
+    };
     mockTermDictionary = {
       getTerms: jest.fn(() => ['title:search', 'content:search', 'title:engine']),
-      getPostingList: jest.fn(async (term: string) => {
-        const postings = {
-          'title:search': titleSearchPostings,
-          'content:search': contentSearchPostings,
-          'title:engine': titleEnginePostings,
-        }[term];
-
-        return postings ? createPostingList(postings) : null;
-      }),
+      getPostingList: jest.fn(async (term: string) => getListForTerm(term)),
+      getPostingListForIndex: jest.fn(async (_indexName: string, term: string) => getListForTerm(term)),
       serialize: jest.fn(),
       deserialize: jest.fn(),
     };
@@ -128,6 +131,23 @@ describe('SearchExecutorService', () => {
           provide: IndexStatsService,
           useValue: mockIndexStats,
         },
+        {
+          provide: AnalyzerRegistryService,
+          useValue: {
+            getAnalyzer: jest.fn(() => ({
+              analyze: jest.fn((text: string) => {
+                if (!text) return [];
+                // "title:search" -> ["search"] so fieldTerm becomes "title:search"
+                if (text.includes(':')) return [text.split(':').pop()!];
+                return text.split(/\s+/).filter(Boolean);
+              }),
+            })),
+          },
+        },
+        {
+          provide: TermPostingsRepository,
+          useValue: { findByIndexAwareTerm: jest.fn().mockResolvedValue(null) },
+        },
       ],
     }).compile();
 
@@ -152,7 +172,7 @@ describe('SearchExecutorService', () => {
             estimatedResults: 3,
           } as TermQueryStep,
         ],
-        totalCost: 1,
+        cost: 1,
         estimatedResults: 3,
       };
 
@@ -162,7 +182,7 @@ describe('SearchExecutorService', () => {
       expect(result).toBeDefined();
       expect(result.totalHits).toBe(3);
       expect(result.hits.length).toBe(3);
-      expect(mockTermDictionary.getPostingList).toHaveBeenCalledWith('title:search');
+      expect(mockTermDictionary.getPostingListForIndex).toHaveBeenCalledWith('test-index', 'title:search');
       expect(mockDocumentStorage.getDocuments).toHaveBeenCalled();
     });
 
@@ -179,7 +199,7 @@ describe('SearchExecutorService', () => {
             estimatedResults: 3,
           } as TermQueryStep,
         ],
-        totalCost: 1,
+        cost: 1,
         estimatedResults: 3,
       };
 
@@ -215,7 +235,7 @@ describe('SearchExecutorService', () => {
             estimatedResults: 0,
           } as TermQueryStep,
         ],
-        totalCost: 1,
+        cost: 1,
         estimatedResults: 0,
       };
 
@@ -224,6 +244,86 @@ describe('SearchExecutorService', () => {
       // Verify empty results handling
       expect(result.totalHits).toBe(0);
       expect(result.hits.length).toBe(0);
+    });
+  });
+
+  describe('Chunked term postings (MongoDB fallback)', () => {
+    it('should build PostingList from merged chunks when in-memory is empty', async () => {
+      const largeEntryCount = 2000;
+      const postings: Record<string, { docId: string; frequency: number; positions: number[] }> = {};
+      for (let i = 0; i < largeEntryCount; i++) {
+        postings[`doc-${i}`] = { docId: `doc-${i}`, frequency: 1, positions: [0] };
+      }
+      const mockMerged = {
+        indexName: 'poc-index',
+        term: 'poc-index:name:limited',
+        postings,
+        documentCount: largeEntryCount,
+      };
+      const mockTermPostingsRepo = {
+        findByIndexAwareTerm: jest.fn().mockResolvedValue(mockMerged),
+      };
+      const emptyList = {
+        size: () => 0,
+        getEntries: () => [],
+        getEntry: () => undefined,
+        addEntry: jest.fn(),
+        removeEntry: jest.fn(),
+        serialize: jest.fn(),
+        deserialize: jest.fn(),
+      };
+      const termDict = {
+        getPostingListForIndex: jest.fn().mockResolvedValue(emptyList),
+        getTerms: jest.fn().mockReturnValue([]),
+      };
+
+      const mod = await Test.createTestingModule({
+        providers: [
+          SearchExecutorService,
+          { provide: 'TERM_DICTIONARY', useValue: termDict },
+          { provide: DocumentStorageService, useValue: mockDocumentStorage },
+          { provide: IndexStatsService, useValue: mockIndexStats },
+          {
+            provide: AnalyzerRegistryService,
+            useValue: {
+              getAnalyzer: jest.fn(() => ({
+                analyze: jest.fn((t: string) => (t.includes(':') ? [t.split(':').pop()] : [t])),
+              })),
+            },
+          },
+          { provide: TermPostingsRepository, useValue: mockTermPostingsRepo },
+        ],
+      }).compile();
+
+      const svc = mod.get<SearchExecutorService>(SearchExecutorService);
+      (mockDocumentStorage.getDocuments as jest.Mock).mockImplementation(
+        async (_index: string, opts: { filter?: { ids?: string[] } }) => {
+          const ids = opts?.filter?.ids ?? [];
+          return {
+            documents: ids.map((id: string) => ({
+              indexName: _index,
+              documentId: id,
+              content: { name: 'Limited' },
+              metadata: {},
+            })),
+            total: ids.length,
+          };
+        },
+      );
+
+      const queryPlan: QueryExecutionPlan = {
+        steps: [
+          { type: 'term', term: 'name:limited', field: 'name', value: 'limited', cost: 1, estimatedResults: largeEntryCount } as TermQueryStep,
+        ],
+        cost: 1,
+        estimatedResults: largeEntryCount,
+      };
+
+      const result = await svc.executeQuery('poc-index', queryPlan, { size: 10, from: 0 });
+
+      expect(mockTermPostingsRepo.findByIndexAwareTerm).toHaveBeenCalledWith('poc-index:name:limited');
+      expect(result.totalHits).toBe(largeEntryCount);
+      expect(result.hits.length).toBeLessThanOrEqual(10);
     });
   });
 });

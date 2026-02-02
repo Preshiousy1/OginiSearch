@@ -1,8 +1,8 @@
 import * as fs from 'fs';
 import * as path from 'path';
 
-// Configuration
-const NUM_DOCUMENTS = 10000;
+// Configuration: override with BULK_DOC_COUNT env (e.g. BULK_DOC_COUNT=50000)
+const NUM_DOCUMENTS = Number(process.env.BULK_DOC_COUNT) || 10000;
 const OUTPUT_FILE = path.join(__dirname, '../../data/bulk-test-data.json');
 
 // Ensure data directory exists
@@ -100,4 +100,4 @@ const documents = Array.from({ length: NUM_DOCUMENTS }, (_, i) => generateDocume
 
 // Write to file in the correct format for bulk indexing
 fs.writeFileSync(OUTPUT_FILE, JSON.stringify({ documents }, null, 2));
-console.log(`Test data written to ${OUTPUT_FILE}`);
+console.log(`Test data written to ${OUTPUT_FILE} (${NUM_DOCUMENTS} documents)`);

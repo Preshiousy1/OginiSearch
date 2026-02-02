@@ -57,7 +57,7 @@ describe('SearchController (e2e)', () => {
         })
         .expect(201);
 
-      expect(Array.isArray(res.body.data)).toBeDefined();
+      expect(res.body.data).toBeDefined();
       expect(res.body.data.hits.length).toBeGreaterThanOrEqual(1);
       expect(res.body.took).toBeDefined();
     });

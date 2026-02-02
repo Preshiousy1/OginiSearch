@@ -3,6 +3,22 @@ import { ConfigService } from '@nestjs/config';
 import { Worker } from 'worker_threads';
 import * as path from 'path';
 import * as os from 'os';
+import * as fs from 'fs';
+
+/** Resolve worker script path: use dist when running from src (e.g. Jest e2e). Nest outputs to dist/src/. */
+function getWorkerScriptPath(): string {
+  const fromDir = path.join(__dirname, '../workers/document-processor.worker.js');
+  if (fs.existsSync(fromDir)) return fromDir;
+  const fromDist = path.join(
+    process.cwd(),
+    'dist',
+    'src',
+    'indexing',
+    'workers',
+    'document-processor.worker.js',
+  );
+  return fromDist;
+}
 
 interface ProcessDocumentResult {
   documentId: string;
@@ -40,7 +56,7 @@ export class DocumentProcessorPool implements OnModuleInit, OnModuleDestroy {
     this.logger.log(`Starting ${this.maxWorkers} document processing workers...`);
 
     for (let i = 0; i < this.maxWorkers; i++) {
-      const worker = new Worker(path.join(__dirname, '../workers/document-processor.worker.js'));
+      const worker = new Worker(getWorkerScriptPath());
       const workerId = this.workers.length;
 
       worker.on('message', message => {
@@ -99,7 +115,7 @@ export class DocumentProcessorPool implements OnModuleInit, OnModuleDestroy {
       }
     }
 
-    const worker = new Worker(path.join(__dirname, '../workers/document-processor.worker.js'));
+    const worker = new Worker(getWorkerScriptPath());
 
     worker.on('message', message => {
       if (message.type === 'ready') {

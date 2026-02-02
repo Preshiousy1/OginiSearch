@@ -8,6 +8,14 @@ import { PersistentTermDictionaryService } from '../storage/index-storage/persis
 import { DocumentMapping } from '../document/interfaces/document-processor.interface';
 import { IndexMappings } from '../index/interfaces/index.interface';
 
+/** Safely coerce terms to string[] (array, Set, or object from serialization). */
+function toTermArray(terms: any): string[] {
+  if (Array.isArray(terms)) return terms;
+  if (terms && typeof terms[Symbol.iterator] === 'function') return Array.from(terms);
+  if (terms && typeof terms === 'object') return Object.keys(terms);
+  return [];
+}
+
 @Injectable()
 export class IndexingService {
   private readonly logger = new Logger(IndexingService.name);
@@ -139,51 +147,61 @@ export class IndexingService {
       return;
     }
 
-    // 2. Remove document from all term posting lists
+    // 2. Remove document from all term posting lists (index-aware: indexName:field:term)
     if (processedDoc.fields) {
       for (const [field, fieldData] of Object.entries(processedDoc.fields)) {
-        if (!fieldData || !fieldData.terms) continue;
-
-        for (const term of fieldData.terms) {
-          // Remove from field-specific posting list
+        if (!fieldData) continue;
+        const terms = toTermArray(fieldData.terms);
+        for (const term of terms) {
           const fieldTerm = `${field}:${term}`;
+          const indexAwareFieldTerm = `${indexName}:${fieldTerm}`;
           try {
-            const postingList = await this.termDictionary.getPostingList(fieldTerm);
+            // Use index-aware lookup so we hit the correct index's posting list
+            const postingList = await this.termDictionary.getPostingListForIndex(
+              indexName,
+              fieldTerm,
+            );
             if (postingList) {
               const removed = postingList.removeEntry(documentId);
               if (removed) {
                 if (postingList.size() === 0) {
-                  // Remove term completely from both RocksDB and MongoDB
-                  const indexAwareFieldTerm = `${indexName}:${fieldTerm}`;
                   await this.persistentTermDictionary.deleteTermPostings(indexAwareFieldTerm);
-                  await this.termDictionary.removeTerm(fieldTerm);
+                  await this.termDictionary.removeTermForIndex(indexName, fieldTerm);
                 } else {
-                  // Update the posting list in both RocksDB and MongoDB
-                  const indexAwareFieldTerm = `${indexName}:${fieldTerm}`;
                   await this.persistentTermDictionary.saveTermPostings(
                     indexAwareFieldTerm,
+                    postingList,
+                  );
+                  await this.termDictionary.persistPostingListForIndex(
+                    indexName,
+                    fieldTerm,
                     postingList,
                   );
                 }
               }
             }
 
-            // Also remove from _all field posting list
+            // Also remove from _all field posting list (index-aware)
             const allFieldTerm = `_all:${term}`;
-            const allPostingList = await this.termDictionary.getPostingList(allFieldTerm);
+            const indexAwareAllFieldTerm = `${indexName}:${allFieldTerm}`;
+            const allPostingList = await this.termDictionary.getPostingListForIndex(
+              indexName,
+              allFieldTerm,
+            );
             if (allPostingList) {
               const removed = allPostingList.removeEntry(documentId);
               if (removed) {
                 if (allPostingList.size() === 0) {
-                  // Remove term completely from both RocksDB and MongoDB
-                  const indexAwareAllFieldTerm = `${indexName}:${allFieldTerm}`;
                   await this.persistentTermDictionary.deleteTermPostings(indexAwareAllFieldTerm);
-                  await this.termDictionary.removeTerm(allFieldTerm);
+                  await this.termDictionary.removeTermForIndex(indexName, allFieldTerm);
                 } else {
-                  // Update the posting list in both RocksDB and MongoDB
-                  const indexAwareAllFieldTerm = `${indexName}:${allFieldTerm}`;
                   await this.persistentTermDictionary.saveTermPostings(
                     indexAwareAllFieldTerm,
+                    allPostingList,
+                  );
+                  await this.termDictionary.persistPostingListForIndex(
+                    indexName,
+                    allFieldTerm,
                     allPostingList,
                   );
                 }

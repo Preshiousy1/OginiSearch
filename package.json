@@ -18,7 +18,7 @@
     "test:watch": "jest --watch",
     "test:cov": "jest --coverage",
     "test:debug": "node --inspect-brk -r tsconfig-paths/register -r ts-node/register node_modules/.bin/jest --runInBand",
-    "test:e2e": "jest --config ./test/jest-e2e.json",
+    "test:e2e": "npm run build && jest --config ./test/jest-e2e.json",
     "test:int": "jest --config ./test/jest-int.json",
     "test:performance": "jest --testNamePattern=performance",
     "test:memory": "cd scripts/testing && bash run-memory-tests.sh",
@@ -33,7 +33,9 @@
     "cleanup:heap": "./scripts/cleanup-heap-snapshots.sh",
     "dev:start": "./scripts/development/start-debug.sh",
     "prod:start": "bash ./start-optimized.sh || node dist/src/main.js",
-    "coverage:verify": "./scripts/verify-coverage.sh"
+    "coverage:verify": "./scripts/verify-coverage.sh",
+    "bulk:generate": "npx ts-node -r tsconfig-paths/register scripts/testing/generate-bulk-data.ts",
+    "bulk:measure": "npx ts-node -r tsconfig-paths/register scripts/testing/measure-bulk-indexing.ts"
   },
   "dependencies": {
     "@nestjs/bull": "^11.0.2",

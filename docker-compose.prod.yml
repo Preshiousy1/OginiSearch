@@ -42,6 +42,7 @@ services:
       - ogini-network
     volumes:
       - mongodb-data:/data/db
+    command: ['mongod', '--setParameter', 'diagnosticDataCollectionEnabled=false']
     environment:
       - MONGO_INITDB_DATABASE=ogini
     healthcheck:

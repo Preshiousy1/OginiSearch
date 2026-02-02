@@ -1,7 +1,20 @@
 import { Injectable } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
-import { TermPostings, PostingEntry } from '../schemas/term-postings.schema';
+import {
+  TermPostings,
+  PostingEntry,
+  MAX_POSTINGS_PER_CHUNK,
+} from '../schemas/term-postings.schema';
+
+/** Logical term posting (merged from chunks) for API compatibility */
+export interface MergedTermPosting {
+  indexName: string;
+  term: string;
+  postings: Record<string, PostingEntry>;
+  documentCount: number;
+  lastUpdated?: Date;
+}
 
 @Injectable()
 export class TermPostingsRepository {
@@ -11,88 +24,126 @@ export class TermPostingsRepository {
   ) {}
 
   /**
-   * Find by index-aware term (index:field:term format)
+   * Find by index-aware term: loads all chunks, merges postings, returns one logical doc.
    */
-  async findByIndexAwareTerm(indexAwareTerm: string): Promise<TermPostings | null> {
+  async findByIndexAwareTerm(indexAwareTerm: string): Promise<MergedTermPosting | null> {
     const indexName = this.extractIndexFromTerm(indexAwareTerm);
-    console.log(
-      `[TermPostingsRepository] Looking for term: ${indexAwareTerm} in index: ${indexName}`,
-    );
-    const result = await this.termPostingsModel.findOne({ indexName, term: indexAwareTerm }).exec();
-    if (result) {
-      console.log(
-        `[TermPostingsRepository] Found term posting for: ${indexAwareTerm} with ${
-          Object.keys(result.postings).length
-        } documents`,
-      );
-    } else {
-      console.log(`[TermPostingsRepository] No term posting found for: ${indexAwareTerm}`);
+    const chunks = await this.termPostingsModel
+      .find({ indexName, term: indexAwareTerm })
+      .sort({ chunkIndex: 1 })
+      .lean()
+      .exec();
+    if (chunks.length === 0) return null;
+    const merged: Record<string, PostingEntry> = {};
+    let totalCount = 0;
+    for (const ch of chunks) {
+      for (const [docId, entry] of Object.entries(ch.postings || {})) {
+        merged[docId] = entry as PostingEntry;
+        totalCount++;
+      }
     }
-    return result;
+    return {
+      indexName,
+      term: indexAwareTerm,
+      postings: merged,
+      documentCount: totalCount,
+      lastUpdated: chunks[chunks.length - 1]?.lastUpdated,
+    };
   }
 
   /**
-   * Find by legacy field:term format (for migration purposes only)
+   * Find by legacy field:term format (returns any one chunk for existence check).
    */
   async findByIndexAndTerm(indexName: string, term: string): Promise<TermPostings | null> {
     return this.termPostingsModel.findOne({ indexName, term }).exec();
   }
 
   /**
-   * Find all terms for a specific index
+   * Find all chunk documents for an index (caller must merge by term if needed).
    */
   async findByIndex(indexName: string): Promise<TermPostings[]> {
-    return this.termPostingsModel.find({ indexName }).exec();
+    return this.termPostingsModel.find({ indexName }).sort({ term: 1, chunkIndex: 1 }).exec();
   }
 
   /**
-   * Create new term posting with index-aware term
+   * Create: single doc if postings <= MAX_POSTINGS_PER_CHUNK, else chunked via update.
    */
   async create(
     indexAwareTerm: string,
     postings: Record<string, PostingEntry>,
   ): Promise<TermPostings> {
-    const indexName = this.extractIndexFromTerm(indexAwareTerm);
-    const termPostings = new this.termPostingsModel({
-      indexName,
-      term: indexAwareTerm, // Store full index-aware term
-      postings,
-      documentCount: Object.keys(postings).length,
-      lastUpdated: new Date(),
-    });
-    return termPostings.save();
+    const keys = Object.keys(postings);
+    if (keys.length <= MAX_POSTINGS_PER_CHUNK) {
+      const indexName = this.extractIndexFromTerm(indexAwareTerm);
+      const doc = new this.termPostingsModel({
+        indexName,
+        term: indexAwareTerm,
+        chunkIndex: 0,
+        postings,
+        documentCount: keys.length,
+        lastUpdated: new Date(),
+      });
+      return doc.save();
+    }
+    await this.update(indexAwareTerm, postings);
+    const first = await this.termPostingsModel
+      .findOne({ indexName: this.extractIndexFromTerm(indexAwareTerm), term: indexAwareTerm })
+      .exec();
+    return first!;
   }
 
   /**
-   * Update term posting with index-aware term
+   * Update: split postings into chunks of MAX_POSTINGS_PER_CHUNK, upsert each chunk, delete excess.
    */
   async update(
     indexAwareTerm: string,
     postings: Record<string, PostingEntry>,
-  ): Promise<TermPostings | null> {
+  ): Promise<MergedTermPosting | null> {
     const indexName = this.extractIndexFromTerm(indexAwareTerm);
-    return this.termPostingsModel
-      .findOneAndUpdate(
-        { indexName, term: indexAwareTerm },
-        {
-          postings,
-          documentCount: Object.keys(postings).length,
-          lastUpdated: new Date(),
-        },
-        { new: true, upsert: true },
-      )
+    const entries = Object.entries(postings);
+    const chunks: Record<string, PostingEntry>[] = [];
+    for (let i = 0; i < entries.length; i += MAX_POSTINGS_PER_CHUNK) {
+      const slice = entries.slice(i, i + MAX_POSTINGS_PER_CHUNK);
+      chunks.push(Object.fromEntries(slice));
+    }
+    const now = new Date();
+    for (let c = 0; c < chunks.length; c++) {
+      const postingsChunk = chunks[c];
+      const count = Object.keys(postingsChunk).length;
+      await this.termPostingsModel
+        .findOneAndUpdate(
+          { indexName, term: indexAwareTerm, chunkIndex: c },
+          {
+            postings: postingsChunk,
+            documentCount: count,
+            lastUpdated: now,
+          },
+          { new: true, upsert: true },
+        )
+        .exec();
+    }
+    const toDelete = await this.termPostingsModel
+      .find({ indexName, term: indexAwareTerm, chunkIndex: { $gte: chunks.length } })
+      .select({ _id: 1 })
+      .lean()
       .exec();
+    if (toDelete.length > 0) {
+      await this.termPostingsModel.deleteMany({
+        _id: { $in: toDelete.map(d => d._id) },
+      });
+    }
+    return this.findByIndexAwareTerm(indexAwareTerm);
   }
 
   /**
-   * Delete by index-aware term
+   * Delete all chunks for an index-aware term.
    */
   async deleteByIndexAwareTerm(indexAwareTerm: string): Promise<boolean> {
     const indexName = this.extractIndexFromTerm(indexAwareTerm);
     const result = await this.termPostingsModel
-      .deleteOne({ indexName, term: indexAwareTerm })
+      .deleteMany({ indexName, term: indexAwareTerm })
       .exec();
-    return result.deletedCount > 0;
+    return (result.deletedCount ?? 0) > 0;
   }
 
   /**
@@ -116,58 +167,70 @@ export class TermPostingsRepository {
   }
 
   async getTermCount(indexName: string): Promise<number> {
-    return this.termPostingsModel.countDocuments({ indexName }).exec();
+    const result = await this.termPostingsModel
+      .aggregate([{ $match: { indexName } }, { $group: { _id: '$term' } }, { $count: 'count' }])
+      .exec();
+    return result[0]?.count ?? 0;
   }
 
   /**
-   * Bulk upsert with index-aware terms
+   * Bulk upsert: chunks each term's postings (max 5000 per doc) and upserts.
    */
   async bulkUpsert(
     termPostingsData: Array<{ indexAwareTerm: string; postings: Record<string, PostingEntry> }>,
   ): Promise<void> {
-    const bulkOps = termPostingsData.map(({ indexAwareTerm, postings }) => {
+    const bulkOps: any[] = [];
+    const now = new Date();
+    for (const { indexAwareTerm, postings } of termPostingsData) {
       const indexName = this.extractIndexFromTerm(indexAwareTerm);
-      return {
-        updateOne: {
-          filter: { indexName, term: indexAwareTerm },
-          update: {
-            $set: {
-              postings,
-              documentCount: Object.keys(postings).length,
-              lastUpdated: new Date(),
+      const entries = Object.entries(postings);
+      for (let i = 0; i < entries.length; i += MAX_POSTINGS_PER_CHUNK) {
+        const slice = entries.slice(i, i + MAX_POSTINGS_PER_CHUNK);
+        const chunkPostings = Object.fromEntries(slice);
+        const chunkIndex = Math.floor(i / MAX_POSTINGS_PER_CHUNK);
+        bulkOps.push({
+          updateOne: {
+            filter: { indexName, term: indexAwareTerm, chunkIndex },
+            update: {
+              $set: {
+                postings: chunkPostings,
+                documentCount: slice.length,
+                lastUpdated: now,
+              },
             },
+            upsert: true,
           },
-          upsert: true,
-        },
-      };
-    });
-
+        });
+      }
+    }
     if (bulkOps.length > 0) {
       await this.termPostingsModel.bulkWrite(bulkOps);
     }
   }
 
   /**
-   * Legacy bulk upsert (for migration purposes)
+   * Legacy bulk upsert (for migration): single chunk per term (chunkIndex 0).
+   * Use update() for terms with > MAX_POSTINGS_PER_CHUNK so they get chunked.
    */
   async bulkUpsertLegacy(
     indexName: string,
     termPostingsData: Array<{ term: string; postings: Record<string, PostingEntry> }>,
   ): Promise<void> {
+    const now = new Date();
     const bulkOps = termPostingsData.map(({ term, postings }) => ({
       updateOne: {
-        filter: { indexName, term },
+        filter: { indexName, term, chunkIndex: 0 },
         update: {
           $set: {
             postings,
             documentCount: Object.keys(postings).length,
-            lastUpdated: new Date(),
+            lastUpdated: now,
+            chunkIndex: 0,
           },
         },
         upsert: true,
       },
     }));
-
     if (bulkOps.length > 0) {
       await this.termPostingsModel.bulkWrite(bulkOps);
     }
@@ -236,7 +299,7 @@ export class TermPostingsRepository {
           return {
             updateOne: {
               filter: { _id: record._id },
-              update: { $set: { term: newTerm } },
+              update: { $set: { term: newTerm, chunkIndex: record.chunkIndex ?? 0 } },
             },
           };
         });
