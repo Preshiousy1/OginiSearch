@@ -81,7 +81,7 @@ function generateDocument(id: number) {
   return {
     id: `doc${id}`,
     document: {
-      title: generateRandomText(5),
+      title: generateRandomText(5) + ' limited',
       content: generateRandomText(50),
       tags: Array.from({ length: 3 }, () => generateRandomText(1)),
       metadata: {

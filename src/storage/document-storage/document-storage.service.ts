@@ -279,4 +279,28 @@ export class DocumentStorageService {
       throw error;
     }
   }
+
+  /**
+   * Bulk check which document IDs already exist in the index
+   * Returns a Set of document IDs that exist
+   */
+  async bulkExists(indexName: string, documentIds: string[]): Promise<Set<string>> {
+    try {
+      if (!this.documentRepository) {
+        // In-memory fallback: check local store
+        const existingIds = new Set<string>();
+        for (const id of documentIds) {
+          const key = `${indexName}:${id}`;
+          if (this.inMemoryStore.has(key)) {
+            existingIds.add(id);
+          }
+        }
+        return existingIds;
+      }
+      return await this.documentRepository.bulkExists(indexName, documentIds);
+    } catch (error) {
+      this.logger.error(`Failed to bulk check document existence: ${error.message}`);
+      throw error;
+    }
+  }
 }

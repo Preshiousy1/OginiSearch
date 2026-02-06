@@ -276,10 +276,27 @@ export class DocumentService implements OnModuleInit {
       }
 
       // For all other batches, delegate to BulkIndexingService with smart options
-      const isRealTimeRequest = documents.length <= 20; // Threshold for real-time vs background
+      // Optimized batch sizing for performance:
+      // - Small requests (<=50): real-time with small batches for immediate response
+      // - Medium requests (51-1000): background with standard batch size
+      // - Large requests (>1000): background with larger batches to reduce job overhead
+      const isRealTimeRequest = documents.length <= 50; // Increased threshold for better throughput
+      const isLargeBulk = documents.length > 1000;
+
+      // Calculate optimal batch size based on request size
+      let batchSize: number;
+      if (isRealTimeRequest) {
+        batchSize = Math.min(documents.length, 10); // Small batches for real-time
+      } else if (isLargeBulk) {
+        // For large bulks, use larger batches to reduce job count and queue overhead
+        // Cap at 200 to balance memory usage and timeout risk
+        batchSize = Math.min(200, Math.max(150, Math.floor(documents.length / 50)));
+      } else {
+        batchSize = 100; // Standard batch size for medium requests
+      }
 
       const options: BulkIndexingOptions = {
-        batchSize: isRealTimeRequest ? Math.min(documents.length, 10) : 100,
+        batchSize,
         skipDuplicates: true,
         enableProgress: !isRealTimeRequest,
         priority: isRealTimeRequest ? 8 : 5, // Higher priority for real-time
@@ -363,78 +380,144 @@ export class DocumentService implements OnModuleInit {
     documents: Array<{ id: string; document: any }>,
     startTime: number,
     isRebuild = false,
+    skipDuplicates = false,
+    batchDirtyTerms?: Set<string>,
+    batchTermPostings?: Map<
+      string,
+      Array<{
+        docId: string | number;
+        frequency: number;
+        positions?: number[];
+        metadata?: Record<string, any>;
+      }>
+    >,
   ): Promise<BulkResponseDto> {
     const results = [];
     let hasErrors = false;
     let successCount = 0;
+    let skippedCount = 0;
 
-    // Process each document
-    for (const doc of documents) {
-      try {
-        const documentId = doc.id;
+    // Bulk check for existing documents to avoid expensive per-document queries
+    // This is needed both for skipDuplicates logic and to pass correct isNewDocument flag to indexing
+    const documentIds = documents.map(doc => doc.id);
+    const existingDocumentIds = await this.documentStorageService.bulkExists(
+      indexName,
+      documentIds,
+    );
+    if (existingDocumentIds.size > 0) {
+      this.logger.debug(
+        `Found ${existingDocumentIds.size} already-indexed documents out of ${documents.length} total`,
+      );
+    }
 
-        if (isRebuild) {
-          // For rebuild operations, use upsert (update or insert) to avoid expensive existence checks
-          await this.documentStorageService.upsertDocument(indexName, {
-            documentId,
-            content: doc.document, // Store document directly as content
-            metadata: doc.document.metadata || {}, // Extract metadata if present
-          });
-        } else {
-          // For normal operations, check if document exists and handle accordingly
-          const existingDoc = await this.documentStorageService.getDocument(indexName, documentId);
+    // Process documents in parallel chunks for performance
+    // CHUNK_SIZE controls how many documents are processed concurrently within a batch
+    const CHUNK_SIZE = 100;
+    const chunks: Array<Array<{ id: string; document: any }>> = [];
 
-          if (existingDoc) {
-            // Document exists, update it
-            await this.documentStorageService.updateDocument(
-              indexName,
+    for (let i = 0; i < documents.length; i += CHUNK_SIZE) {
+      chunks.push(documents.slice(i, i + CHUNK_SIZE));
+    }
+
+    // Process each chunk in parallel
+    for (const chunk of chunks) {
+      const chunkPromises = chunk.map(async doc => {
+        try {
+          const documentId = doc.id;
+
+          // Skip if document already exists and skipDuplicates is enabled
+          if (skipDuplicates && !isRebuild && existingDocumentIds.has(documentId)) {
+            return {
+              id: documentId,
+              index: indexName,
+              success: true,
+              status: 200, // 200 for skipped (already exists)
+              skipped: true,
+            };
+          }
+
+          // Determine if document is new based on bulkExists check (avoid expensive per-document queries)
+          const isNewDoc = !existingDocumentIds.has(documentId);
+
+          if (isRebuild) {
+            // For rebuild operations, use upsert (update or insert) to avoid expensive existence checks
+            await this.documentStorageService.upsertDocument(indexName, {
               documentId,
-              doc.document, // Store document directly as content
-              doc.document.metadata || {}, // Extract metadata if present
-            );
+              content: doc.document, // Store document directly as content
+              metadata: doc.document.metadata || {}, // Extract metadata if present
+            });
           } else {
-            // Document doesn't exist, create it
-            await this.documentStorageService.storeDocument(indexName, {
+            // For bulk operations, use upsert to avoid expensive per-document existence checks
+            // We already know if it exists from bulkExists, so upsert is more efficient than getDocument + update/store
+            await this.documentStorageService.upsertDocument(indexName, {
               documentId,
               content: doc.document, // Store document directly as content
               metadata: doc.document.metadata || {}, // Extract metadata if present
             });
           }
+
+          // Index document (this will re-index regardless of whether it's new or updated)
+          await this.indexingService.indexDocument(
+            indexName,
+            documentId,
+            doc.document,
+            true,
+            false,
+            isNewDoc,
+            batchDirtyTerms,
+            batchTermPostings,
+          );
+
+          return {
+            id: documentId,
+            index: indexName,
+            success: true,
+            status: isNewDoc ? 201 : 200, // 201 for created, 200 for updated
+          };
+        } catch (error) {
+          return {
+            id: doc.id || 'unknown',
+            index: indexName,
+            success: false,
+            status: 400,
+            error: error.message,
+          };
         }
+      });
 
-        // Index document (this will re-index regardless of whether it's new or updated)
-        await this.indexingService.indexDocument(indexName, documentId, doc.document, true);
+      // Wait for all documents in this chunk to complete before processing next chunk
+      const chunkResults = await Promise.all(chunkPromises);
+      results.push(...chunkResults);
 
-        results.push({
-          id: documentId,
-          index: indexName,
-          success: true,
-          status: isRebuild ? 200 : 201, // 200 for rebuild/upsert, 201 for create
-        });
-
-        successCount++;
-      } catch (error) {
-        hasErrors = true;
-        results.push({
-          id: doc.id || 'unknown',
-          index: indexName,
-          success: false,
-          status: 400,
-          error: error.message,
-        });
+      // Count successes and failures
+      for (const result of chunkResults) {
+        if (result.success) {
+          if (result.skipped) {
+            skippedCount++;
+          } else {
+            successCount++;
+          }
+        } else {
+          hasErrors = true;
+        }
       }
     }
 
-    this.logger.log(`Successfully bulk indexed ${successCount} documents in ${indexName}`);
-
-    // Persist term postings to MongoDB after bulk indexing
-    try {
-      await this.indexingService.persistTermPostingsToMongoDB(indexName);
-      this.logger.debug(`Term postings persisted to MongoDB for index: ${indexName}`);
-    } catch (error) {
-      this.logger.warn(`Failed to persist term postings to MongoDB: ${error.message}`);
-      // Don't fail the entire operation if MongoDB persistence fails
+    // Improved logging: show full picture of batch processing
+    const totalProcessed = successCount + skippedCount;
+    if (skippedCount > 0) {
+      this.logger.log(
+        `Batch complete: ${successCount} indexed, ${skippedCount} skipped (duplicates), ${totalProcessed} total in ${indexName}`,
+      );
+    } else {
+      this.logger.log(`Successfully bulk indexed ${successCount} documents in ${indexName}`);
     }
+
+    // NOTE: Term persistence now handled by the RocksDB-first queue processor architecture
+    // No need to persist here as the IndexingQueueProcessor handles:
+    // 1. Immediate RocksDB writes (durable, fast)
+    // 2. Async MongoDB writes via PersistenceQueueProcessor (final persistence)
+    // This separation ensures data integrity and prevents race conditions
 
     return {
       items: results,
@@ -930,6 +1013,17 @@ export class DocumentService implements OnModuleInit {
     indexName: string,
     documents: Array<{ id: string; document: any }>,
     isRebuild = false,
+    skipDuplicates = false,
+    batchDirtyTerms?: Set<string>,
+    batchTermPostings?: Map<
+      string,
+      Array<{
+        docId: string | number;
+        frequency: number;
+        positions?: number[];
+        metadata?: Record<string, any>;
+      }>
+    >,
   ): Promise<BulkResponseDto> {
     this.logger.log(`Processing ${documents.length} documents directly in ${indexName}`);
     const startTime = Date.now();
@@ -955,7 +1049,15 @@ export class DocumentService implements OnModuleInit {
       );
 
       // Process documents directly using the synchronous method
-      return await this.processBatchSynchronously(indexName, documents, startTime, isRebuild);
+      return await this.processBatchSynchronously(
+        indexName,
+        documents,
+        startTime,
+        isRebuild,
+        skipDuplicates,
+        batchDirtyTerms,
+        batchTermPostings,
+      );
     } catch (error) {
       this.logger.error(`Direct batch processing failed: ${error.message}`);
 

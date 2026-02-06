@@ -195,4 +195,30 @@ export class DocumentRepository {
   async deleteAll(): Promise<void> {
     await this.documentModel.deleteMany({});
   }
+
+  /**
+   * Bulk check which document IDs already exist in the index
+   * Returns a Set of document IDs that exist
+   */
+  async bulkExists(indexName: string, documentIds: string[]): Promise<Set<string>> {
+    try {
+      if (documentIds.length === 0) {
+        return new Set();
+      }
+
+      const existingDocs = await this.documentModel
+        .find({
+          indexName,
+          documentId: { $in: documentIds },
+        })
+        .select({ documentId: 1, _id: 0 })
+        .lean()
+        .exec();
+
+      return new Set(existingDocs.map(doc => doc.documentId));
+    } catch (error) {
+      this.logger.error(`Failed to bulk check document existence: ${error.message}`, error.stack);
+      throw error;
+    }
+  }
 }

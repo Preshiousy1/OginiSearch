@@ -386,6 +386,35 @@ export class BulkIndexingController {
     }
   }
 
+  @Post('queue/drain')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Completely drain the queue',
+    description:
+      'Pauses the queue, removes ALL jobs (including active), then resumes. Use when you need to clear everything including jobs currently being processed.',
+  })
+  @ApiResponse({
+    status: HttpStatus.OK,
+    description: 'Queue drained successfully',
+    schema: {
+      type: 'object',
+      properties: {
+        message: { type: 'string' },
+      },
+    },
+  })
+  async drainQueue() {
+    try {
+      await this.bulkIndexingService.drainQueue();
+      return {
+        message: 'Queue drained successfully (all jobs removed including active)',
+      };
+    } catch (error) {
+      this.logger.error(`Failed to drain queue: ${error.message}`);
+      throw new BadRequestException(`Failed to drain queue: ${error.message}`);
+    }
+  }
+
   @Get('failed-jobs')
   @ApiOperation({ summary: 'Get failed jobs with error details' })
   @ApiResponse({

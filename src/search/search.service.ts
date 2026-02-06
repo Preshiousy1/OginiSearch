@@ -24,6 +24,14 @@ export class SearchService {
     @Inject('TERM_DICTIONARY') private readonly termDictionary: InMemoryTermDictionary,
   ) {}
 
+  /**
+   * Clear cached field boost values for an index (e.g. after mappings are updated).
+   * Ensures the next search uses the latest boost values from mappings.
+   */
+  clearFieldBoostCache(indexName: string): void {
+    this.searchExecutor.clearFieldBoostCache(indexName);
+  }
+
   async search(
     indexName: string,
     searchQuery: SearchQueryDto,
@@ -77,6 +85,15 @@ export class SearchService {
   } {
     const startTime = Date.now();
 
+    // Log pagination parameters for debugging (in development)
+    const size = dto.size || 10;
+    const from = dto.from || 0;
+    if (process.env.NODE_ENV === 'development' || process.env.LOG_LEVEL === 'debug') {
+      this.logger.debug(
+        `Search request - size: ${size}, from: ${from} (dto.size: ${dto.size}, dto.from: ${dto.from})`,
+      );
+    }
+
     // Handle wildcard query
     const wildcardQuery =
       typeof dto.query === 'object' && dto.query?.wildcard
@@ -116,8 +133,8 @@ export class SearchService {
     return {
       executionPlan: processedQuery.executionPlan,
       options: {
-        from: dto.from || 0,
-        size: dto.size || 10,
+        from,
+        size,
         sort: dto.sort,
         filter: dto.filter,
       },

@@ -15,11 +15,42 @@ export class PersistentTermDictionaryService {
   ) {}
 
   /**
+   * Load term postings from RocksDB
+   * Returns null if term not found
+   */
+  async getTermPostings(indexAwareTerm: string): Promise<PostingList | null> {
+    try {
+      const rocksDBKey = this.getTermKey(indexAwareTerm);
+      const data = await this.rocksDBService.get(rocksDBKey);
+
+      if (!data) {
+        return null;
+      }
+
+      const postingList = new SimplePostingList();
+      postingList.deserialize(data);
+      return postingList;
+    } catch (error) {
+      this.logger.error(
+        `Failed to load term postings from RocksDB for ${indexAwareTerm}: ${error.message}`,
+      );
+      return null;
+    }
+  }
+
+  /**
    * Restore term postings from MongoDB to RocksDB for an index.
    * Chunked model: groups chunks by term, merges postings, then writes one PostingList per term.
    */
   async restoreTermPostings(indexName: string): Promise<number> {
     try {
+      if (!this.rocksDBService.getAvailability()) {
+        this.logger.warn(
+          `RocksDB is not available, skipping term postings restoration for index: ${indexName}`,
+        );
+        return 0;
+      }
+
       this.logger.log(`Restoring term postings for index: ${indexName}`);
 
       const chunks = await this.termPostingsRepository.findByIndex(indexName);
@@ -150,6 +181,27 @@ export class PersistentTermDictionaryService {
    * Save term postings to both RocksDB and MongoDB
    * Uses index-aware terms (index:field:term format)
    */
+  /**
+   * Save term postings to RocksDB only (immediate, fast)
+   * Use this during indexing for durability without blocking on MongoDB writes
+   */
+  async saveTermPostingsToRocksDB(indexAwareTerm: string, postingList: PostingList): Promise<void> {
+    try {
+      const rocksDBKey = this.getTermKey(indexAwareTerm);
+      const serialized = postingList.serialize();
+      await this.rocksDBService.put(rocksDBKey, serialized);
+    } catch (error) {
+      this.logger.error(
+        `Failed to save term postings to RocksDB for ${indexAwareTerm}: ${error.message}`,
+      );
+      throw error;
+    }
+  }
+
+  /**
+   * Save term postings to both RocksDB and MongoDB (full persistence)
+   * Use this during async persistence jobs
+   */
   async saveTermPostings(indexAwareTerm: string, postingList: PostingList): Promise<void> {
     try {
       // Save to RocksDB for performance using index-aware term
@@ -172,6 +224,73 @@ export class PersistentTermDictionaryService {
       await this.termPostingsRepository.update(indexAwareTerm, postings);
     } catch (error) {
       this.logger.error(`Failed to save term postings for ${indexAwareTerm}: ${error.message}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Load term postings from MongoDB as a PostingList (for merge logic).
+   */
+  async getTermPostingsFromMongoDB(indexAwareTerm: string): Promise<PostingList | null> {
+    try {
+      const doc = await this.termPostingsRepository.findByIndexAwareTerm(indexAwareTerm);
+      if (!doc || !doc.postings || Object.keys(doc.postings).length === 0) return null;
+      const list = new SimplePostingList();
+      for (const [docId, entry] of Object.entries(doc.postings)) {
+        list.addEntry({
+          docId,
+          frequency: entry.frequency,
+          positions: entry.positions || [],
+          metadata: entry.metadata || {},
+        });
+      }
+      return list;
+    } catch (error) {
+      this.logger.warn(
+        `Failed to load term postings from MongoDB for ${indexAwareTerm}: ${error.message}`,
+      );
+      return null;
+    }
+  }
+
+  /**
+   * Merge multiple posting lists by docId (later entry wins for same docId).
+   */
+  mergePostingLists(lists: (PostingList | null | undefined)[]): PostingList {
+    const merged = new SimplePostingList();
+    for (const list of lists) {
+      if (!list) continue;
+      for (const entry of list.getEntries()) {
+        merged.addEntry({ ...entry });
+      }
+    }
+    return merged;
+  }
+
+  /**
+   * Save term postings to MongoDB only (assumes already in RocksDB).
+   * Merges with existing MongoDB postings so partial writes (e.g. from drain) do not overwrite.
+   */
+  async saveTermPostingsToMongoDB(indexAwareTerm: string, postingList: PostingList): Promise<void> {
+    try {
+      const existing = await this.getTermPostingsFromMongoDB(indexAwareTerm);
+      const merged = this.mergePostingLists([existing, postingList]);
+
+      const postings: Record<string, PostingEntry> = {};
+      for (const entry of merged.getEntries()) {
+        postings[entry.docId.toString()] = {
+          docId: entry.docId.toString(),
+          frequency: entry.frequency,
+          positions: entry.positions || [],
+          metadata: entry.metadata || {},
+        };
+      }
+
+      await this.termPostingsRepository.update(indexAwareTerm, postings);
+    } catch (error) {
+      this.logger.error(
+        `Failed to save term postings to MongoDB for ${indexAwareTerm}: ${error.message}`,
+      );
       throw error;
     }
   }

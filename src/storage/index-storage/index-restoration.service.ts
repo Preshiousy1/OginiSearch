@@ -19,6 +19,8 @@ export class IndexRestorationService implements OnModuleInit {
     this.logger.log('Starting comprehensive index restoration (metadata + term postings)...');
 
     try {
+      await this.rocksDBService.getWhenReady();
+
       // Step 1: Migrate any RocksDB-only indices to MongoDB (one-time migration)
       await this.migrateRocksDBIndicesToMongoDB();
 

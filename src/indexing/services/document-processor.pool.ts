@@ -40,8 +40,14 @@ export class DocumentProcessorPool implements OnModuleInit, OnModuleDestroy {
   private readonly maxWorkers: number;
 
   constructor(private readonly configService: ConfigService) {
-    // Use 75% of available CPU cores for workers
+    // // Allow override via DOC_PROCESSING_CONCURRENCY, otherwise use 75% of CPU cores
+    // const configuredWorkers = this.configService.get<number>('DOC_PROCESSING_CONCURRENCY');
+    // if (configuredWorkers && configuredWorkers > 0) {
+    //   this.maxWorkers = configuredWorkers;
+    // } else {
+    // Default: Use 75% of available CPU cores for workers
     this.maxWorkers = Math.max(1, Math.floor(os.cpus().length * 0.75));
+    // }
   }
 
   async onModuleInit() {

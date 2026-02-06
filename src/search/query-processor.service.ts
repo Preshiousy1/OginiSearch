@@ -110,6 +110,10 @@ export class QueryProcessorService implements QueryProcessor {
    * Check if a query string contains wildcard patterns
    */
   private isWildcardQuery(query: string): boolean {
+    // Guard against undefined/null values
+    if (!query || typeof query !== 'string') {
+      return false;
+    }
     return query.includes('*') || query.includes('?');
   }
 
@@ -295,12 +299,32 @@ export class QueryProcessorService implements QueryProcessor {
       return { text: rawQuery.query, fields: rawQuery.fields || ['content'] };
     }
 
-    // Handle object queries
+    // Handle match queries - support multiple formats
     if (rawQuery.query?.match) {
-      const field = rawQuery.query.match.field;
+      // Format 1: {"match": {"field": "value", "value": "text"}} (custom format)
+      if (rawQuery.query.match.field && rawQuery.query.match.value) {
+        return {
+          text: rawQuery.query.match.value,
+          fields: [rawQuery.query.match.field],
+        };
+      }
+
+      // Format 2: {"match": {"field_name": "value"}} (Elasticsearch standard format)
+      const matchEntries = Object.entries(rawQuery.query.match);
+      if (matchEntries.length > 0) {
+        const [field, value] = matchEntries[0];
+        // Handle both string value and object value formats
+        const textValue =
+          typeof value === 'object' && value !== null && (value as any).query
+            ? String((value as any).query)
+            : String(value);
+        return { text: textValue, fields: [field] };
+      }
+
+      // Fallback to default
       return {
-        text: rawQuery.query.match.value,
-        fields: field ? [field] : rawQuery.fields || ['content'],
+        text: '',
+        fields: rawQuery.fields || ['content'],
       };
     }
 

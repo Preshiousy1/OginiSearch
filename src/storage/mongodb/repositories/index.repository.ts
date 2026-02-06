@@ -53,6 +53,22 @@ export class IndexRepository {
       .exec();
   }
 
+  /**
+   * Atomically increment the document count for an index.
+   * Uses MongoDB's $inc operator to prevent race conditions during concurrent indexing.
+   *
+   * @param name The index name
+   * @param incrementBy The amount to increment (can be negative for decrement)
+   */
+  async incrementDocumentCount(name: string, incrementBy: number): Promise<void> {
+    await this.indexModel
+      .updateOne(
+        { name },
+        { $inc: { documentCount: incrementBy }, $set: { updatedAt: new Date().toISOString() } },
+      )
+      .exec();
+  }
+
   async delete(name: string): Promise<boolean> {
     try {
       this.logger.debug(`Attempting to delete index metadata for: ${name}`);

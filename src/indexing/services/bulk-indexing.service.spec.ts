@@ -17,6 +17,7 @@ const mockQueue = {
   pause: jest.fn(),
   resume: jest.fn(),
   clean: jest.fn(),
+  obliterate: jest.fn(),
 };
 
 // Mock Job
@@ -356,20 +357,47 @@ describe('BulkIndexingService', () => {
 
   describe('queue management', () => {
     describe('cleanQueue', () => {
-      it('should clean completed and failed jobs', async () => {
+      it('should clean completed, failed, active, delayed and remove waiting jobs', async () => {
         indexingQueue.clean.mockResolvedValue([]);
+        indexingQueue.getWaiting.mockResolvedValue([]);
 
         await service.cleanQueue();
 
-        expect(indexingQueue.clean).toHaveBeenCalledWith(5 * 60 * 1000, 'completed');
-        expect(indexingQueue.clean).toHaveBeenCalledWith(24 * 60 * 60 * 1000, 'failed');
-        expect(indexingQueue.clean).toHaveBeenCalledTimes(2);
+        expect(indexingQueue.clean).toHaveBeenCalledWith(1000, 'completed');
+        expect(indexingQueue.clean).toHaveBeenCalledWith(1000, 'failed');
+        expect(indexingQueue.clean).toHaveBeenCalledWith(0, 'active');
+        expect(indexingQueue.clean).toHaveBeenCalledWith(0, 'delayed');
+        expect(indexingQueue.getWaiting).toHaveBeenCalled();
+        expect(indexingQueue.clean).toHaveBeenCalledTimes(4);
       });
 
       it('should handle clean errors', async () => {
         indexingQueue.clean.mockRejectedValue(new Error('Clean failed'));
 
         await expect(service.cleanQueue()).rejects.toThrow('Clean failed');
+      });
+    });
+
+    describe('drainQueue', () => {
+      it('should pause, obliterate with force, and resume', async () => {
+        indexingQueue.pause.mockResolvedValue();
+        indexingQueue.obliterate.mockResolvedValue();
+        indexingQueue.resume.mockResolvedValue();
+
+        await service.drainQueue();
+
+        expect(indexingQueue.pause).toHaveBeenCalledWith(true, true);
+        expect(indexingQueue.obliterate).toHaveBeenCalledWith({ force: true });
+        expect(indexingQueue.resume).toHaveBeenCalledWith(true);
+      });
+
+      it('should resume on obliterate error', async () => {
+        indexingQueue.pause.mockResolvedValue();
+        indexingQueue.obliterate.mockRejectedValue(new Error('Obliterate failed'));
+        indexingQueue.resume.mockResolvedValue();
+
+        await expect(service.drainQueue()).rejects.toThrow('Obliterate failed');
+        expect(indexingQueue.resume).toHaveBeenCalledWith(true);
       });
     });
 
@@ -508,4 +536,4 @@ describe('BulkIndexingService', () => {
       expect(indexingQueue.add).toHaveBeenCalledTimes(2);
     });
   });
-}); 
+});

@@ -177,6 +177,33 @@ export class IndexStorageService implements IndexStorage {
     }
   }
 
+  /**
+   * Atomically increment document count to avoid race conditions with concurrent indexing.
+   * Uses MongoDB's $inc operator for atomic updates.
+   *
+   * @param indexName The name of the index
+   * @param incrementBy The amount to increment by (can be negative for decrement)
+   */
+  async incrementDocumentCount(indexName: string, incrementBy: number): Promise<void> {
+    try {
+      // Atomic increment in MongoDB (source of truth)
+      await this.indexRepository.incrementDocumentCount(indexName, incrementBy);
+
+      // Update RocksDB with fresh value from MongoDB
+      // Read directly from MongoDB to get the current accurate count after increment
+      const freshIndex = await this.indexRepository.findByName(indexName);
+      if (freshIndex) {
+        const key = SerializationUtils.createIndexMetadataKey(indexName);
+        await this.rocksDBService.put(key, freshIndex);
+      }
+    } catch (error) {
+      this.logger.error(
+        `Failed to increment document count for index ${indexName}: ${error.message}`,
+      );
+      // Don't throw - document count can be rebuilt if needed
+    }
+  }
+
   async listIndices(status?: string): Promise<Index[]> {
     try {
       // Try MongoDB first for most up-to-date data

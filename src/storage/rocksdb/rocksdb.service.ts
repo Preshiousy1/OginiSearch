@@ -1,6 +1,5 @@
 import { Injectable, OnModuleInit, OnModuleDestroy, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { promisify } from 'util';
 import * as fs from 'fs';
 import * as path from 'path';
 import { ClassicLevel } from 'classic-level';
@@ -12,8 +11,15 @@ export class RocksDBService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(RocksDBService.name);
   private readonly dbPath: string;
   private isAvailable = false;
+  private readyResolve: () => void;
+  private readyReject: (err: Error) => void;
+  private readonly whenReadyPromise: Promise<void>;
 
   constructor(private configService: ConfigService) {
+    this.whenReadyPromise = new Promise<void>((resolve, reject) => {
+      this.readyResolve = resolve;
+      this.readyReject = reject;
+    });
     // Check if we're running in Docker (environment variable set in Dockerfile)
     const isDocker = this.configService.get<string>('DOCKER') === 'true';
 
@@ -34,6 +40,10 @@ export class RocksDBService implements OnModuleInit, OnModuleDestroy {
       // Initialize the database
       await this.connect();
     } catch (error) {
+      if (this.readyReject) {
+        this.readyReject(error);
+        this.readyReject = null;
+      }
       this.logger.error(`Failed to initialize RocksDB: ${error.message}`);
       throw error;
     }
@@ -81,6 +91,10 @@ export class RocksDBService implements OnModuleInit, OnModuleDestroy {
         });
         await this.db.open();
         this.isAvailable = true;
+        if (this.readyResolve) {
+          this.readyResolve();
+          this.readyResolve = null;
+        }
         this.logger.log('Connected to RocksDB successfully');
         return;
       } catch (error) {
@@ -102,6 +116,16 @@ export class RocksDBService implements OnModuleInit, OnModuleDestroy {
         await new Promise(resolve => setTimeout(resolve, retryDelay));
       }
     }
+  }
+
+  /** Resolves when RocksDB has finished connecting (for init ordering). */
+  getWhenReady(): Promise<void> {
+    return this.whenReadyPromise;
+  }
+
+  /** True once RocksDB has connected successfully. */
+  getAvailability(): boolean {
+    return this.isAvailable;
   }
 
   async put(key: string, value: any): Promise<void> {

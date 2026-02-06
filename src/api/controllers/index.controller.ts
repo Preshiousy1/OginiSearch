@@ -576,7 +576,10 @@ export class IndexController {
     @Param('indexName') indexName: string,
     @Body() mappingsDto: MappingsDto,
   ): Promise<IndexResponseDto> {
-    return this.indexService.updateMappings(indexName, mappingsDto);
+    const result = await this.indexService.updateMappings(indexName, mappingsDto);
+    // Invalidate field boost cache so next search uses new mapping boost values
+    this.searchService.clearFieldBoostCache(indexName);
+    return result;
   }
 
   @Post(':indexName/mappings/auto-detect')
@@ -763,8 +766,8 @@ export class IndexController {
     this.logger.log(`Starting term postings migration for index: ${name}`);
 
     try {
-      // First, ensure all current term postings are persisted to MongoDB
-      await this.indexingService.persistTermPostingsToMongoDB(name);
+      // First, ensure all current term postings are persisted to MongoDB (full sync)
+      await this.indexingService.persistAllTermPostingsToMongoDB(name);
 
       this.logger.log(`Term postings migration completed for index: ${name}`);
 
@@ -1260,7 +1263,7 @@ export class IndexController {
   async debugMemorySize(@Param('name') indexName: string, @Param('term') term: string) {
     try {
       const postingList = await this.termDictionary.getPostingListForIndex(indexName, term);
-      
+
       return {
         success: true,
         indexName,
@@ -1294,12 +1297,12 @@ export class IndexController {
       // Enable debug mode for this search
       const originalLogLevel = process.env.LOG_LEVEL;
       process.env.LOG_LEVEL = 'debug';
-      
+
       const result = await this.searchService.search(indexName, searchQuery);
-      
+
       // Restore original log level
       process.env.LOG_LEVEL = originalLogLevel;
-      
+
       return {
         success: true,
         indexName,

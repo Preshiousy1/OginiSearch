@@ -35,13 +35,17 @@
     "prod:start": "bash ./start-optimized.sh || node dist/src/main.js",
     "coverage:verify": "./scripts/verify-coverage.sh",
     "bulk:generate": "npx ts-node -r tsconfig-paths/register scripts/testing/generate-bulk-data.ts",
-    "bulk:measure": "npx ts-node -r tsconfig-paths/register scripts/testing/measure-bulk-indexing.ts"
+    "bulk:measure": "npx ts-node -r tsconfig-paths/register scripts/testing/measure-bulk-indexing.ts",
+    "rebuild-doc-count": "npx ts-node -r tsconfig-paths/register scripts/diagnostics/rebuild-document-count.ts",
+    "test:field-weights": "npx ts-node -r tsconfig-paths/register scripts/testing/test-search-field-weights-and-mappings.ts",
+    "test:search-api": "npx ts-node -r tsconfig-paths/register scripts/testing/test-search-api.ts"
   },
   "dependencies": {
     "@nestjs/bull": "^11.0.2",
     "@nestjs/common": "^11.0.13",
     "@nestjs/config": "^4.0.2",
     "@nestjs/core": "^11.0.13",
+    "@nestjs/event-emitter": "^3.0.1",
     "@nestjs/mongoose": "^11.0.3",
     "@nestjs/platform-express": "^11.0.13",
     "@nestjs/schedule": "^6.0.0",

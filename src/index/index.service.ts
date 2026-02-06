@@ -89,6 +89,22 @@ export class IndexService {
     }
 
     try {
+      // 0. Cancel all pending/active jobs for this index (before deleting data)
+      try {
+        // Try to get BulkIndexingService if available (may not be injected in all contexts)
+        // This is optional - if not available, jobs will fail gracefully when they try to process
+        const bulkIndexingService = (this as any).bulkIndexingService;
+        if (bulkIndexingService && typeof bulkIndexingService.cancelJobsForIndex === 'function') {
+          const result = await bulkIndexingService.cancelJobsForIndex(name);
+          this.logger.log(
+            `Cancelled ${result.cancelled} jobs for index ${name} (${result.failed} failed)`,
+          );
+        }
+      } catch (error) {
+        // Non-critical - log and continue
+        this.logger.debug(`Could not cancel jobs for index ${name}: ${error.message}`);
+      }
+
       // 1. Delete all documents from MongoDB storage
       await this.documentStorage.deleteAllDocumentsInIndex(name);
 

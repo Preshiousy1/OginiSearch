@@ -15,6 +15,8 @@ import { InMemoryTermDictionary } from '../index/term-dictionary';
 import { AnalyzerRegistryService } from '../analysis/analyzer-registry.service';
 import { SimplePostingList } from 'src/index/posting-list';
 import { TermPostingsRepository } from 'src/storage/mongodb/repositories/term-postings.repository';
+import { IndexStorageService } from '../storage/index-storage/index-storage.service';
+import { FieldMapping } from '../index/interfaces/index.interface';
 
 interface SearchMatch {
   id: string;
@@ -45,6 +47,23 @@ interface SearchResult {
 export class SearchExecutorService {
   private readonly logger = new Logger(SearchExecutorService.name);
 
+  // Cache for field boost values per index (to avoid repeated lookups)
+  private fieldBoostCache: Map<string, Record<string, number>> = new Map();
+
+  /**
+   * Clear cached field boosts for an index (or all). Call after index mappings are updated
+   * so that the next search uses the new boost values.
+   */
+  clearFieldBoostCache(indexName?: string): void {
+    if (indexName) {
+      this.fieldBoostCache.delete(indexName);
+      this.logger.debug(`Cleared field boost cache for index: ${indexName}`);
+    } else {
+      this.fieldBoostCache.clear();
+      this.logger.debug('Cleared all field boost cache');
+    }
+  }
+
   constructor(
     @Inject('TERM_DICTIONARY')
     private readonly termDictionary: InMemoryTermDictionary,
@@ -52,6 +71,7 @@ export class SearchExecutorService {
     private readonly indexStats: IndexStatsService,
     private readonly analyzerRegistry: AnalyzerRegistryService,
     private readonly termPostingsRepository: TermPostingsRepository,
+    private readonly indexStorage: IndexStorageService,
   ) {}
 
   async executeQuery(
@@ -231,34 +251,30 @@ export class SearchExecutorService {
   ): Promise<Array<{ term: string; postingList: PostingList }>> {
     const results: Array<{ term: string; postingList: PostingList }> = [];
 
-    // First try index-aware lookup
-    this.logger.debug(`[DEBUG] Trying in-memory lookup for term: ${term} in index: ${indexName}`);
-    const postingList = await this.termDictionary.getPostingListForIndex(indexName, term);
-    this.logger.debug(
-      `[DEBUG] In-memory result: found=${!!postingList}, size=${
-        postingList ? postingList.size() : 'null'
-      }`,
-    );
+    const indexAwareTerm = `${indexName}:${term}`;
 
-    if (postingList && postingList.size() > 0) {
+    // In-memory may have a stale partial list (e.g. one batch's worth after bulk indexing).
+    // Always check MongoDB too and use the larger list so search sees the full persisted data.
+    this.logger.debug(`[DEBUG] Looking up term: ${term} in index: ${indexName}`);
+    const memoryList = await this.termDictionary.getPostingListForIndex(indexName, term);
+    const mongoPostingList = await this.getPostingListByIndexAwareTerm(indexAwareTerm);
+
+    const memorySize = memoryList?.size() ?? 0;
+    const mongoSize = mongoPostingList?.size() ?? 0;
+
+    if (mongoSize > memorySize) {
       this.logger.debug(
-        `[DEBUG] Using in-memory posting list for term: ${term} in index: ${indexName} with ${postingList.size()} entries`,
+        `Using MongoDB posting list for ${term} (${mongoSize} entries; memory had ${memorySize})`,
       );
-      results.push({ term, postingList });
+      results.push({ term, postingList: mongoPostingList! });
       return results;
     }
-    this.logger.debug(
-      `[DEBUG] Skipping empty/null in-memory result, trying MongoDB fallback for term: ${term} in index: ${indexName}`,
-    );
-
-    // Fallback to MongoDB-based term lookup using index-aware term
-    const indexAwareTerm = `${indexName}:${term}`;
-    this.logger.debug(`Fallback to MongoDB for index-aware term: ${indexAwareTerm}`);
-    const mongoPostingList = await this.getPostingListByIndexAwareTerm(indexAwareTerm);
-    if (mongoPostingList && mongoPostingList.size() > 0) {
-      this.logger.debug(
-        `Found MongoDB posting list for term: ${term} in index: ${indexName} with ${mongoPostingList.size()} entries`,
-      );
+    if (memoryList && memorySize > 0) {
+      this.logger.debug(`Using in-memory posting list for ${term} (${memorySize} entries)`);
+      results.push({ term, postingList: memoryList });
+      return results;
+    }
+    if (mongoPostingList && mongoSize > 0) {
       results.push({ term, postingList: mongoPostingList });
       return results;
     }
@@ -319,7 +335,7 @@ export class SearchExecutorService {
           this.logger.debug(
             `Found posting list with ${postingList.size()} entries for field term: ${term} in index: ${indexName}`,
           );
-          const scores = this.calculateScores(indexName, postingList, term);
+          const scores = await this.calculateScores(indexName, postingList, term);
           results.push(...scores);
         } else {
           this.logger.debug(`No posting list found for field term: ${term} in index: ${indexName}`);
@@ -379,7 +395,7 @@ export class SearchExecutorService {
     const matchingDocs = this.findPhraseMatches(termPostings, step.positions || []);
 
     // Calculate scores for matching documents
-    return this.calculatePhaseScores(indexName, matchingDocs, termPostings);
+    return await this.calculatePhaseScores(indexName, matchingDocs, termPostings);
   }
 
   private async executeWildcardStep(
@@ -480,8 +496,9 @@ export class SearchExecutorService {
         }),
       );
 
-      // Merge and deduplicate results
-      return this.mergeWildcardScores(results.flat());
+      // Merge and deduplicate results (results is already Promise.all, so await it)
+      const allScores = (await Promise.all(results)).flat();
+      return await this.mergeWildcardScores(indexName, allScores);
     }
 
     // Fallback to general wildcard processing
@@ -496,13 +513,13 @@ export class SearchExecutorService {
     }
 
     // Calculate scores for all matched terms
-    const allResults: Array<{ id: string; score: number }> = [];
+    const allResults: Array<{ id: string; score: number; field?: string }> = [];
     for (const { term, postingList } of termResults) {
-      const scores = this.calculateScores(indexName, postingList, term);
+      const scores = await this.calculateScores(indexName, postingList, term);
       allResults.push(...scores);
     }
 
-    return this.mergeWildcardScores(allResults);
+    return await this.mergeWildcardScores(indexName, allResults);
   }
 
   private async executeMatchAllStep(
@@ -528,12 +545,19 @@ export class SearchExecutorService {
   /**
    * Merge scores from multiple terms for wildcard queries
    */
-  private mergeWildcardScores(
-    scores: Array<{ id: string; score: number }>,
-  ): Array<{ id: string; score: number }> {
+  /**
+   * Merge scores from multiple terms/fields for wildcard/_all queries
+   * Note: Scores already have field boost applied from calculateScores(),
+   * so we just sum them here (no double-boosting)
+   */
+  private async mergeWildcardScores(
+    indexName: string,
+    scores: Array<{ id: string; score: number; field?: string }>,
+  ): Promise<Array<{ id: string; score: number }>> {
     const mergedScores = new Map<string, number>();
 
-    // Sum scores for documents that appear in multiple terms
+    // Sum scores for documents that appear in multiple terms/fields
+    // Scores already have field boost applied from calculateScores()
     for (const { id, score } of scores) {
       const existingScore = mergedScores.get(id) || 0;
       mergedScores.set(id, existingScore + score);
@@ -542,20 +566,82 @@ export class SearchExecutorService {
     return Array.from(mergedScores.entries()).map(([id, score]) => ({ id, score }));
   }
 
-  private calculateScores(
+  /**
+   * Get field boost values from index mappings (cached)
+   */
+  private async getFieldBoosts(indexName: string): Promise<Record<string, number>> {
+    // Check cache first
+    if (this.fieldBoostCache.has(indexName)) {
+      const cached = this.fieldBoostCache.get(indexName);
+      if (cached) {
+        return cached;
+      }
+    }
+
+    try {
+      // Get index mappings
+      const index = await this.indexStorage.getIndex(indexName);
+      const fieldBoosts: Record<string, number> = {};
+
+      if (index?.mappings?.properties) {
+        // Extract boost values from field mappings
+        const extractBoost = (mapping: FieldMapping, fieldPath: string): void => {
+          // Store boost for this field (default 1.0 if not specified)
+          fieldBoosts[fieldPath] = mapping.boost !== undefined ? mapping.boost : 1.0;
+
+          // Handle nested/multi-fields
+          if (mapping.fields) {
+            for (const [nestedFieldName, nestedMapping] of Object.entries(mapping.fields)) {
+              const nestedFieldPath = `${fieldPath}.${nestedFieldName}`;
+              extractBoost(nestedMapping, nestedFieldPath);
+            }
+          }
+        };
+
+        // Process all top-level fields
+        for (const [fieldName, fieldMapping] of Object.entries(index.mappings.properties)) {
+          extractBoost(fieldMapping, fieldName);
+        }
+      }
+
+      // Cache the result
+      this.fieldBoostCache.set(indexName, fieldBoosts);
+
+      if (Object.keys(fieldBoosts).length > 0) {
+        this.logger.debug(
+          `Loaded field boosts for index ${indexName}: ${JSON.stringify(fieldBoosts)}`,
+        );
+      }
+
+      return fieldBoosts;
+    } catch (error) {
+      this.logger.warn(`Failed to load field boosts for index ${indexName}: ${error.message}`);
+      // Return empty object (all fields will use default boost of 1.0)
+      return {};
+    }
+  }
+
+  /**
+   * Calculate BM25 scores for a posting list, applying field boost from index mappings
+   */
+  private async calculateScores(
     indexName: string,
     postingList: PostingList,
     term: string,
-  ): Array<{ id: string; score: number }> {
+  ): Promise<Array<{ id: string; score: number; field?: string }>> {
     const totalDocs = this.indexStats.totalDocuments;
     const docFreq = postingList.size();
     const field = term.split(':')[0];
     const avgFieldLength = this.indexStats.getAverageFieldLength(field);
 
+    // Get field boost from index mappings
+    const fieldBoosts = await this.getFieldBoosts(indexName);
+    const fieldBoost = fieldBoosts[field] || 1.0;
+
     const k1 = 1.2;
     const b = 0.75;
 
-    // BM25 calculation
+    // BM25 calculation with field boost applied
     return postingList.getEntries().map(posting => {
       const tf = posting.frequency;
       const docLength = posting.positions.length;
@@ -564,20 +650,27 @@ export class SearchExecutorService {
       const idf = Math.log((totalDocs - docFreq + 0.5) / (docFreq + 0.5) + 1);
       const numerator = tf * (k1 + 1);
       const denominator = tf + k1 * (1 - b + b * (docLength / avgFieldLength));
-      const score = idf * (numerator / denominator);
+      const baseScore = idf * (numerator / denominator);
+
+      // Apply field boost
+      const score = baseScore * fieldBoost;
 
       return {
         id: posting.docId.toString(),
         score,
+        field, // Include field for mergeWildcardScores
       };
     });
   }
 
-  private calculatePhaseScores(
+  private async calculatePhaseScores(
     indexName: string,
     matchingDocs: string[],
     termPostings: Array<{ term: string; postings: PostingList }>,
-  ): Array<{ id: string; score: number }> {
+  ): Promise<Array<{ id: string; score: number }>> {
+    // Get field boosts for applying weights
+    const fieldBoosts = await this.getFieldBoosts(indexName);
+
     // For phrase queries, we can boost the score to prioritize them
     return matchingDocs.map(docId => {
       let totalScore = 0;
@@ -586,7 +679,7 @@ export class SearchExecutorService {
       for (const { term, postings } of termPostings) {
         const posting = postings.getEntry(docId);
         if (posting) {
-          const termScore = this.calculateTermScore(indexName, term, posting);
+          const termScore = this.calculateTermScore(indexName, term, posting, fieldBoosts);
           totalScore += termScore;
         }
       }
@@ -601,10 +694,16 @@ export class SearchExecutorService {
     });
   }
 
-  private calculateTermScore(indexName: string, term: string, posting: any): number {
+  private calculateTermScore(
+    indexName: string,
+    term: string,
+    posting: any,
+    fieldBoosts: Record<string, number> = {},
+  ): number {
+    const field = term.split(':')[0];
+    const fieldBoost = fieldBoosts[field] || 1.0;
     const totalDocs = this.indexStats.totalDocuments;
     const docFreq = this.indexStats.getDocumentFrequency(term);
-    const field = term.split(':')[0];
     const avgFieldLength = this.indexStats.getAverageFieldLength(field);
 
     const k1 = 1.2;
@@ -617,8 +716,10 @@ export class SearchExecutorService {
     const idf = Math.log((totalDocs - docFreq + 0.5) / (docFreq + 0.5) + 1);
     const numerator = tf * (k1 + 1);
     const denominator = tf + k1 * (1 - b + b * (docLength / avgFieldLength));
+    const baseScore = idf * (numerator / denominator);
 
-    return idf * (numerator / denominator);
+    // Apply field boost
+    return baseScore * fieldBoost;
   }
 
   private findPhraseMatches(
@@ -819,23 +920,67 @@ export class SearchExecutorService {
   private async fetchDocuments(indexName: string, docIds: string[]): Promise<Record<string, any>> {
     const documents: Record<string, any> = {};
 
-    this.logger.debug(`Fetching documents for IDs: ${JSON.stringify(docIds)}`);
+    this.logger.debug(`Fetching documents for ${docIds.length} IDs`);
+
+    // Guard against extremely large ID lists (safety limit)
+    const MAX_FETCH_LIMIT = 10_000;
+    const fetchLimit = Math.min(docIds.length, MAX_FETCH_LIMIT);
+
+    if (docIds.length > MAX_FETCH_LIMIT) {
+      this.logger.warn(
+        `Requested ${docIds.length} documents, but limiting to ${MAX_FETCH_LIMIT} for safety`,
+      );
+    }
 
     // Fetch documents in batch for efficiency
+    // Pass limit: docIds.length to ensure all requested documents are returned
+    // (repository defaults to limit: 100, which would cap results)
     const result = await this.documentStorage.getDocuments(indexName, {
       filter: {
         documentId: {
           $in: docIds,
         },
       },
+      limit: fetchLimit,
+      offset: 0,
     });
 
-    this.logger.debug(`Found ${result.documents.length} documents`);
+    this.logger.debug(
+      `Found ${result.documents.length} documents (requested ${docIds.length}, limit was ${fetchLimit})`,
+    );
 
-    // Index by ID for easy lookup
+    // Index by ID for easy lookup (MongoDB stores document body in 'content')
     result.documents.forEach(doc => {
       documents[doc.documentId] = doc.content;
     });
+
+    // Fallback: for any IDs not found in MongoDB, try RocksDB processed-doc storage.
+    // Bulk-indexed docs are always written to RocksDB by IndexingService; if they're
+    // missing from MongoDB (e.g. storage path or timing), we still return source from RocksDB.
+    const missingIds = docIds.filter(id => documents[id] == null);
+    if (missingIds.length > 0) {
+      this.logger.debug(
+        `Fetching ${missingIds.length} documents from index storage fallback (missing from document storage)`,
+      );
+      await Promise.all(
+        missingIds.map(async id => {
+          const processed = await this.indexStorage.getProcessedDocument(indexName, id);
+          if (processed?.source != null) {
+            documents[id] = processed.source;
+          }
+        }),
+      );
+    }
+
+    // Warn if we didn't get all requested documents from either source
+    const stillMissing = docIds.filter(id => documents[id] == null).length;
+    if (stillMissing > 0) {
+      this.logger.warn(
+        `Only retrieved ${docIds.length - stillMissing} of ${
+          docIds.length
+        } requested documents (${stillMissing} missing from both storage layers)`,
+      );
+    }
 
     return documents;
   }

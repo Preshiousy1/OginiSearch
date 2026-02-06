@@ -1,7 +1,8 @@
-import { Injectable, Logger, Inject, forwardRef } from '@nestjs/common';
+import { Injectable, Logger, Inject, forwardRef, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { DocumentService } from 'src/document/document.service';
 import { IndexService } from 'src/index/index.service';
+import { BulkOperationTrackerService } from './bulk-operation-tracker.service';
 import { InjectQueue } from '@nestjs/bull';
 import Bull from 'bull';
 
@@ -63,7 +64,7 @@ export interface BulkIndexingResponse {
 }
 
 @Injectable()
-export class BulkIndexingService {
+export class BulkIndexingService implements OnModuleInit {
   private readonly logger = new Logger(BulkIndexingService.name);
   private readonly deadLetterQueue: Bull.Queue;
 
@@ -71,12 +72,26 @@ export class BulkIndexingService {
   private readonly DEFAULT_BATCH_SIZE = 500;
   private readonly DEFAULT_CONCURRENCY = 3;
 
+  async onModuleInit(): Promise<void> {
+    try {
+      const paused = await this.indexingQueue.isPaused();
+      if (paused) {
+        await this.indexingQueue.resume();
+        this.logger.log('Resumed indexing queue (was paused in Redis from previous run)');
+      }
+    } catch (error) {
+      this.logger.warn(`Could not ensure queue is resumed on init: ${error.message}`);
+    }
+  }
+
   constructor(
     @Inject(forwardRef(() => DocumentService))
     private readonly documentService: DocumentService,
     private readonly indexService: IndexService,
     private readonly configService: ConfigService,
     @InjectQueue('indexing') private readonly indexingQueue: Bull.Queue,
+    @InjectQueue('term-persistence') private readonly persistenceQueue: Bull.Queue,
+    private readonly bulkOperationTracker: BulkOperationTrackerService,
   ) {
     // Initialize dead letter queue
     this.deadLetterQueue = new Bull('indexing-dlq', {
@@ -163,6 +178,7 @@ export class BulkIndexingService {
 
   /**
    * Queue a batch of documents for indexing
+   * NEW ARCHITECTURE: Creates a bulk operation and tracks it
    */
   async queueBulkIndexing(
     indexName: string,
@@ -181,19 +197,33 @@ export class BulkIndexingService {
 
     const batchId = `batch:${indexName}:${Date.now()}:${Math.random().toString(36).substr(2, 6)}`;
     const batches = [];
+    const batchIds: string[] = [];
+    const totalBatches = Math.ceil(documents.length / batchSize);
+
+    // Create bulk operation for tracking (NEW)
+    const bulkOpId = this.bulkOperationTracker.createOperation(
+      indexName,
+      totalBatches,
+      [], // Will be filled as we queue batches
+      documents.length,
+    );
+
+    this.logger.log(
+      `Created bulk operation ${bulkOpId} for ${documents.length} documents in ${totalBatches} batches`,
+    );
 
     // Split documents into batches
     for (let i = 0; i < documents.length; i += batchSize) {
       const batch = documents.slice(i, i + batchSize);
       const batchNumber = Math.floor(i / batchSize) + 1;
-      const totalBatches = Math.ceil(documents.length / batchSize);
+      const currentBatchId = `${batchId}:${batchNumber}`;
 
       const job = await this.indexingQueue.add(
         'batch',
         {
           indexName,
           documents: batch,
-          batchId: `${batchId}:${batchNumber}`,
+          batchId: currentBatchId,
           options: {
             batchSize,
             skipDuplicates,
@@ -207,6 +237,7 @@ export class BulkIndexingService {
             batchNumber,
             totalBatches,
             source: 'bulk',
+            bulkOpId, // ← NEW: Pass bulk operation ID for coordination
             ...customMetadata,
           },
         },
@@ -223,9 +254,26 @@ export class BulkIndexingService {
       );
 
       batches.push(job);
+      batchIds.push(currentBatchId);
     }
 
-    this.logger.log(`Queued ${batches.length} batches for bulk indexing`);
+    // Update bulk operation with batch IDs
+    const bulkOp = this.bulkOperationTracker.getOperation(bulkOpId);
+    if (bulkOp) {
+      bulkOp.batchIds = batchIds;
+    }
+
+    // Start the dedicated persistence worker immediately (same time as indexing workers).
+    // It drains the dirty list from the left in batches of 100 while indexers push to the right.
+    await this.persistenceQueue.add(
+      'drain-dirty-list',
+      { bulkOpId, indexName },
+      { priority: 10, removeOnComplete: 50, removeOnFail: false },
+    );
+
+    this.logger.log(
+      `Queued ${batches.length} batches for bulk indexing and started drain job (bulk op: ${bulkOpId}, index: ${indexName})`,
+    );
 
     return {
       batchId,
@@ -257,23 +305,14 @@ export class BulkIndexingService {
         this.indexingQueue.getFailed(),
       ]);
 
-      this.logger.debug(
-        `Queue job counts: waiting=${waitingJobs.length}, active=${activeJobs.length}, completed=${completedJobs.length}, failed=${failedJobs.length}`,
-      );
-
-      // Count jobs by type
+      // Count jobs by type (no verbose logging)
       let singleJobs = 0;
       let batchJobs = 0;
       let failedSingleJobs = 0;
       let failedBatchJobs = 0;
 
       // Count waiting and active jobs
-      [...waitingJobs, ...activeJobs].forEach((job, index) => {
-        this.logger.debug(
-          `Job ${index}: name="${job.name}", id="${job.id}", data keys: ${Object.keys(
-            job.data || {},
-          ).join(',')}`,
-        );
+      [...waitingJobs, ...activeJobs].forEach(job => {
         if (job.name === 'single') {
           singleJobs++;
         } else if (job.name === 'batch') {
@@ -282,18 +321,13 @@ export class BulkIndexingService {
       });
 
       // Count failed jobs by type
-      failedJobs.forEach((job, index) => {
-        this.logger.debug(`Failed job ${index}: name="${job.name}", id="${job.id}"`);
+      failedJobs.forEach(job => {
         if (job.name === 'single') {
           failedSingleJobs++;
         } else if (job.name === 'batch') {
           failedBatchJobs++;
         }
       });
-
-      this.logger.debug(
-        `Final categorization: ${singleJobs} single, ${batchJobs} batch, ${failedSingleJobs} failed single, ${failedBatchJobs} failed batch`,
-      );
 
       return {
         singleJobs,
@@ -381,7 +415,7 @@ export class BulkIndexingService {
   }
 
   /**
-   * Clean completed and failed jobs
+   * Clean completed and failed jobs. Use drainQueue() to also remove active and waiting jobs.
    */
   async cleanQueue(): Promise<void> {
     this.logger.log('Starting comprehensive queue cleanup...');
@@ -434,6 +468,56 @@ export class BulkIndexingService {
   }
 
   /**
+   * Completely drain the queue: pause, remove all jobs (including active), then resume.
+   * Use this when you need to clear everything including jobs currently being processed.
+   */
+  async drainQueue(): Promise<void> {
+    this.logger.log('Draining queue completely (including active jobs)...');
+
+    try {
+      const statsBefore = await this.getDetailedQueueStats();
+      this.logger.log(
+        `Before drain: ${statsBefore.totalWaiting} waiting, ${statsBefore.totalActive} active`,
+      );
+
+      await this.indexingQueue.pause(true, true);
+      this.logger.log('Queue paused');
+
+      if (typeof this.indexingQueue.obliterate === 'function') {
+        await this.indexingQueue.obliterate({ force: true });
+        this.logger.log('Queue obliterated (all jobs removed including active)');
+      } else {
+        await this.indexingQueue.clean(0, 'active');
+        await this.indexingQueue.clean(0, 'completed');
+        await this.indexingQueue.clean(0, 'failed');
+        await this.indexingQueue.clean(0, 'delayed');
+        const waiting = await this.indexingQueue.getWaiting();
+        for (const job of waiting) {
+          await job.remove();
+        }
+        this.logger.log(`Removed active/delayed and ${waiting.length} waiting jobs`);
+      }
+
+      await this.indexingQueue.resume(true);
+      this.logger.log('Queue resumed');
+
+      const statsAfter = await this.getDetailedQueueStats();
+      this.logger.log(
+        `After drain: ${statsAfter.totalWaiting} waiting, ${statsAfter.totalActive} active`,
+      );
+      this.logger.log('Queue drain completed successfully');
+    } catch (error) {
+      try {
+        await this.indexingQueue.resume(true);
+      } catch (resumeErr) {
+        this.logger.warn(`Failed to resume after drain: ${resumeErr.message}`);
+      }
+      this.logger.error(`Queue drain failed: ${error.message}`);
+      throw error;
+    }
+  }
+
+  /**
    * Pause the queue
    */
   async pauseQueue(): Promise<void> {
@@ -479,6 +563,7 @@ export class BulkIndexingService {
       }
 
       // Remove error information and retry in main queue
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
       const { error, failedAt, attempts, ...jobData } = job.data;
       await this.indexingQueue.add('batch', jobData, {
         attempts: 3,
@@ -506,6 +591,53 @@ export class BulkIndexingService {
       chunks.push(array.slice(i, i + chunkSize));
     }
     return chunks;
+  }
+
+  /**
+   * Cancel/remove all jobs for a deleted index
+   */
+  async cancelJobsForIndex(indexName: string): Promise<{ cancelled: number; failed: number }> {
+    this.logger.log(`Cancelling all jobs for deleted index: ${indexName}`);
+    let cancelled = 0;
+    let failed = 0;
+
+    try {
+      // Get all job states
+      const [waiting, active, delayed] = await Promise.all([
+        this.indexingQueue.getWaiting(),
+        this.indexingQueue.getActive(),
+        this.indexingQueue.getDelayed(),
+      ]);
+
+      const allJobs = [...waiting, ...active, ...delayed];
+
+      // Filter jobs for this index
+      const indexJobs = allJobs.filter(
+        job => job.data && (job.data as any).indexName === indexName,
+      );
+
+      this.logger.log(`Found ${indexJobs.length} jobs to cancel for index ${indexName}`);
+
+      // Remove each job
+      for (const job of indexJobs) {
+        try {
+          await job.remove();
+          cancelled++;
+        } catch (error) {
+          this.logger.warn(`Failed to cancel job ${job.id}: ${error.message}`);
+          failed++;
+        }
+      }
+
+      this.logger.log(
+        `Cancelled ${cancelled} jobs for index ${indexName} (${failed} failed to cancel)`,
+      );
+
+      return { cancelled, failed };
+    } catch (error) {
+      this.logger.error(`Error cancelling jobs for index ${indexName}: ${error.message}`);
+      throw error;
+    }
   }
 
   /**

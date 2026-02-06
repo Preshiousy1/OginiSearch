@@ -21,14 +21,10 @@ import { BullModule } from '@nestjs/bull';
     SearchModule,
     MongoDBModule,
     StorageModule,
-    IndexingModule,
-    BulkIndexingModule,
-    BullModule.registerQueue({
-      name: 'indexing',
-    }),
-    BullModule.registerQueue({
-      name: 'bulk-indexing',
-    }),
+    IndexingModule, // Registers 'indexing' queue (processor lives here)
+    BulkIndexingModule, // Registers 'indexing' queue (Bull reuses same instance)
+    // Register both queues here so WorkerManagementService can inject them in ApiModule context
+    BullModule.registerQueue({ name: 'indexing' }, { name: 'bulk-indexing' }),
   ],
   controllers: [
     IndexController,

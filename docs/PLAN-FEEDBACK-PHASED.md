@@ -44,6 +44,17 @@ This document outlines a phased plan for investigating and addressing four feedb
 
 **Success criteria**: Same 10k dataset indexes in meaningfully less time (e.g. &lt;5 min) without instability or OOM.
 
+### 1.3 Implementation status
+
+- ✅ **Batch size optimization**: Updated `document.service.ts` with dynamic batch sizing:
+  - Real-time threshold increased: 20 → 50 docs
+  - Large bulk detection (>1000 docs) with batch size 150-200
+  - Small (≤50): batch size 10, Medium (51-1000): batch size 100, Large (>1000): batch size 150-200
+- ✅ **Documentation**: Created `docs/PERFORMANCE-TUNING.md` with comprehensive tuning guide
+- ✅ **Environment variables**: Added `INDEXING_CONCURRENCY` and related vars to `.env.example`
+- ⏳ **Manual testing**: Pending - run `npm run bulk:measure` with defaults and `INDEXING_CONCURRENCY=10`
+- ⏳ **E2E tests**: Existing tests should pass (batch sizing is internal optimization)
+
 ---
 
 ## Phase 2: Search returns only 5 results when size=10 or size=100
@@ -82,6 +93,14 @@ This document outlines a phased plan for investigating and addressing four feedb
    - If after the above the user still sees 5 results, ask them to confirm `data.total` in the response. If `total === 5`, the query truly has 5 matches; if `total > 5` but `hits.length === 5`, then there is another bug to trace (e.g. in mapping hits to documents).
 
 **Success criteria**: For a query that matches at least N documents, requesting `size=N` (e.g. 10 or 100) returns N hits (and correct `data.total`), with no unintended cap at 5.
+
+### 2.3 Implementation status
+
+- ✅ **Fixed fetchDocuments limit**: Updated `SearchExecutorService.fetchDocuments()` to pass `limit: docIds.length` (with safety cap of 10,000) to ensure all requested documents are returned. Added logging to track document retrieval.
+- ✅ **Added request binding logging**: Added debug logging in `SearchService.convertToSearchRequest()` to log `dto.size` and `dto.from` values in development mode for verification.
+- ✅ **API documentation**: Updated `SearchController` API operation description to clarify that `size` and `from` must be included at the same level as `query` in the request body.
+- ⏳ **Manual testing**: Pending - test search with `size=10` and `size=100` to verify correct number of results are returned
+- ⏳ **E2E tests**: Update/verify E2E tests to ensure pagination works correctly
 
 ---
 

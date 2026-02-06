@@ -41,7 +41,9 @@ export class SearchController {
   @ApiOperation({
     summary: 'Search documents',
     description:
-      'Searches for documents in an index that match the specified query. Supports various query types, filters, and pagination.',
+      'Searches for documents in an index that match the specified query. Supports various query types, filters, and pagination. ' +
+      '**Important**: The `size` and `from` parameters must be included at the same level as `query` in the request body ' +
+      '(e.g., `{ query: {...}, size: 10, from: 0 }`). These control pagination: `size` is the number of results to return, `from` is the starting offset.',
   })
   @ApiParam({
     name: 'index',

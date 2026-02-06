@@ -1,4 +1,29 @@
-# Bulk indexing test scripts
+# Testing scripts
+
+## Field weights and mappings (search ranking)
+
+**Script:** `test-search-field-weights-and-mappings.ts`
+
+Runs direct API calls to verify:
+- Index create with mappings (including `boost`), GET index, persistence of settings and mappings
+- **Update settings:** `PUT /api/indices/:name/settings` — refreshInterval etc.
+- **Update mappings:** `PUT /api/indices/:indexName/mappings` — boost and new fields persist; field boost cache is invalidated so search uses new boosts
+- **Search ranking:** Documents with a term in title vs description; title boost > description boost ⇒ title match scores higher; then flip mappings ⇒ description match scores higher
+- Wildcard/_all query uses field weights
+- Error cases: 404 for non-existent index, 400 for invalid payloads
+- Cleanup: delete index, GET returns 404
+
+**Requires API running** (e.g. `npm run start:dev`). Override base URL with `API_URL`.
+
+```bash
+npm run test:field-weights
+# or
+API_URL=http://localhost:3000 npx ts-node -r tsconfig-paths/register scripts/testing/test-search-field-weights-and-mappings.ts
+```
+
+---
+
+## Bulk indexing test scripts
 
 Measure bulk indexing **against a running API** (start the app first, e.g. `npm run start:dev` or `npm run dev:start`).
 

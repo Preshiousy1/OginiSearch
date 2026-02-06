@@ -1,7 +1,7 @@
 import { PostingEntry, PostingList, TermDictionary } from './interfaces/posting.interface';
 import { SimplePostingList } from './posting-list';
 import { CompressedPostingList } from './compressed-posting-list';
-import { Injectable, Inject, Logger, OnModuleInit } from '@nestjs/common';
+import { Injectable, Inject, Logger, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
 import { RocksDBService } from '../storage/rocksdb/rocksdb.service';
 
 const BATCH_SIZE = 100; // Reduced from 1000
@@ -57,8 +57,8 @@ class MemoryOptimizedLRUCache {
     return node.value;
   }
 
-  put(key: string, value: PostingList): string[] {
-    const evictedKeys: string[] = [];
+  put(key: string, value: PostingList): Array<{ key: string; value: PostingList }> {
+    const evictedEntries: Array<{ key: string; value: PostingList }> = [];
     const existingNode = this.cache.get(key);
 
     if (existingNode) {
@@ -66,7 +66,7 @@ class MemoryOptimizedLRUCache {
       existingNode.lastAccessed = Date.now();
       existingNode.accessCount++;
       this.moveToFront(existingNode);
-      return evictedKeys;
+      return evictedEntries;
     }
 
     const newNode = new LRUNode(key, value);
@@ -76,19 +76,21 @@ class MemoryOptimizedLRUCache {
     // Check for memory pressure and evict aggressively if needed
     this.operationCount++;
     if (this.operationCount % MEMORY_CHECK_INTERVAL === 0) {
-      this.checkMemoryPressure(evictedKeys);
+      this.checkMemoryPressure(evictedEntries);
     }
 
     // Normal size-based eviction
     while (this.cache.size > this.maxSize) {
-      const evictedKey = this.removeLast();
-      if (evictedKey) evictedKeys.push(evictedKey);
+      const evictedNode = this.removeLastNode();
+      if (evictedNode) {
+        evictedEntries.push({ key: evictedNode.key, value: evictedNode.value });
+      }
     }
 
-    return evictedKeys;
+    return evictedEntries;
   }
 
-  private checkMemoryPressure(evictedKeys: string[]): void {
+  private checkMemoryPressure(evictedEntries: Array<{ key: string; value: PostingList }>): void {
     const memUsage = process.memoryUsage();
     const heapUsedMB = memUsage.heapUsed / 1024 / 1024;
     const heapTotalMB = memUsage.heapTotal / 1024 / 1024;
@@ -98,8 +100,10 @@ class MemoryOptimizedLRUCache {
     if (usagePercent > 0.8) {
       const targetSize = Math.floor(this.maxSize * 0.5); // Evict to 50% capacity
       while (this.cache.size > targetSize) {
-        const evictedKey = this.removeLast();
-        if (evictedKey) evictedKeys.push(evictedKey);
+        const evictedNode = this.removeLastNode();
+        if (evictedNode) {
+          evictedEntries.push({ key: evictedNode.key, value: evictedNode.value });
+        }
       }
 
       // Force garbage collection if available
@@ -132,11 +136,11 @@ class MemoryOptimizedLRUCache {
     if (!this.tail) this.tail = node;
   }
 
-  private removeLast(): string | null {
+  private removeLastNode(): LRUNode | null {
     if (!this.tail) return null;
 
-    const key = this.tail.key;
-    this.cache.delete(key);
+    const node = this.tail;
+    this.cache.delete(node.key);
 
     if (this.tail.prev) {
       this.tail.prev.next = null;
@@ -146,7 +150,12 @@ class MemoryOptimizedLRUCache {
       this.tail = null;
     }
 
-    return key;
+    return node;
+  }
+
+  private removeLast(): string | null {
+    const node = this.removeLastNode();
+    return node ? node.key : null;
   }
 
   has(key: string): boolean {
@@ -215,7 +224,7 @@ class MemoryOptimizedLRUCache {
 }
 
 @Injectable()
-export class InMemoryTermDictionary implements TermDictionary, OnModuleInit {
+export class InMemoryTermDictionary implements TermDictionary, OnModuleInit, OnModuleDestroy {
   private lruCache: MemoryOptimizedLRUCache;
   private options: TermDictionaryOptions;
   private readonly logger = new Logger(InMemoryTermDictionary.name);
@@ -232,6 +241,13 @@ export class InMemoryTermDictionary implements TermDictionary, OnModuleInit {
     misses: 0,
     memoryPressureEvictions: 0,
   };
+
+  /**
+   * Tracks terms that have been modified since last MongoDB persistence.
+   * Key: indexName, Value: Set of index-aware terms (indexName:field:term) that are dirty
+   * This enables incremental persistence - only persist what changed, not everything.
+   */
+  private dirtyTerms: Map<string, Set<string>> = new Map();
 
   constructor(options: TermDictionaryOptions = {}, rocksDBService?: RocksDBService) {
     this.options = {
@@ -254,12 +270,20 @@ export class InMemoryTermDictionary implements TermDictionary, OnModuleInit {
       try {
         await this.loadTermList();
         this.initialized = true;
+        this.startPeriodicTermListSave();
       } catch (err) {
         this.logger.warn(`Failed to load term list: ${err.message}`);
         this.initialized = true;
       }
     } else {
       this.initialized = true;
+    }
+  }
+
+  async onModuleDestroy() {
+    if (this.options.persistToDisk && this.rocksDBService) {
+      this.stopPeriodicTermListSave();
+      await this.saveTermList();
     }
   }
 
@@ -311,6 +335,25 @@ export class InMemoryTermDictionary implements TermDictionary, OnModuleInit {
 
   private getTermKey(term: string): string {
     return `${TERM_PREFIX}${term}`;
+  }
+
+  private termListSaveIntervalId: NodeJS.Timeout | null = null;
+
+  private startPeriodicTermListSave(): void {
+    if (!this.options.persistToDisk || !this.rocksDBService) return;
+    // Save term list every 60s so we don't lose it if process crashes (replacement for per-term save)
+    this.termListSaveIntervalId = setInterval(() => {
+      this.saveTermList().catch(err =>
+        this.logger.warn(`Periodic term list save failed: ${err.message}`),
+      );
+    }, 60000);
+  }
+
+  private stopPeriodicTermListSave(): void {
+    if (this.termListSaveIntervalId) {
+      clearInterval(this.termListSaveIntervalId);
+      this.termListSaveIntervalId = null;
+    }
   }
 
   private startMemoryMonitoring(): void {
@@ -402,10 +445,7 @@ export class InMemoryTermDictionary implements TermDictionary, OnModuleInit {
     // Add to term list
     this.termList.add(indexAwareTerm);
 
-    // Save term list if persistence is enabled
-    if (this.options.persistToDisk && this.rocksDBService) {
-      await this.saveTermList();
-    }
+    // Term list is saved periodically (every 60s) and on shutdown - not per term (was too slow)
 
     // Get or create posting list
     let postingList = this.lruCache.get(indexAwareTerm);
@@ -413,11 +453,13 @@ export class InMemoryTermDictionary implements TermDictionary, OnModuleInit {
       postingList = this.options.useCompression
         ? new CompressedPostingList()
         : new SimplePostingList();
-      const evictedKeys = this.lruCache.put(indexAwareTerm, postingList);
-      // Handle evicted terms
-      for (const key of evictedKeys) {
+
+      const evictedEntries = this.lruCache.put(indexAwareTerm, postingList);
+      // Handle evicted terms - persist with their POPULATED posting lists to RocksDB
+      // This ensures evicted data is not lost
+      for (const entry of evictedEntries) {
         if (this.options.persistToDisk && this.rocksDBService) {
-          await this.persistTermToDisk(key, postingList);
+          await this.persistTermToDisk(entry.key, entry.value);
         }
       }
     }
@@ -455,11 +497,11 @@ export class InMemoryTermDictionary implements TermDictionary, OnModuleInit {
       postingList = await this.loadTermFromDisk(indexAwareTerm);
       if (postingList) {
         // Add to cache
-        const evictedKeys = this.lruCache.put(indexAwareTerm, postingList);
-        // Handle evicted terms
-        for (const key of evictedKeys) {
+        const evictedEntries = this.lruCache.put(indexAwareTerm, postingList);
+        // Handle evicted terms - persist with their correct posting lists
+        for (const entry of evictedEntries) {
           if (this.options.persistToDisk && this.rocksDBService) {
-            await this.persistTermToDisk(key, postingList);
+            await this.persistTermToDisk(entry.key, entry.value);
           }
         }
         return postingList;
@@ -501,23 +543,23 @@ export class InMemoryTermDictionary implements TermDictionary, OnModuleInit {
   async addPostingForIndex(indexName: string, term: string, entry: PostingEntry): Promise<void> {
     const postingList = await this.addTermForIndex(indexName, term);
 
-    // Check posting list size limit
-    if (postingList.size() >= this.options.maxPostingListSize!) {
-      this.logger.debug(
-        `Posting list for term '${term}' in index '${indexName}' has reached size limit (${this.options.maxPostingListSize}) - removing oldest entries`,
-      );
-      // Remove oldest entries to make room
-      const entries = postingList.getEntries();
-      const toRemove = entries.slice(0, Math.floor(this.options.maxPostingListSize! * 0.1));
-      toRemove.forEach(e => postingList.removeEntry(e.docId));
-    }
+    // Do NOT evict when list reaches maxPostingListSize - that was dropping document IDs
+    // and causing search to return fewer results than indexed (e.g. 5220 instead of 20000).
+    // Persistence (persistDirtyTermPostingsToMongoDB) saves to MongoDB and the repository
+    // chunks into 5000-entry documents; all document IDs are preserved.
 
     postingList.addEntry(entry);
 
-    // Persist periodically
+    // Mark term as dirty for incremental MongoDB persistence
+    const indexAwareTerm = this.createIndexAwareTerm(indexName, term);
+    if (!this.dirtyTerms.has(indexName)) {
+      this.dirtyTerms.set(indexName, new Set());
+    }
+    this.dirtyTerms.get(indexName)!.add(indexAwareTerm);
+
+    // Persist to RocksDB periodically for fast recovery
     if (this.options.persistToDisk && this.rocksDBService && this.operationCount % 50 === 0) {
       try {
-        const indexAwareTerm = this.createIndexAwareTerm(indexName, term);
         const serialized = postingList.serialize();
         await this.rocksDBService.put(this.getTermKey(indexAwareTerm), serialized);
       } catch (error) {
@@ -559,11 +601,48 @@ export class InMemoryTermDictionary implements TermDictionary, OnModuleInit {
         await this.saveTermList();
       }
 
+      // Clear dirty terms for this index
+      this.dirtyTerms.delete(indexName);
+
       this.logger.log(`Cleared ${termsToRemove.length} terms for index ${indexName}`);
     } catch (error) {
       this.logger.error(`Failed to clear index ${indexName}: ${error.message}`);
       throw error;
     }
+  }
+
+  /**
+   * Get all dirty (modified) terms for an index.
+   * These are terms that have had new posting entries added since the last MongoDB persistence.
+   * Used for incremental persistence to avoid re-persisting unchanged terms.
+   */
+  getDirtyTermsForIndex(indexName: string): string[] {
+    const dirtySet = this.dirtyTerms.get(indexName);
+    return dirtySet ? Array.from(dirtySet) : [];
+  }
+
+  /**
+   * Clear dirty terms for an index after successful persistence to MongoDB.
+   * Should be called after all dirty terms have been successfully persisted.
+   */
+  clearDirtyTermsForIndex(indexName: string): void {
+    this.dirtyTerms.delete(indexName);
+  }
+
+  /**
+   * Get count of dirty terms for monitoring and metrics.
+   * @param indexName Optional - if provided, returns count for that index. Otherwise returns total across all indices.
+   */
+  getDirtyTermCount(indexName?: string): number {
+    if (indexName) {
+      return this.dirtyTerms.get(indexName)?.size || 0;
+    }
+    // Total across all indices
+    let total = 0;
+    for (const set of this.dirtyTerms.values()) {
+      total += set.size;
+    }
+    return total;
   }
 
   private ensureInitialized() {

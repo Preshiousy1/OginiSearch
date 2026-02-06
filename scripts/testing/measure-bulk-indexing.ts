@@ -16,12 +16,13 @@ async function waitForQueueToEmpty() {
     try {
       const healthResponse = await axios.get(`${API_URL}/bulk-indexing/health`);
       const queues = healthResponse.data?.queues ?? {};
-      const pending = queues.totalActive ?? 0;
+      const active = queues.totalActive ?? 0;
+      const waiting = queues.totalWaiting ?? 0;
       const failed = queues.totalFailed ?? 0;
-      if (pending === 0 && failed === 0) {
+      if (active === 0 && waiting === 0 && failed === 0) {
         break;
       }
-      console.log('Queue:', { pending, failed });
+      console.log('Queue:', { active, waiting, failed });
       await sleep(1000);
     } catch (error: any) {
       console.error('Error checking queue health:', error.message);
@@ -53,7 +54,9 @@ async function measureBulkIndexing() {
     const INDEX_NAME = `bulk-test-${documentCount}`;
 
     console.log(`API: ${API_URL}`);
-    console.log(`Starting bulk indexing of ${documentCount} documents into index "${INDEX_NAME}"...`);
+    console.log(
+      `Starting bulk indexing of ${documentCount} documents into index "${INDEX_NAME}"...`,
+    );
 
     // Delete existing index if it exists
     try {
@@ -105,7 +108,10 @@ async function measureBulkIndexing() {
       { documents },
       { maxContentLength: Infinity, maxBodyLength: Infinity },
     );
-    console.log('Submitted bulk request:', response.data?.items?.length ? `${response.data.items.length} items` : response.data);
+    console.log(
+      'Submitted bulk request:',
+      response.data?.items?.length ? `${response.data.items.length} items` : response.data,
+    );
 
     console.log('Waiting for queue to drain...');
     await waitForQueueToEmpty();
