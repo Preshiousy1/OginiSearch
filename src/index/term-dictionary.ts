@@ -442,7 +442,13 @@ export class InMemoryTermDictionary implements TermDictionary, OnModuleInit, OnM
 
     const indexAwareTerm = this.createIndexAwareTerm(indexName, term);
 
-    // Add to term list
+    // Add to term list with cap to prevent unbounded memory growth (OOM during bulk indexing)
+    const maxTermListSize = this.options.maxCacheSize! * 2;
+    if (this.termList.size >= maxTermListSize) {
+      // Evict one arbitrary term to make room (Set iteration order is insertion order in JS)
+      const first = this.termList.values().next().value;
+      if (first !== undefined) this.termList.delete(first);
+    }
     this.termList.add(indexAwareTerm);
 
     // Term list is saved periodically (every 60s) and on shutdown - not per term (was too slow)

@@ -5,6 +5,19 @@ import { IndexService } from 'src/index/index.service';
 import { BulkOperationTrackerService } from './bulk-operation-tracker.service';
 import { InjectQueue } from '@nestjs/bull';
 import Bull from 'bull';
+import {
+  INDEXING_JOB_NAMES,
+  PERSISTENCE_JOB_NAMES,
+  DEAD_LETTER_JOB_NAMES,
+} from '../constants/queue-job-names';
+import { PersistenceQueueProcessor } from '../queue/persistence-queue.processor';
+import { PersistencePayloadRepository } from '../../storage/mongodb/repositories/persistence-payload.repository';
+import { PersistencePendingJobRepository } from '../../storage/mongodb/repositories/persistence-pending-job.repository';
+import { IndexingPendingJobRepository } from '../../storage/mongodb/repositories/indexing-pending-job.repository';
+import {
+  INDEX_PAYLOAD_PREFIX,
+  PERSIST_PAYLOAD_REDIS_PREFIX,
+} from '../interfaces/persistence-job.interface';
 
 export interface BulkIndexingOptions {
   batchSize?: number;
@@ -92,6 +105,10 @@ export class BulkIndexingService implements OnModuleInit {
     @InjectQueue('indexing') private readonly indexingQueue: Bull.Queue,
     @InjectQueue('term-persistence') private readonly persistenceQueue: Bull.Queue,
     private readonly bulkOperationTracker: BulkOperationTrackerService,
+    private readonly persistenceQueueProcessor: PersistenceQueueProcessor,
+    private readonly persistencePayloadRepo: PersistencePayloadRepository,
+    private readonly persistencePendingJobRepo: PersistencePendingJobRepository,
+    private readonly indexingPendingJobRepo: IndexingPendingJobRepository,
   ) {
     // Initialize dead letter queue
     this.deadLetterQueue = new Bull('indexing-dlq', {
@@ -116,7 +133,7 @@ export class BulkIndexingService implements OnModuleInit {
   private async moveToDeadLetterQueue(job: Bull.Job, error: Error): Promise<void> {
     try {
       await this.deadLetterQueue.add(
-        'failed',
+        DEAD_LETTER_JOB_NAMES.FAILED,
         {
           ...job.data,
           error: {
@@ -161,8 +178,8 @@ export class BulkIndexingService implements OnModuleInit {
       },
     };
 
-    // Add to Bull queue
-    await this.indexingQueue.add('single', job, {
+    // Add to Bull queue (always use named job so handler is matched)
+    await this.indexingQueue.add(INDEXING_JOB_NAMES.SINGLE, job, {
       jobId,
       removeOnComplete: 10,
       removeOnFail: 5,
@@ -212,34 +229,51 @@ export class BulkIndexingService implements OnModuleInit {
       `Created bulk operation ${bulkOpId} for ${documents.length} documents in ${totalBatches} batches`,
     );
 
-    // Split documents into batches
+    // Split documents into batches. Store full payload in MongoDB and put only a reference in Bull
+    // so Redis eviction does not drop batch data (which was causing "unnamed" jobs and lost documents).
     for (let i = 0; i < documents.length; i += batchSize) {
       const batch = documents.slice(i, i + batchSize);
       const batchNumber = Math.floor(i / batchSize) + 1;
       const currentBatchId = `${batchId}:${batchNumber}`;
+      const payloadKey = `${INDEX_PAYLOAD_PREFIX}${bulkOpId}:${currentBatchId}`;
+
+      const fullPayload: BatchIndexingJob = {
+        indexName,
+        documents: batch,
+        batchId: currentBatchId,
+        options: {
+          batchSize,
+          skipDuplicates,
+          enableProgress,
+          priority,
+          retryAttempts,
+        },
+        metadata: {
+          queuedAt: new Date().toISOString(),
+          parentBatchId: batchId,
+          batchNumber,
+          totalBatches,
+          source: 'bulk',
+          bulkOpId,
+          ...customMetadata,
+        },
+      };
+
+      await this.persistencePayloadRepo.set(payloadKey, JSON.stringify(fullPayload));
+      await this.indexingPendingJobRepo.add({
+        payloadKey,
+        indexName,
+        batchId: currentBatchId,
+        bulkOpId,
+      });
 
       const job = await this.indexingQueue.add(
-        'batch',
+        INDEXING_JOB_NAMES.BATCH,
         {
+          payloadKey,
           indexName,
-          documents: batch,
           batchId: currentBatchId,
-          options: {
-            batchSize,
-            skipDuplicates,
-            enableProgress,
-            priority,
-            retryAttempts,
-          },
-          metadata: {
-            queuedAt: new Date().toISOString(),
-            parentBatchId: batchId,
-            batchNumber,
-            totalBatches,
-            source: 'bulk',
-            bulkOpId, // ← NEW: Pass bulk operation ID for coordination
-            ...customMetadata,
-          },
+          metadata: fullPayload.metadata,
         },
         {
           priority,
@@ -266,7 +300,7 @@ export class BulkIndexingService implements OnModuleInit {
     // Start the dedicated persistence worker immediately (same time as indexing workers).
     // It drains the dirty list from the left in batches of 100 while indexers push to the right.
     await this.persistenceQueue.add(
-      'drain-dirty-list',
+      PERSISTENCE_JOB_NAMES.DRAIN_DIRTY_LIST,
       { bulkOpId, indexName },
       { priority: 10, removeOnComplete: 50, removeOnFail: false },
     );
@@ -311,22 +345,20 @@ export class BulkIndexingService implements OnModuleInit {
       let failedSingleJobs = 0;
       let failedBatchJobs = 0;
 
-      // Count waiting and active jobs
+      // Count waiting and active jobs (guard: Bull can return null or jobs without .name)
       [...waitingJobs, ...activeJobs].forEach(job => {
-        if (job.name === 'single') {
-          singleJobs++;
-        } else if (job.name === 'batch') {
-          batchJobs++;
-        }
+        if (!job) return;
+        const name = job.name ?? (job as any).opts?.name;
+        if (name === INDEXING_JOB_NAMES.SINGLE) singleJobs++;
+        else if (name === INDEXING_JOB_NAMES.BATCH) batchJobs++;
       });
 
       // Count failed jobs by type
       failedJobs.forEach(job => {
-        if (job.name === 'single') {
-          failedSingleJobs++;
-        } else if (job.name === 'batch') {
-          failedBatchJobs++;
-        }
+        if (!job) return;
+        const name = job.name ?? (job as any).opts?.name;
+        if (name === INDEXING_JOB_NAMES.SINGLE) failedSingleJobs++;
+        else if (name === INDEXING_JOB_NAMES.BATCH) failedBatchJobs++;
       });
 
       return {
@@ -370,6 +402,48 @@ export class BulkIndexingService implements OnModuleInit {
       failed: failed.length,
       delayed: delayed.length,
     };
+  }
+
+  /**
+   * Get term-persistence queue statistics (waiting, active, completed, failed).
+   */
+  async getPersistenceQueueStats(): Promise<{
+    waiting: number;
+    active: number;
+    completed: number;
+    failed: number;
+    delayed: number;
+  }> {
+    const [waiting, active, completed, failed, delayed] = await Promise.all([
+      this.persistenceQueue.getWaiting(),
+      this.persistenceQueue.getActive(),
+      this.persistenceQueue.getCompleted(),
+      this.persistenceQueue.getFailed(),
+      this.persistenceQueue.getDelayed(),
+    ]);
+
+    return {
+      waiting: waiting.length,
+      active: active.length,
+      completed: completed.length,
+      failed: failed.length,
+      delayed: delayed.length,
+    };
+  }
+
+  /**
+   * Get failed jobs from the term-persistence queue.
+   */
+  async getPersistenceFailedJobs(): Promise<Array<Bull.Job>> {
+    try {
+      const failed = await this.persistenceQueue.getFailed();
+      return failed.sort(
+        (a, b) => (b.finishedOn || b.timestamp || 0) - (a.finishedOn || a.timestamp || 0),
+      );
+    } catch (error) {
+      this.logger.error(`Failed to get persistence failed jobs: ${error.message}`);
+      throw error;
+    }
   }
 
   /**
@@ -518,6 +592,393 @@ export class BulkIndexingService implements OnModuleInit {
   }
 
   /**
+   * Completely drain the term-persistence queue: pause, remove all jobs (including active), then resume.
+   * Use when you need to clear all persistence jobs (e.g. before a clean re-index).
+   */
+  async drainPersistenceQueue(): Promise<void> {
+    this.logger.log('Draining term-persistence queue completely (including active jobs)...');
+
+    try {
+      const [waiting, active] = await Promise.all([
+        this.persistenceQueue.getWaiting(),
+        this.persistenceQueue.getActive(),
+      ]);
+      this.logger.log(`Before drain: ${waiting.length} waiting, ${active.length} active`);
+
+      await this.persistenceQueue.pause(true, true);
+      this.logger.log('Persistence queue paused');
+
+      if (typeof this.persistenceQueue.obliterate === 'function') {
+        await this.persistenceQueue.obliterate({ force: true });
+        this.logger.log('Persistence queue obliterated (all jobs removed including active)');
+      } else {
+        await this.persistenceQueue.clean(0, 'active');
+        await this.persistenceQueue.clean(0, 'completed');
+        await this.persistenceQueue.clean(0, 'failed');
+        await this.persistenceQueue.clean(0, 'delayed');
+        const waitingAfter = await this.persistenceQueue.getWaiting();
+        for (const job of waitingAfter) {
+          await job.remove();
+        }
+        this.logger.log(`Removed active/delayed and ${waitingAfter.length} waiting jobs`);
+      }
+
+      await this.persistenceQueue.resume(true);
+      this.logger.log('Persistence queue resumed');
+
+      const [waitingAfter, activeAfter] = await Promise.all([
+        this.persistenceQueue.getWaiting(),
+        this.persistenceQueue.getActive(),
+      ]);
+      this.logger.log(`After drain: ${waitingAfter.length} waiting, ${activeAfter.length} active`);
+      this.logger.log('Persistence queue drain completed successfully');
+    } catch (error) {
+      try {
+        await this.persistenceQueue.resume(true);
+      } catch (resumeErr) {
+        this.logger.warn(`Failed to resume persistence queue after drain: ${resumeErr.message}`);
+      }
+      this.logger.error(`Persistence queue drain failed: ${error.message}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Drain stale pending refs from MongoDB: process every pending ref that has a payload (merge terms),
+   * and remove refs that have no payload (stale from old runs). Cleans persistence_pending_jobs
+   * without waiting for recovery during normal queue processing.
+   */
+  async drainStalePendingRefs(): Promise<{ processed: number; skipped: number }> {
+    return this.persistenceQueueProcessor.drainPendingRefs();
+  }
+
+  /**
+   * Verify that all batches in a bulk operation have persistence jobs enqueued.
+   * Returns missing batch IDs if any.
+   */
+  verifyPersistenceJobs(bulkOpId: string): {
+    allEnqueued: boolean;
+    missingBatches: string[];
+    enqueuedCount: number;
+    totalBatches: number;
+    completedIndexingBatches: number;
+    persistedBatches: number;
+  } {
+    const verification = this.bulkOperationTracker.verifyPersistenceJobsEnqueued(bulkOpId);
+    const op = this.bulkOperationTracker.getOperation(bulkOpId);
+    if (!op) {
+      return {
+        ...verification,
+        completedIndexingBatches: 0,
+        persistedBatches: 0,
+      };
+    }
+    return {
+      ...verification,
+      completedIndexingBatches: op.completedBatches,
+      persistedBatches: op.persistedBatches,
+    };
+  }
+
+  /**
+   * Verify all bulk operations for an indexName and return aggregated results.
+   * This is the main verification endpoint - checks all operations for the index.
+   */
+  async verifyPersistenceJobsByIndex(indexName: string): Promise<{
+    indexName: string;
+    totalOperations: number;
+    totalBatches: number;
+    totalBatchesWithPersistenceJobs: number;
+    totalBatchesIndexed: number;
+    totalBatchesPersisted: number;
+    missingBatches: string[];
+    operations: Array<{
+      bulkOpId: string;
+      status: string;
+      totalBatches: number;
+      enqueuedCount: number;
+      completedIndexing: number;
+      persisted: number;
+      missingBatches: string[];
+      allEnqueued: boolean;
+    }>;
+  }> {
+    const operations = await this.bulkOperationTracker.getOperationsByIndexName(indexName);
+    let totalBatches = 0;
+    let totalBatchesWithPersistenceJobs = 0;
+    let totalBatchesIndexed = 0;
+    let totalBatchesPersisted = 0;
+    const allMissingBatches: string[] = [];
+    const operationDetails: Array<{
+      bulkOpId: string;
+      status: string;
+      totalBatches: number;
+      enqueuedCount: number;
+      completedIndexing: number;
+      persisted: number;
+      missingBatches: string[];
+      allEnqueued: boolean;
+    }> = [];
+
+    for (const op of operations) {
+      const verification = this.bulkOperationTracker.verifyPersistenceJobsEnqueued(op.id);
+      totalBatches += op.totalBatches;
+      totalBatchesWithPersistenceJobs += verification.enqueuedCount;
+      totalBatchesIndexed += op.completedBatches;
+      totalBatchesPersisted += op.persistedBatches;
+      allMissingBatches.push(...verification.missingBatches);
+      operationDetails.push({
+        bulkOpId: op.id,
+        status: op.status,
+        totalBatches: op.totalBatches,
+        enqueuedCount: verification.enqueuedCount,
+        completedIndexing: op.completedBatches,
+        persisted: op.persistedBatches,
+        missingBatches: verification.missingBatches,
+        allEnqueued: verification.allEnqueued,
+      });
+    }
+
+    return {
+      indexName,
+      totalOperations: operations.length,
+      totalBatches,
+      totalBatchesWithPersistenceJobs,
+      totalBatchesIndexed,
+      totalBatchesPersisted,
+      missingBatches: allMissingBatches,
+      operations: operationDetails,
+    };
+  }
+
+  /**
+   * Recover missing persistence jobs for an index.
+   * Uses the same operations data as the verify endpoint. For each operation's batchIds,
+   * looks up persist payloads in MongoDB and re-enqueues any that exist (not yet persisted).
+   */
+  async recoverMissingPersistenceJobs(indexName: string): Promise<{
+    indexName: string;
+    totalOperations: number;
+    batchesChecked: number;
+    payloadsFound: number;
+    batchesRecovered: number;
+    batchesUnrecoverable: number;
+    recoveredBatches: Array<{
+      bulkOpId: string;
+      batchId: string;
+      payloadKey: string;
+    }>;
+    unrecoverableBatches: Array<{
+      bulkOpId: string;
+      batchId: string;
+      payloadKey: string;
+      reason: string;
+    }>;
+    documentCount?: number;
+    diagnostic?: {
+      totalPayloadsInCollection: number;
+      sampleKeys: string[];
+      persistPayloadPrefix: string;
+      note: string;
+    };
+  }> {
+    const recoveredBatches: Array<{
+      bulkOpId: string;
+      batchId: string;
+      payloadKey: string;
+    }> = [];
+    const unrecoverableBatches: Array<{
+      bulkOpId: string;
+      batchId: string;
+      payloadKey: string;
+      reason: string;
+    }> = [];
+    let batchesChecked = 0;
+    let payloadsFound = 0;
+
+    // Same source as verify: operations from bulk operation tracker
+    const operations = await this.bulkOperationTracker.getOperationsByIndexName(indexName);
+    this.logger.log(
+      `Recovering persistence jobs for index ${indexName}: ${operations.length} operations`,
+    );
+
+    for (const op of operations) {
+      const batchIds = op.batchIds || [];
+      if (batchIds.length === 0) continue;
+
+      for (const batchId of batchIds) {
+        batchesChecked++;
+        const payloadKey = `${PERSIST_PAYLOAD_REDIS_PREFIX}${op.id}:${batchId}`;
+        const payload = await this.persistencePayloadRepo.get(payloadKey);
+
+        if (!payload) {
+          // Normal case: payload was persisted (and deleted) or never stored; skip silently
+          continue;
+        }
+
+        payloadsFound++;
+        try {
+          const payloadData = JSON.parse(payload);
+          if (!payloadData.indexName || !payloadData.batchId || !payloadData.bulkOpId) {
+            unrecoverableBatches.push({
+              bulkOpId: op.id,
+              batchId,
+              payloadKey,
+              reason: 'Invalid payload format',
+            });
+            continue;
+          }
+
+          const { indexName: payloadIndex, batchId: pBatchId, bulkOpId: pBulkOpId } = payloadData;
+
+          const hasPendingRef = await this.persistencePendingJobRepo.existsByPayloadKey(payloadKey);
+          if (!hasPendingRef) {
+            await this.persistencePendingJobRepo.add({
+              payloadKey,
+              indexName: payloadIndex,
+              batchId: pBatchId,
+              bulkOpId: pBulkOpId,
+            });
+          }
+
+          await this.persistenceQueue.add(
+            PERSISTENCE_JOB_NAMES.PERSIST_BATCH_TERMS,
+            {
+              payloadKey,
+              indexName: payloadIndex,
+              batchId: pBatchId,
+              bulkOpId: pBulkOpId,
+            },
+            {
+              priority: 10,
+              removeOnComplete: false,
+              removeOnFail: false,
+              attempts: 5,
+              backoff: { type: 'exponential', delay: 2000 },
+            },
+          );
+
+          try {
+            await this.bulkOperationTracker.markPersistenceJobEnqueued(op.id, batchId);
+          } catch {
+            // Operation may not exist - job still enqueued
+          }
+
+          recoveredBatches.push({ bulkOpId: op.id, batchId, payloadKey });
+          this.logger.log(`✅ Recovered batch ${batchId} (operation: ${op.id})`);
+        } catch (error: any) {
+          unrecoverableBatches.push({
+            bulkOpId: op.id,
+            batchId,
+            payloadKey,
+            reason: `Recovery failed: ${error.message}`,
+          });
+        }
+      }
+    }
+
+    // Fallback: query MongoDB for any persist payloads not in tracked batchIds (orphaned)
+    const allPersistPayloads = await this.persistencePayloadRepo.findAllForIndex(indexName);
+    const recoveredKeys = new Set(recoveredBatches.map(r => r.payloadKey));
+    for (const { key: payloadKey, value: payloadJson } of allPersistPayloads) {
+      if (recoveredKeys.has(payloadKey)) continue;
+      payloadsFound++;
+      batchesChecked++;
+      try {
+        const payloadData = JSON.parse(payloadJson);
+        if (!payloadData.indexName || !payloadData.batchId || !payloadData.bulkOpId) {
+          unrecoverableBatches.push({
+            bulkOpId: 'unknown',
+            batchId: payloadKey,
+            payloadKey,
+            reason: 'Invalid payload format',
+          });
+          continue;
+        }
+        const { indexName: pi, batchId: pb, bulkOpId: pbo } = payloadData;
+        const hasPendingRef = await this.persistencePendingJobRepo.existsByPayloadKey(payloadKey);
+        if (!hasPendingRef) {
+          await this.persistencePendingJobRepo.add({
+            payloadKey,
+            indexName: pi,
+            batchId: pb,
+            bulkOpId: pbo,
+          });
+        }
+        await this.persistenceQueue.add(
+          PERSISTENCE_JOB_NAMES.PERSIST_BATCH_TERMS,
+          { payloadKey, indexName: pi, batchId: pb, bulkOpId: pbo },
+          { priority: 10, removeOnComplete: false, removeOnFail: false, attempts: 5 },
+        );
+        recoveredBatches.push({ bulkOpId: pbo, batchId: pb, payloadKey });
+      } catch (error: any) {
+        unrecoverableBatches.push({
+          bulkOpId: 'unknown',
+          batchId: payloadKey,
+          payloadKey,
+          reason: `Recovery failed: ${error.message}`,
+        });
+      }
+    }
+
+    let documentCount: number | undefined;
+    try {
+      const { total } = await this.documentService.listDocuments(indexName, { limit: 0 });
+      documentCount = total;
+    } catch {
+      // ignore
+    }
+
+    let diagnostic:
+      | {
+          totalPayloadsInCollection: number;
+          sampleKeys: string[];
+          persistPayloadPrefix: string;
+          note: string;
+        }
+      | undefined;
+    if (payloadsFound === 0 && batchesChecked > 0) {
+      try {
+        const diag = await this.persistencePayloadRepo.getDiagnostics();
+        diagnostic = {
+          totalPayloadsInCollection: diag.totalCount,
+          sampleKeys: diag.sampleKeys,
+          persistPayloadPrefix: PERSIST_PAYLOAD_REDIS_PREFIX,
+          note:
+            `Recovery looks for keys like ${PERSIST_PAYLOAD_REDIS_PREFIX}bulk:${indexName}:timestamp:id:batchId. ` +
+            `Sample keys use "index:payload" (indexing batches) not "persist:payload" (term postings). ` +
+            `Persist payloads are deleted after successful persistence.`,
+        };
+      } catch (e: any) {
+        diagnostic = {
+          totalPayloadsInCollection: -1,
+          sampleKeys: [],
+          persistPayloadPrefix: PERSIST_PAYLOAD_REDIS_PREFIX,
+          note: `Could not read diagnostics: ${e.message}`,
+        };
+      }
+    }
+
+    this.logger.log(
+      `Recovery complete for ${indexName}: ${recoveredBatches.length} recovered, ` +
+        `${unrecoverableBatches.length} unrecoverable (${batchesChecked} batches checked)`,
+    );
+
+    return {
+      indexName,
+      totalOperations: operations.length,
+      batchesChecked,
+      payloadsFound,
+      batchesRecovered: recoveredBatches.length,
+      batchesUnrecoverable: unrecoverableBatches.length,
+      recoveredBatches,
+      unrecoverableBatches,
+      documentCount,
+      diagnostic,
+    };
+  }
+
+  /**
    * Pause the queue
    */
   async pauseQueue(): Promise<void> {
@@ -565,7 +1026,7 @@ export class BulkIndexingService implements OnModuleInit {
       // Remove error information and retry in main queue
       // eslint-disable-next-line @typescript-eslint/no-unused-vars
       const { error, failedAt, attempts, ...jobData } = job.data;
-      await this.indexingQueue.add('batch', jobData, {
+      await this.indexingQueue.add(INDEXING_JOB_NAMES.BATCH, jobData, {
         attempts: 3,
         backoff: {
           type: 'exponential',

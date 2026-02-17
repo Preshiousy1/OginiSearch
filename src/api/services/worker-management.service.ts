@@ -5,6 +5,7 @@ import { ConfigService } from '@nestjs/config';
 import { BulkIndexingService } from '../../indexing/services/bulk-indexing.service';
 import { IndexingWorkerService } from '../../indexing/services/indexing-worker.service';
 import { DocumentProcessorPool } from '../../indexing/services/document-processor.pool';
+import { INDEXING_JOB_NAMES } from '../../indexing/constants/queue-job-names';
 import * as os from 'os';
 
 export interface WorkerStatus {
@@ -231,7 +232,7 @@ export class WorkerManagementService {
       const dummyJobsCount = 10;
       for (let i = 0; i < dummyJobsCount; i++) {
         await this.indexingQueue.add(
-          'wakeup',
+          INDEXING_JOB_NAMES.WAKEUP,
           { type: 'wakeup', timestamp: Date.now() },
           {
             priority: 1, // Low priority
@@ -921,7 +922,7 @@ export class WorkerManagementService {
     // Test worker responsiveness by adding a test job
     try {
       const testJob = await this.indexingQueue.add(
-        'health-check',
+        INDEXING_JOB_NAMES.HEALTH_CHECK,
         {
           type: 'health-check',
           timestamp: Date.now(),

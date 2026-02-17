@@ -88,9 +88,9 @@ describe('IndexController (e2e)', () => {
     it('should list all indices', async () => {
       const res = await request(app.getHttpServer()).get('/api/indices').expect(200);
 
-      expect(Array.isArray(res.body.indices)).toBe(true);
+      expect(Array.isArray(res.body.data)).toBe(true);
       expect(res.body.total).toBeGreaterThanOrEqual(2);
-      const names = res.body.indices.map((i: any) => i.name);
+      const names = res.body.data.map((i: any) => i.name);
       expect(names).toEqual(expect.arrayContaining(['list-index-1', 'list-index-2']));
     });
   });

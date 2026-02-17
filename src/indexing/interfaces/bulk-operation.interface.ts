@@ -21,6 +21,9 @@ export interface BulkOperation {
   /** Array of all batch job IDs */
   batchIds: string[];
 
+  /** Set of batch IDs that have enqueued persistence jobs (for verification) */
+  persistenceJobsEnqueued?: Set<string> | string[];
+
   /** When the operation was created */
   createdAt: Date;
 

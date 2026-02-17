@@ -37,8 +37,11 @@
     "bulk:generate": "npx ts-node -r tsconfig-paths/register scripts/testing/generate-bulk-data.ts",
     "bulk:measure": "npx ts-node -r tsconfig-paths/register scripts/testing/measure-bulk-indexing.ts",
     "rebuild-doc-count": "npx ts-node -r tsconfig-paths/register scripts/diagnostics/rebuild-document-count.ts",
+    "drain-stale-pending": "npx ts-node -r tsconfig-paths/register scripts/diagnostics/drain-stale-pending-refs.ts",
     "test:field-weights": "npx ts-node -r tsconfig-paths/register scripts/testing/test-search-field-weights-and-mappings.ts",
-    "test:search-api": "npx ts-node -r tsconfig-paths/register scripts/testing/test-search-api.ts"
+    "test:search-api": "npx ts-node -r tsconfig-paths/register scripts/testing/test-search-api.ts",
+    "test:endpoints": "npx ts-node -r tsconfig-paths/register scripts/testing/test-all-endpoints.ts",
+    "test:persistence-payload-store": "npx ts-node -r tsconfig-paths/register scripts/testing/validate-persistence-payload-store.ts"
   },
   "dependencies": {
     "@nestjs/bull": "^11.0.2",

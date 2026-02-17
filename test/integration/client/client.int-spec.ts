@@ -64,10 +64,10 @@ describe('Ogini Client Integration Tests', () => {
     it('should list indices including the test index', async () => {
       const response = await client.indices.listIndices();
 
-      expect(Array.isArray(response.indices)).toBe(true);
-      expect(response.indices.length).toBeGreaterThan(0);
+      expect(Array.isArray(response.data)).toBe(true);
+      expect(response.data.length).toBeGreaterThan(0);
 
-      const foundIndex = response.indices.find(index => index.name === testIndexName);
+      const foundIndex = response.data.find((index: { name: string }) => index.name === testIndexName);
       expect(foundIndex).toBeDefined();
       expect(foundIndex.status).toBe('open');
     });

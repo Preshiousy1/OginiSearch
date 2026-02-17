@@ -320,6 +320,41 @@ export class DocumentController {
     return this.documentService.bulkIndexDocuments(index, bulkIndexDocumentsDto.documents);
   }
 
+  /** Alias for _bulk: AsyncOginiClient calls POST .../documents/bulk (no underscore) */
+  @Post('bulk')
+  @ApiOperation({
+    summary: 'Bulk index documents (alias)',
+    description: 'Same as POST _bulk. Supported for Laravel Scout driver AsyncOginiClient.',
+  })
+  @ApiParam({ name: 'index', description: 'Index name', example: 'businesses' })
+  @ApiBody({ type: BulkIndexDocumentsDto })
+  @ApiResponse({ status: HttpStatus.OK, description: 'Documents indexed successfully' })
+  async bulkIndexDocumentsAlias(
+    @Param('index') index: string,
+    @Body(ValidationPipe) bulkIndexDocumentsDto: BulkIndexDocumentsDto,
+  ): Promise<BulkResponseDto> {
+    return this.documentService.bulkIndexDocuments(index, bulkIndexDocumentsDto.documents);
+  }
+
+  /** DELETE with body: OginiClient deleteByQuery uses DELETE .../documents/_query with JSON body { query } */
+  @Delete('_query')
+  @ApiOperation({
+    summary: 'Delete documents by query (DELETE method)',
+    description: 'Same as POST _delete_by_query. Supported for Laravel Scout driver OginiClient.',
+  })
+  @ApiParam({ name: 'index', description: 'Index name', example: 'businesses' })
+  @ApiBody({
+    type: DeleteByQueryDto,
+    description: 'Query to match documents for deletion',
+  })
+  @ApiResponse({ status: HttpStatus.OK, description: 'Documents deleted successfully' })
+  async deleteByQueryDelete(
+    @Param('index') index: string,
+    @Body(ValidationPipe) deleteByQueryDto: DeleteByQueryDto,
+  ): Promise<DeleteByQueryResponseDto> {
+    return this.documentService.deleteByQuery(index, deleteByQueryDto);
+  }
+
   @Post('_delete_by_query')
   @ApiOperation({
     summary: 'Delete documents by query',

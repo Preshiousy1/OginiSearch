@@ -31,13 +31,13 @@ import { Logger } from '@nestjs/common';
 @ApiTags('Search')
 @ApiExtraModels(SearchQueryDto, SuggestQueryDto)
 @ApiBearerAuth('JWT-auth')
-@Controller('api/indices/:index/_search')
+@Controller('api/indices/:index')
 export class SearchController {
   private readonly logger = new Logger(SearchController.name);
 
   constructor(private readonly searchService: SearchService) {}
 
-  @Post()
+  @Post('_search')
   @ApiOperation({
     summary: 'Search documents',
     description:
@@ -318,8 +318,9 @@ export class SearchController {
       throw new BadRequestException('Search query is required');
     }
 
-    // Convert to appropriate SearchQueryDto format if necessary
-    // This handles both string and object formats for backward compatibility
+    // Dump full incoming payload so query builder and filter usage can be verified
+    this.logger.log(`Search payload (as received): ${JSON.stringify(searchDto)}`);
+
     if (typeof searchDto.query === 'string') {
       this.logger.log(`Processing string query: ${searchDto.query}`);
     } else {
@@ -328,17 +329,30 @@ export class SearchController {
 
     try {
       const result = await this.searchService.search(index, searchDto);
+      const took = result.data?.took ?? 0;
       this.logger.log(
-        `Search completed for index '${index}': Found ${result.data.total} results in ${result.took}ms`,
+        `Search completed for index '${index}': Found ${result.data.total} results in ${took}ms`,
       );
-      return result;
+      return { ...result, took };
     } catch (error) {
       this.logger.error(`Search error for index '${index}': ${error.message}`, error.stack);
       throw error;
     }
   }
 
-  @Post('_suggest')
+  /** Alias for _search: AsyncOginiClient calls POST .../search (no underscore) */
+  @Post('search')
+  @ApiOperation({
+    summary: 'Search documents (alias)',
+    description: 'Same as POST _search. Supported for Laravel Scout driver AsyncOginiClient.',
+  })
+  @ApiParam({ name: 'index', description: 'Index name', example: 'businesses' })
+  @ApiBody({ type: SearchQueryDto })
+  async searchAlias(@Param('index') index: string, @Body() searchDto: SearchQueryDto) {
+    return this.search(index, searchDto);
+  }
+
+  @Post('_search/_suggest')
   @ApiOperation({
     summary: 'Get suggestions',
     description:
@@ -406,7 +420,7 @@ export class SearchController {
     };
   }
 
-  @Delete('_clear_dictionary')
+  @Delete('_search/_clear_dictionary')
   async clearDictionary(@Param('index') index: string) {
     return this.searchService.clearDictionary(index);
   }

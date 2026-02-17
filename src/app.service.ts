@@ -7,6 +7,11 @@ export class AppService {
   }
 
   getHealth() {
-    return { status: 'OK' };
+    // OginiClient healthCheck expects status; optional version and server_info for detailed checks
+    return {
+      status: 'ok',
+      version: process.env.npm_package_version ?? '1.0.0',
+      server_info: { node: process.version },
+    };
   }
 }

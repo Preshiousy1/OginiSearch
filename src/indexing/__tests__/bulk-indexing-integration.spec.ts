@@ -251,21 +251,22 @@ describe('Bulk Indexing Architecture (Integration)', () => {
       expect(operation).toBeDefined();
     });
 
-    it('should emit all-batches-indexed event', done => {
+    it('should emit all-batches-indexed event', async () => {
       const bulkOpId = bulkTracker.createOperation(TEST_INDEX, 2, ['event-test-1', 'event-test-2']);
 
-      // Listen for event
-      app.get(EventEmitterModule).on('all-batches-indexed', event => {
-        if (event.bulkOpId === bulkOpId) {
-          expect(event.indexName).toBe(TEST_INDEX);
-          expect(event.totalBatches).toBe(2);
-          done();
-        }
+      const eventFired = new Promise<void>(resolve => {
+        app.get(EventEmitterModule).on('all-batches-indexed', event => {
+          if (event.bulkOpId === bulkOpId) {
+            expect(event.indexName).toBe(TEST_INDEX);
+            expect(event.totalBatches).toBe(2);
+            resolve();
+          }
+        });
       });
 
-      // Mark batches as indexed
-      bulkTracker.markBatchIndexed(bulkOpId, 'event-test-1');
-      bulkTracker.markBatchIndexed(bulkOpId, 'event-test-2');
+      await bulkTracker.markBatchIndexed(bulkOpId, 'event-test-1');
+      await bulkTracker.markBatchIndexed(bulkOpId, 'event-test-2');
+      await eventFired;
     });
   });
 
@@ -358,7 +359,7 @@ describe('Bulk Indexing Architecture (Integration)', () => {
         );
 
         // Mark batch as indexed
-        bulkTracker.markBatchIndexed(bulkOpId, batchIds[i]);
+        await bulkTracker.markBatchIndexed(bulkOpId, batchIds[i]);
 
         // Queue persistence job (simulated)
         // In real flow, this is done by IndexingQueueProcessor

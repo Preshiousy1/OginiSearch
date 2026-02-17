@@ -5,6 +5,7 @@ import { BulkIndexingService } from './services/bulk-indexing.service';
 import { IndexModule } from '../index/index.module';
 import { DocumentModule } from '../document/document.module';
 import { StorageModule } from '../storage/storage.module';
+import { MongoDBModule } from '../storage/mongodb/mongodb.module';
 import { IndexingModule } from './indexing.module';
 // Note: DocumentProcessorPool is provided in IndexingModule
 
@@ -12,6 +13,7 @@ import { IndexingModule } from './indexing.module';
   imports: [
     IndexModule,
     StorageModule,
+    MongoDBModule, // Required for PersistencePayloadRepository and PersistencePendingJobRepository
     forwardRef(() => DocumentModule),
     forwardRef(() => IndexingModule), // Import IndexingModule to access IndexingService
     ConfigModule,
@@ -32,7 +34,10 @@ import { IndexingModule } from './indexing.module';
             attempts: 3,
             backoff: { type: 'exponential', delay: 2000 },
           },
-          settings: { maxStalledCount: 1, stalledInterval: 30000 },
+          // Longer stalledInterval reduces "Missing lock for job X finished" when batch jobs run >30s.
+          // Bull marks a job stalled if the worker doesn't renew the lock in time; then moving to
+          // completed/failed can fail with that error. 2 min gives large batches time to finish.
+          settings: { maxStalledCount: 1, stalledInterval: 120000 },
         };
       },
       inject: [ConfigService],

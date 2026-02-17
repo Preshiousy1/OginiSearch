@@ -301,19 +301,30 @@ export class QueryProcessorService implements QueryProcessor {
 
     // Handle match queries - support multiple formats
     if (rawQuery.query?.match) {
-      // Format 1: {"match": {"field": "value", "value": "text"}} (custom format)
-      if (rawQuery.query.match.field && rawQuery.query.match.value) {
+      const match = rawQuery.query.match as Record<string, unknown>;
+
+      // Format 1: {"match": {"field": "name", "value": "text"}} (explicit field + value)
+      if (match.field && match.value !== undefined && match.value !== null) {
         return {
-          text: rawQuery.query.match.value,
-          fields: [rawQuery.query.match.field],
+          text: String(match.value),
+          fields: [String(match.field)],
         };
       }
 
-      // Format 2: {"match": {"field_name": "value"}} (Elasticsearch standard format)
-      const matchEntries = Object.entries(rawQuery.query.match);
+      // Format 1b: {"match": {"value": "car*"}} (value only; default field to _all)
+      if (match.value !== undefined && match.value !== null && !match.field) {
+        return {
+          text: String(match.value),
+          fields: rawQuery.fields || ['_all'],
+        };
+      }
+
+      // Format 2: {"match": {"field_name": "value"}} (ES-style: key is field name)
+      const matchEntries = Object.entries(rawQuery.query.match).filter(
+        ([k, v]) => k !== 'boost' && v !== undefined && v !== null,
+      );
       if (matchEntries.length > 0) {
         const [field, value] = matchEntries[0];
-        // Handle both string value and object value formats
         const textValue =
           typeof value === 'object' && value !== null && (value as any).query
             ? String((value as any).query)

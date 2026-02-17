@@ -51,16 +51,13 @@ export class BulkCompletionService {
       this.indexingService.cleanupDirtyTermsAfterBulkIndexing(indexName);
       this.logger.debug(`Cleared dirty terms for index: ${indexName}`);
 
-      // 2. Verify document count accuracy
+      // 2. Log final index document count (for reference)
+      // Note: totalDocuments is for THIS bulk op only; index total is cumulative across all ops.
+      // Do not compare them - that would wrongly warn when index has 27k docs and this op added 223.
       const storedCount = await this.indexStorageService.getDocumentCount(indexName);
-      this.logger.log(`Final document count for ${indexName}: ${storedCount}`);
-
-      if (totalDocuments && storedCount !== totalDocuments) {
-        this.logger.warn(
-          `Document count mismatch: expected ${totalDocuments}, got ${storedCount}. ` +
-            `This may indicate failures during indexing.`,
-        );
-      }
+      this.logger.log(
+        `Final document count for ${indexName}: ${storedCount} (this op: ${totalDocuments})`,
+      );
 
       // 3. Log completion metrics
       const avgBatchTime = totalDuration / totalBatches;

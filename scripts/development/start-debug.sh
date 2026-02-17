@@ -8,8 +8,8 @@ echo "🔪 Killing any existing processes on port 3000..."
 lsof -ti:3000 | xargs kill -9 2>/dev/null || true
 sleep 2
 
-# Development Node.js memory settings
-export NODE_OPTIONS="--max-old-space-size=2048 --expose-gc"
+# Development Node.js memory settings (4GB heap to avoid OOM during heavy bulk indexing)
+export NODE_OPTIONS="--max-old-space-size=4096 --expose-gc"
 
 # Development memory settings
 export MAX_CACHE_SIZE=5000
@@ -29,7 +29,7 @@ export ROCKSDB_CACHE_SIZE=64MB
 export ROCKSDB_WRITE_BUFFER_SIZE=32MB
 
 echo "⚙️  Development debug settings:"
-echo "   - Max heap size: 2048MB"
+echo "   - Max heap size: 4096MB"
 echo "   - Cache size: ${MAX_CACHE_SIZE}"
 echo "   - Eviction threshold: ${EVICTION_THRESHOLD}"
 echo "   - Memory monitoring: ${MEMORY_MONITOR_INTERVAL}ms"

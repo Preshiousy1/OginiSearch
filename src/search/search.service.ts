@@ -55,10 +55,17 @@ export class SearchService {
         options,
       );
 
-      // Format response
+      // Pagination: OginiPaginator expects data.pagination (currentPage, totalPages, pageSize, hasNext, hasPrevious, totalResults)
+      const size = options.size || 10;
+      const from = options.from ?? 0;
+      const total = searchResult.totalHits;
+      const totalPages = size > 0 ? Math.ceil(total / size) : 0;
+      const currentPage = size > 0 ? Math.floor(from / size) + 1 : 1;
+
       const response = {
         data: {
-          total: searchResult.totalHits,
+          total,
+          took: Date.now() - startTime,
           maxScore: searchResult.maxScore,
           hits: searchResult.hits.map(hit => ({
             id: hit.id,
@@ -66,8 +73,15 @@ export class SearchService {
             score: hit.score,
             source: hit.document,
           })),
+          pagination: {
+            currentPage,
+            totalPages,
+            pageSize: size,
+            hasNext: currentPage < totalPages,
+            hasPrevious: currentPage > 1,
+            totalResults: total,
+          },
         },
-        took: Date.now() - startTime,
       };
 
       return response;

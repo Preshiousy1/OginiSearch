@@ -7,11 +7,21 @@ export interface SerializedTermPostings {
   >;
 }
 
+/** Redis key prefix for out-of-band persistence payloads (avoids Bull job size limits) */
+export const PERSIST_PAYLOAD_REDIS_PREFIX = 'persist:payload:';
+export const PERSIST_PAYLOAD_TTL_SEC = 86400 * 7; // 7 days
+
+/** MongoDB key prefix for indexing batch payloads (avoids Bull/Redis eviction of large job data) */
+export const INDEX_PAYLOAD_PREFIX = 'index:payload:';
+
 /**
  * Job payload for term persistence queue.
- * Contains the terms that need to be persisted to MongoDB for a specific batch.
+ * When payloadKey is set, the full payload is in Redis; otherwise fields are inline.
  */
 export interface PersistenceBatchJob {
+  /** When set, load full payload from Redis at this key (avoids large Bull job data) */
+  payloadKey?: string;
+
   /** The index name */
   indexName: string;
 

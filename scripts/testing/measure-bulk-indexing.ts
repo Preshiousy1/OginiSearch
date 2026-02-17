@@ -93,6 +93,9 @@ async function measureBulkIndexing() {
     // Start timing (bulk request + queue drain)
     const startTime = Date.now();
 
+    console.log('Waiting for queue to drain...');
+    await waitForQueueToEmpty();
+
     const documents = testData.documents.map((doc: any) => ({
       id: doc.id,
       document: {
@@ -112,9 +115,6 @@ async function measureBulkIndexing() {
       'Submitted bulk request:',
       response.data?.items?.length ? `${response.data.items.length} items` : response.data,
     );
-
-    console.log('Waiting for queue to drain...');
-    await waitForQueueToEmpty();
 
     const endTime = Date.now();
     const timeTaken = (endTime - startTime) / 1000;

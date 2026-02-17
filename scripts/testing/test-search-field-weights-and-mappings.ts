@@ -462,7 +462,7 @@ async function runTests(): Promise<void> {
 
   const listRes = await axios.get(`${API_URL}/api/indices`);
   assert(listRes.status === 200, 'List indices returns 200');
-  const indices = (listRes.data as { indices: IndexResponse[] }).indices ?? [];
+  const indices = (listRes.data as { data: IndexResponse[] }).data ?? [];
   const found = indices.find((i: IndexResponse) => i.name === INDEX_NAME);
   assert(!!found, 'Our index appears in list');
   assert(

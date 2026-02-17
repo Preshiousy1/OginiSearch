@@ -220,8 +220,8 @@ export class PersistentTermDictionaryService {
         };
       }
 
-      // Use new index-aware update method
-      await this.termPostingsRepository.update(indexAwareTerm, postings);
+      // Use atomic merge to safely add/update entries without overwriting existing data
+      await this.termPostingsRepository.atomicMerge(indexAwareTerm, postings);
     } catch (error) {
       this.logger.error(`Failed to save term postings for ${indexAwareTerm}: ${error.message}`);
       throw error;
@@ -229,28 +229,24 @@ export class PersistentTermDictionaryService {
   }
 
   /**
-   * Load term postings from MongoDB as a PostingList (for merge logic).
+   * Load term postings from MongoDB as a PostingList.
+   * IMPORTANT: Errors are NOT swallowed — they propagate to the caller.
+   * Returning null on error was the root cause of data destruction: callers would
+   * interpret null as "no existing data" and overwrite the entire posting list.
    */
   async getTermPostingsFromMongoDB(indexAwareTerm: string): Promise<PostingList | null> {
-    try {
-      const doc = await this.termPostingsRepository.findByIndexAwareTerm(indexAwareTerm);
-      if (!doc || !doc.postings || Object.keys(doc.postings).length === 0) return null;
-      const list = new SimplePostingList();
-      for (const [docId, entry] of Object.entries(doc.postings)) {
-        list.addEntry({
-          docId,
-          frequency: entry.frequency,
-          positions: entry.positions || [],
-          metadata: entry.metadata || {},
-        });
-      }
-      return list;
-    } catch (error) {
-      this.logger.warn(
-        `Failed to load term postings from MongoDB for ${indexAwareTerm}: ${error.message}`,
-      );
-      return null;
+    const doc = await this.termPostingsRepository.findByIndexAwareTerm(indexAwareTerm);
+    if (!doc || !doc.postings || Object.keys(doc.postings).length === 0) return null;
+    const list = new SimplePostingList();
+    for (const [docId, entry] of Object.entries(doc.postings)) {
+      list.addEntry({
+        docId,
+        frequency: entry.frequency,
+        positions: entry.positions || [],
+        metadata: entry.metadata || {},
+      });
     }
+    return list;
   }
 
   /**
@@ -268,16 +264,16 @@ export class PersistentTermDictionaryService {
   }
 
   /**
-   * Save term postings to MongoDB only (assumes already in RocksDB).
-   * Merges with existing MongoDB postings so partial writes (e.g. from drain) do not overwrite.
+   * Save term postings to MongoDB only.
+   * Uses atomic $set merge (no read-modify-write) so a MongoDB read failure can NEVER
+   * cause the existing posting list to be overwritten with a partial set.
+   * This was the root cause of data loss: the old read-merge-write swallowed read errors,
+   * resulting in the write replacing 46,000+ entries with just ~200 from the current batch.
    */
   async saveTermPostingsToMongoDB(indexAwareTerm: string, postingList: PostingList): Promise<void> {
     try {
-      const existing = await this.getTermPostingsFromMongoDB(indexAwareTerm);
-      const merged = this.mergePostingLists([existing, postingList]);
-
       const postings: Record<string, PostingEntry> = {};
-      for (const entry of merged.getEntries()) {
+      for (const entry of postingList.getEntries()) {
         postings[entry.docId.toString()] = {
           docId: entry.docId.toString(),
           frequency: entry.frequency,
@@ -286,7 +282,9 @@ export class PersistentTermDictionaryService {
         };
       }
 
-      await this.termPostingsRepository.update(indexAwareTerm, postings);
+      // Atomic merge: uses $set with dot notation to add/update individual entries
+      // in the appropriate chunk. Never reads first, so read failures cannot destroy data.
+      await this.termPostingsRepository.atomicMerge(indexAwareTerm, postings);
     } catch (error) {
       this.logger.error(
         `Failed to save term postings to MongoDB for ${indexAwareTerm}: ${error.message}`,

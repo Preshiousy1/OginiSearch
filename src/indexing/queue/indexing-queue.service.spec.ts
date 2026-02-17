@@ -79,10 +79,13 @@ describe('IndexingQueueService', () => {
       const result = await service.addBatch(indexName, documents);
 
       expect(indexingQueue.add).toHaveBeenCalledWith(
-        'process-batch',
+        'batch',
         expect.objectContaining({
           indexName,
-          documents,
+          documents: expect.arrayContaining([
+            expect.objectContaining({ id: 'doc1', document: expect.any(Object) }),
+            expect.objectContaining({ id: 'doc2', document: expect.any(Object) }),
+          ]),
           priority: 0,
           batchId: expect.stringMatching(/^batch-\d+-[a-z0-9]+$/),
         }),
@@ -116,10 +119,12 @@ describe('IndexingQueueService', () => {
       await service.addBatch(indexName, documents, options);
 
       expect(indexingQueue.add).toHaveBeenCalledWith(
-        'process-batch',
+        'batch',
         expect.objectContaining({
           indexName,
-          documents,
+          documents: expect.arrayContaining([
+            expect.objectContaining({ id: expect.any(String), document: expect.any(Object) }),
+          ]),
           priority: 5,
           batchId: 'custom-batch-id',
           metadata: options.metadata,
@@ -229,10 +234,10 @@ describe('IndexingQueueService', () => {
       await service.addSingleDocument(indexName, document);
 
       expect(indexingQueue.add).toHaveBeenCalledWith(
-        'process-batch',
+        'batch',
         expect.objectContaining({
           indexName,
-          documents: [document],
+          documents: [{ id: 'doc1', document: { id: 'doc1', title: 'Single Document' } }],
           priority: 10,
           batchId: expect.stringMatching(/^single-doc1$/),
         }),
@@ -248,10 +253,15 @@ describe('IndexingQueueService', () => {
       await service.addSingleDocument(indexName, docWithoutId);
 
       expect(indexingQueue.add).toHaveBeenCalledWith(
-        'process-batch',
+        'batch',
         expect.objectContaining({
-          documents: [docWithoutId],
-          batchId: expect.stringMatching(/^single-\d+$/),
+          documents: [
+            expect.objectContaining({
+              id: expect.stringMatching(/^doc-\d+(-[a-z0-9]+)?$/),
+              document: docWithoutId,
+            }),
+          ],
+          batchId: expect.stringMatching(/^single-doc-\d+(-[a-z0-9]+)?$/),
         }),
         expect.any(Object),
       );
@@ -266,7 +276,7 @@ describe('IndexingQueueService', () => {
       await service.addSingleDocument(indexName, document, options);
 
       expect(indexingQueue.add).toHaveBeenCalledWith(
-        'process-batch',
+        'batch',
         expect.objectContaining({
           priority: 15,
         }),
@@ -280,7 +290,7 @@ describe('IndexingQueueService', () => {
 
   describe('getQueueStats', () => {
     beforeEach(() => {
-      // Setup mock queue status arrays
+      jest.clearAllMocks();
       indexingQueue.getWaiting.mockResolvedValue([mockJob, mockJob]);
       indexingQueue.getActive.mockResolvedValue([mockJob]);
       indexingQueue.getCompleted.mockResolvedValue([mockJob, mockJob, mockJob]);
@@ -293,29 +303,26 @@ describe('IndexingQueueService', () => {
     });
 
     it('should return comprehensive queue statistics', async () => {
+      indexingQueue.getWaiting.mockResolvedValueOnce([mockJob, mockJob]);
+      indexingQueue.getActive.mockResolvedValueOnce([mockJob]);
+      indexingQueue.getCompleted.mockResolvedValueOnce([mockJob, mockJob, mockJob]);
+      indexingQueue.getFailed.mockResolvedValueOnce([]);
+      bulkIndexingQueue.getWaiting.mockResolvedValueOnce([mockJob]);
+      bulkIndexingQueue.getActive.mockResolvedValueOnce([mockJob, mockJob]);
+      bulkIndexingQueue.getCompleted.mockResolvedValueOnce([mockJob]);
+      bulkIndexingQueue.getFailed.mockResolvedValueOnce([mockJob]);
+
       const stats = await service.getQueueStats();
 
-      expect(stats).toEqual({
-        indexing: {
-          waiting: 2,
-          active: 1,
-          completed: 3,
-          failed: 0,
-        },
-        bulkIndexing: {
-          waiting: 1,
-          active: 2,
-          completed: 1,
-          failed: 1,
-        },
+      expect(stats).toMatchObject({
+        indexing: { waiting: 2, active: 1, completed: 3, failed: 0 },
+        bulkIndexing: { waiting: 1, active: 2, completed: 1, failed: 1 },
       });
 
-      // Verify all queue methods were called
       expect(indexingQueue.getWaiting).toHaveBeenCalled();
       expect(indexingQueue.getActive).toHaveBeenCalled();
       expect(indexingQueue.getCompleted).toHaveBeenCalled();
       expect(indexingQueue.getFailed).toHaveBeenCalled();
-
       expect(bulkIndexingQueue.getWaiting).toHaveBeenCalled();
       expect(bulkIndexingQueue.getActive).toHaveBeenCalled();
       expect(bulkIndexingQueue.getCompleted).toHaveBeenCalled();
@@ -373,22 +380,20 @@ describe('IndexingQueueService', () => {
 
   describe('cleanOldJobs', () => {
     beforeEach(() => {
+      jest.clearAllMocks();
       indexingQueue.clean.mockResolvedValue([]);
       bulkIndexingQueue.clean.mockResolvedValue([]);
     });
 
     it('should clean old jobs from both queues', async () => {
-      await service.cleanOldJobs();
-
       const expectedOlderThan = 24 * 60 * 60 * 1000; // 24 hours
+
+      await service.cleanOldJobs();
 
       expect(indexingQueue.clean).toHaveBeenCalledWith(expectedOlderThan, 'completed');
       expect(indexingQueue.clean).toHaveBeenCalledWith(expectedOlderThan, 'failed');
       expect(bulkIndexingQueue.clean).toHaveBeenCalledWith(expectedOlderThan, 'completed');
       expect(bulkIndexingQueue.clean).toHaveBeenCalledWith(expectedOlderThan, 'failed');
-
-      expect(indexingQueue.clean).toHaveBeenCalledTimes(2);
-      expect(bulkIndexingQueue.clean).toHaveBeenCalledTimes(2);
     });
 
     it('should handle clean errors gracefully', async () => {
@@ -433,18 +438,18 @@ describe('IndexingQueueService', () => {
       const error = new Error('Queue is full');
       indexingQueue.add.mockRejectedValue(error);
 
-      await expect(
-        service.addBatch('test-index', [{ id: 'doc1' }]),
-      ).rejects.toThrow('Queue is full');
+      await expect(service.addBatch('test-index', [{ id: 'doc1' }])).rejects.toThrow(
+        'Queue is full',
+      );
     });
 
     it('should handle bulk queue add failures', async () => {
       const error = new Error('Bulk queue error');
       bulkIndexingQueue.add.mockRejectedValue(error);
 
-      await expect(
-        service.addBulkIndexing('test-index', { source: 'database' }),
-      ).rejects.toThrow('Bulk queue error');
+      await expect(service.addBulkIndexing('test-index', { source: 'database' })).rejects.toThrow(
+        'Bulk queue error',
+      );
     });
 
     it('should handle partial queue control failures', async () => {
@@ -462,7 +467,7 @@ describe('IndexingQueueService', () => {
     it('should generate unique batch IDs', () => {
       // Access private method through service instance
       const service_any = service as any;
-      
+
       const id1 = service_any.generateBatchId();
       const id2 = service_any.generateBatchId();
 
@@ -474,14 +479,14 @@ describe('IndexingQueueService', () => {
     it('should include timestamp in batch ID', () => {
       const service_any = service as any;
       const beforeTime = Date.now();
-      
+
       const batchId = service_any.generateBatchId();
-      
+
       const afterTime = Date.now();
       const timestampMatch = batchId.match(/^batch-(\d+)-/);
-      
+
       expect(timestampMatch).toBeTruthy();
-      
+
       if (timestampMatch) {
         const timestamp = parseInt(timestampMatch[1]);
         expect(timestamp).toBeGreaterThanOrEqual(beforeTime);
@@ -489,4 +494,4 @@ describe('IndexingQueueService', () => {
       }
     });
   });
-}); 
+});

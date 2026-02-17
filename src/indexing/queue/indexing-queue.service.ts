@@ -2,15 +2,17 @@ import { Injectable, Logger } from '@nestjs/common';
 import { InjectQueue } from '@nestjs/bull';
 import { Queue, Job } from 'bull';
 import { ConfigService } from '@nestjs/config';
+import { INDEXING_JOB_NAMES, BULK_INDEXING_JOB_NAMES } from '../constants/queue-job-names';
 
 export interface IndexingJob {
   indexName: string;
-  documents: any[];
+  documents: Array<{ id: string; document: any }>;
   batchId: string;
   priority: number;
+  options?: { priority?: number; skipDuplicates?: boolean };
   retryCount?: number;
   metadata?: {
-    source: string;
+    source?: string;
     uploadId?: string;
     userId?: string;
     totalBatches?: number;
@@ -39,11 +41,12 @@ export class IndexingQueueService {
   ) {}
 
   /**
-   * Add a batch of documents to the indexing queue
+   * Add a batch of documents to the indexing queue.
+   * Uses the same job name and payload shape as BulkIndexingService so IndexingQueueProcessor's batch handler runs it.
    */
   async addBatch(
     indexName: string,
-    documents: any[],
+    documents: Array<{ id: string; document?: any } | any>,
     options: {
       priority?: number;
       delay?: number;
@@ -52,25 +55,37 @@ export class IndexingQueueService {
     } = {},
   ): Promise<Job<IndexingJob>> {
     const batchId = options.batchId || this.generateBatchId();
+    const priority = options.priority ?? 0;
 
+    const normalizedDocs = documents.map(doc => {
+      if (doc && typeof doc === 'object' && 'document' in doc && doc.id != null) {
+        return { id: String(doc.id), document: doc.document };
+      }
+      const id =
+        doc?.id ?? doc?.documentId ?? `doc-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+      return { id: String(id), document: doc?.document ?? doc };
+    });
+
+    // Payload shape must match BatchIndexingJob for processBatchDocuments
     const job: IndexingJob = {
       indexName,
-      documents,
+      documents: normalizedDocs,
       batchId,
-      priority: options.priority || 0,
+      priority,
+      options: { priority },
       metadata: options.metadata,
     };
 
-    return this.indexingQueue.add('process-batch', job, {
-      priority: options.priority || 0,
+    return this.indexingQueue.add(INDEXING_JOB_NAMES.BATCH, job, {
+      priority,
       delay: options.delay || 0,
       attempts: 3,
       backoff: {
         type: 'exponential',
         delay: 2000,
       },
-      removeOnComplete: 100, // Keep last 100 completed jobs
-      removeOnFail: 50, // Keep last 50 failed jobs
+      removeOnComplete: 100,
+      removeOnFail: 50,
     });
   }
 
@@ -87,7 +102,8 @@ export class IndexingQueueService {
       priority?: number;
     },
   ): Promise<Job<BulkIndexingJob>> {
-    const batchSize = options.batchSize || this.configService.get('indexing.defaultBatchSize', 500);
+    const batchSize =
+      options.batchSize ?? this.configService.get<number>('indexing.defaultBatchSize', 500) ?? 500;
 
     const job: BulkIndexingJob = {
       indexName,
@@ -98,7 +114,7 @@ export class IndexingQueueService {
       filters: options.filters,
     };
 
-    return this.bulkIndexingQueue.add('process-bulk', job, {
+    return this.bulkIndexingQueue.add(BULK_INDEXING_JOB_NAMES.PROCESS_BULK, job, {
       priority: options.priority || 5, // Higher priority for bulk jobs
       attempts: 5,
       backoff: {
@@ -116,10 +132,17 @@ export class IndexingQueueService {
     document: any,
     options: { priority?: number; delay?: number } = {},
   ): Promise<Job<IndexingJob>> {
-    return this.addBatch(indexName, [document], {
+    const normalized =
+      document && typeof document === 'object' && 'document' in document && document.id != null
+        ? { id: document.id, document: document.document }
+        : {
+            id: (document?.id ?? document?.documentId) || `doc-${Date.now()}`,
+            document: document?.document ?? document,
+          };
+    return this.addBatch(indexName, [normalized], {
       ...options,
-      priority: options.priority || 10, // High priority for single docs
-      batchId: `single-${document.id || Date.now()}`,
+      priority: options.priority ?? 10,
+      batchId: `single-${normalized.id}`,
     });
   }
 

@@ -226,6 +226,7 @@ export class SearchResponseDto {
   })
   data: {
     total: number;
+    took: number;
     maxScore: number;
     hits: Array<{
       id: string;
@@ -234,6 +235,14 @@ export class SearchResponseDto {
       source: Record<string, any>;
       highlight?: Record<string, string[]>;
     }>;
+    pagination: {
+      currentPage: number;
+      totalPages: number;
+      pageSize: number;
+      hasNext: boolean;
+      hasPrevious: boolean;
+      totalResults: number;
+    };
   };
 
   @ApiProperty({

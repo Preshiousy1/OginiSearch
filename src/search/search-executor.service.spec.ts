@@ -5,6 +5,7 @@ import { DocumentStorageService } from '../storage/document-storage/document-sto
 import { IndexStatsService } from '../index/index-stats.service';
 import { AnalyzerRegistryService } from '../analysis/analyzer-registry.service';
 import { TermPostingsRepository } from '../storage/mongodb/repositories/term-postings.repository';
+import { IndexStorageService } from '../storage/index-storage/index-storage.service';
 import { QueryExecutionPlan, TermQueryStep } from './interfaces/query-processor.interface';
 import { InMemoryTermDictionary } from 'src/index/term-dictionary';
 
@@ -147,6 +148,15 @@ describe('SearchExecutorService', () => {
         {
           provide: TermPostingsRepository,
           useValue: { findByIndexAwareTerm: jest.fn().mockResolvedValue(null) },
+        },
+        {
+          provide: IndexStorageService,
+          useValue: {
+            getIndex: jest.fn(),
+            listIndices: jest.fn(),
+            getProcessedDocument: jest.fn().mockResolvedValue(null),
+            termPostingsRepository: { findByIndexAwareTerm: jest.fn().mockResolvedValue(null) },
+          },
         },
       ],
     }).compile();
@@ -292,6 +302,17 @@ describe('SearchExecutorService', () => {
             },
           },
           { provide: TermPostingsRepository, useValue: mockTermPostingsRepo },
+          {
+            provide: IndexStorageService,
+            useValue: {
+              getIndex: jest.fn(),
+              listIndices: jest.fn(),
+              getProcessedDocument: jest.fn().mockImplementation(async (_index: string, id: string) => ({
+                source: { name: 'Limited', documentId: id },
+              })),
+              termPostingsRepository: { findByIndexAwareTerm: jest.fn().mockResolvedValue(null) },
+            },
+          },
         ],
       }).compile();
 

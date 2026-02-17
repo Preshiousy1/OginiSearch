@@ -3,6 +3,7 @@ import { InjectQueue } from '@nestjs/bull';
 import { Queue } from 'bull';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { BulkOperation } from '../interfaces/bulk-operation.interface';
+import { PERSISTENCE_JOB_NAMES } from '../constants/queue-job-names';
 
 /**
  * Tracks multi-batch bulk indexing operations and coordinates their completion.
@@ -42,11 +43,22 @@ export class BulkOperationTrackerService implements OnModuleInit {
     try {
       const keys = await this.redisClient.keys(`${this.REDIS_KEY_PREFIX}*`);
       let restored = 0;
+      // Only operation keys are strings; bulk-op:dirty:* are Redis lists - GET would throw WRONGTYPE
+      const operationKeys = keys.filter((k: string) => !k.startsWith(this.DIRTY_LIST_PREFIX));
 
-      for (const key of keys) {
+      for (const key of operationKeys) {
         const data = await this.redisClient.get(key);
         if (data) {
-          const operation: BulkOperation = JSON.parse(data);
+          const parsed = JSON.parse(data);
+          // Restore dates and ensure persistenceJobsEnqueued is an array
+          const operation: BulkOperation = {
+            ...parsed,
+            createdAt: new Date(parsed.createdAt),
+            updatedAt: parsed.updatedAt ? new Date(parsed.updatedAt) : undefined,
+            persistenceJobsEnqueued: Array.isArray(parsed.persistenceJobsEnqueued)
+              ? parsed.persistenceJobsEnqueued
+              : [],
+          };
           // Only restore active operations
           if (operation.status === 'indexing' || operation.status === 'persisting') {
             this.operations.set(operation.id, operation);
@@ -60,7 +72,7 @@ export class BulkOperationTrackerService implements OnModuleInit {
         for (const op of this.operations.values()) {
           if (op.status === 'indexing' || op.status === 'persisting') {
             await this.persistenceQueue.add(
-              'drain-dirty-list',
+              PERSISTENCE_JOB_NAMES.DRAIN_DIRTY_LIST,
               { bulkOpId: op.id, indexName: op.indexName },
               { priority: 10, removeOnComplete: 50, removeOnFail: false },
             );
@@ -79,10 +91,19 @@ export class BulkOperationTrackerService implements OnModuleInit {
   private async saveToRedis(operation: BulkOperation): Promise<void> {
     try {
       const key = `${this.REDIS_KEY_PREFIX}${operation.id}`;
+      // Convert Set to array for JSON serialization
+      const serializable = {
+        ...operation,
+        persistenceJobsEnqueued: Array.isArray(operation.persistenceJobsEnqueued)
+          ? operation.persistenceJobsEnqueued
+          : Array.from(operation.persistenceJobsEnqueued || []),
+        createdAt: operation.createdAt.toISOString(),
+        updatedAt: operation.updatedAt?.toISOString(),
+      };
       await this.redisClient.setex(
         key,
         86400 * 7, // 7 days TTL
-        JSON.stringify(operation),
+        JSON.stringify(serializable),
       );
     } catch (error) {
       this.logger.warn(`Failed to save operation to Redis: ${error.message}`);
@@ -114,6 +135,7 @@ export class BulkOperationTrackerService implements OnModuleInit {
       completedBatches: 0,
       persistedBatches: 0,
       batchIds,
+      persistenceJobsEnqueued: [], // Track which batches enqueued persistence jobs
       createdAt: new Date(),
       status: 'indexing',
       totalDocuments,
@@ -121,6 +143,10 @@ export class BulkOperationTrackerService implements OnModuleInit {
     };
 
     this.operations.set(bulkOpId, operation);
+    // Persist to Redis immediately so batches that complete after restart can find the bulk
+    this.saveToRedis(operation).catch(err =>
+      this.logger.warn(`Failed to persist new bulk op ${bulkOpId} to Redis: ${err?.message}`),
+    );
 
     this.logger.log(
       `Created bulk operation ${bulkOpId}: ${totalBatches} batches, ${
@@ -189,11 +215,20 @@ export class BulkOperationTrackerService implements OnModuleInit {
    * Mark a batch as completed (indexing finished).
    * When all batches are indexed, emits 'all-batches-indexed' for logging only.
    * Persistence worker runs concurrently and drains the dirty list; it does not wait for this.
+   * If the bulk op is not in memory (e.g. after restart or eviction), tries to load from Redis.
+   * If still not found, logs a warning and returns null instead of throwing so the batch is not
+   * incorrectly reported as "persistence job NOT enqueued" (payload and job are already stored).
    */
-  markBatchIndexed(bulkOpId: string, batchId: string): BulkOperation {
-    const op = this.operations.get(bulkOpId);
+  async markBatchIndexed(bulkOpId: string, batchId: string): Promise<BulkOperation | null> {
+    let op = this.operations.get(bulkOpId);
     if (!op) {
-      throw new Error(`Bulk operation ${bulkOpId} not found`);
+      op = await this.getOrLoadOperation(bulkOpId);
+    }
+    if (!op) {
+      this.logger.warn(
+        `Bulk operation ${bulkOpId} not found (in memory or Redis). Batch ${batchId} was indexed and persistence job was enqueued; tracking for this bulk will be incomplete.`,
+      );
+      return null;
     }
 
     op.completedBatches++;
@@ -211,6 +246,22 @@ export class BulkOperationTrackerService implements OnModuleInit {
       this.logger.log(
         `All ${op.totalBatches} batches indexed for ${op.indexName} (${bulkOpId}) in ${indexingDuration}ms. Persistence worker continues draining dirty list.`,
       );
+      // Verify all batches have persistence jobs enqueued
+      const verification = this.verifyPersistenceJobsEnqueued(bulkOpId);
+      if (!verification.allEnqueued) {
+        this.logger.error(
+          `⚠️ CRITICAL: ${
+            verification.missingBatches.length
+          } batches missing persistence jobs for ${bulkOpId}: ${verification.missingBatches.join(
+            ', ',
+          )}. ` +
+            `These batches will not be persisted! Expected ${verification.totalBatches}, got ${verification.enqueuedCount} persistence jobs.`,
+        );
+      } else {
+        this.logger.log(
+          `✅ Verified: All ${verification.totalBatches} batches have persistence jobs enqueued for ${bulkOpId}`,
+        );
+      }
       this.eventEmitter.emit('all-batches-indexed', {
         bulkOpId: op.id,
         indexName: op.indexName,
@@ -225,13 +276,84 @@ export class BulkOperationTrackerService implements OnModuleInit {
   }
 
   /**
-   * Mark a batch as persisted (MongoDB writes completed).
-   * If all batches are persisted, emits 'bulk-operation-completed' event.
+   * Mark that a persistence job was enqueued for a batch (for verification).
+   * If bulk is not in memory, tries to load from Redis so tracking stays accurate after restart.
    */
-  markBatchPersisted(bulkOpId: string, batchId: string): BulkOperation {
+  async markPersistenceJobEnqueued(bulkOpId: string, batchId: string): Promise<void> {
+    let op = this.operations.get(bulkOpId);
+    if (!op) {
+      op = await this.getOrLoadOperation(bulkOpId);
+    }
+    if (!op) {
+      this.logger.warn(
+        `Cannot mark persistence job enqueued: bulk operation ${bulkOpId} not found (batch ${batchId} persistence job was still enqueued).`,
+      );
+      return;
+    }
+    if (!op.persistenceJobsEnqueued) {
+      op.persistenceJobsEnqueued = [];
+    }
+    // Convert Set to array if needed, or ensure it's an array
+    const enqueued = Array.isArray(op.persistenceJobsEnqueued)
+      ? op.persistenceJobsEnqueued
+      : Array.from(op.persistenceJobsEnqueued || []);
+    if (!enqueued.includes(batchId)) {
+      enqueued.push(batchId);
+      op.persistenceJobsEnqueued = enqueued;
+      op.updatedAt = new Date();
+      this.saveToRedis(op);
+      this.logger.debug(
+        `Persistence job enqueued for batch ${batchId} (${enqueued.length}/${op.totalBatches} batches have persistence jobs)`,
+      );
+    }
+  }
+
+  /**
+   * Verify that all batches have persistence jobs enqueued.
+   * Returns missing batch IDs if any.
+   */
+  verifyPersistenceJobsEnqueued(bulkOpId: string): {
+    allEnqueued: boolean;
+    missingBatches: string[];
+    enqueuedCount: number;
+    totalBatches: number;
+  } {
     const op = this.operations.get(bulkOpId);
     if (!op) {
-      throw new Error(`Bulk operation ${bulkOpId} not found`);
+      return {
+        allEnqueued: false,
+        missingBatches: [],
+        enqueuedCount: 0,
+        totalBatches: 0,
+      };
+    }
+    const enqueued = Array.isArray(op.persistenceJobsEnqueued)
+      ? new Set(op.persistenceJobsEnqueued)
+      : op.persistenceJobsEnqueued || new Set<string>();
+    const missingBatches = op.batchIds.filter(batchId => !enqueued.has(batchId));
+    return {
+      allEnqueued: missingBatches.length === 0,
+      missingBatches,
+      enqueuedCount: enqueued.size,
+      totalBatches: op.totalBatches,
+    };
+  }
+
+  /**
+   * Mark a batch as persisted (MongoDB writes completed).
+   * If all batches are persisted, emits 'bulk-operation-completed' event.
+   * If bulk is not in memory (e.g. after restart), tries to load from Redis.
+   */
+  async markBatchPersisted(bulkOpId: string, batchId: string): Promise<BulkOperation | null> {
+    let op = this.operations.get(bulkOpId);
+    if (!op) {
+      op = await this.getOrLoadOperation(bulkOpId);
+    }
+    if (!op) {
+      this.logger.warn(
+        `Bulk operation ${bulkOpId} not found when marking batch ${batchId} persisted; batch was persisted to MongoDB.`,
+      );
+      return null;
     }
 
     // Already completed (e.g. from a previous run or duplicate event) – don't increment past total
@@ -323,10 +445,82 @@ export class BulkOperationTrackerService implements OnModuleInit {
   }
 
   /**
-   * Get a bulk operation by ID
+   * Get a bulk operation by ID (memory only).
    */
   getOperation(bulkOpId: string): BulkOperation | undefined {
     return this.operations.get(bulkOpId);
+  }
+
+  /**
+   * Load a single bulk operation from Redis into memory if not already present.
+   * Used when a batch completes but the bulk was evicted or process restarted.
+   */
+  async getOrLoadOperation(bulkOpId: string): Promise<BulkOperation | undefined> {
+    let op = this.operations.get(bulkOpId);
+    if (op) return op;
+    try {
+      const key = `${this.REDIS_KEY_PREFIX}${bulkOpId}`;
+      const data = await this.redisClient.get(key);
+      if (!data) return undefined;
+      const parsed = JSON.parse(data);
+      op = {
+        ...parsed,
+        createdAt: new Date(parsed.createdAt),
+        updatedAt: parsed.updatedAt ? new Date(parsed.updatedAt) : undefined,
+        persistenceJobsEnqueued: Array.isArray(parsed.persistenceJobsEnqueued)
+          ? parsed.persistenceJobsEnqueued
+          : [],
+      };
+      this.operations.set(bulkOpId, op);
+      this.logger.debug(`Restored bulk operation ${bulkOpId} from Redis`);
+      return op;
+    } catch (error) {
+      this.logger.warn(`Failed to load bulk operation ${bulkOpId} from Redis: ${error?.message}`);
+      return undefined;
+    }
+  }
+
+  /**
+   * Get all operations for a specific index (from in-memory cache and Redis).
+   * Useful for verification and debugging.
+   */
+  async getOperationsByIndexName(indexName: string): Promise<BulkOperation[]> {
+    const fromMemory = Array.from(this.operations.values()).filter(
+      op => op.indexName === indexName,
+    );
+    // Also check Redis for operations not in memory (e.g. from previous runs)
+    try {
+      const keys = await this.redisClient.keys(`${this.REDIS_KEY_PREFIX}*`);
+      // Only operation keys are strings; bulk-op:dirty:* are Redis lists - GET would throw WRONGTYPE
+      const operationKeys = keys.filter((k: string) => !k.startsWith(this.DIRTY_LIST_PREFIX));
+      const fromRedis: BulkOperation[] = [];
+      for (const key of operationKeys) {
+        const data = await this.redisClient.get(key);
+        if (data) {
+          const parsed = JSON.parse(data);
+          if (parsed.indexName === indexName) {
+            const operation: BulkOperation = {
+              ...parsed,
+              createdAt: new Date(parsed.createdAt),
+              updatedAt: parsed.updatedAt ? new Date(parsed.updatedAt) : undefined,
+              persistenceJobsEnqueued: Array.isArray(parsed.persistenceJobsEnqueued)
+                ? parsed.persistenceJobsEnqueued
+                : [],
+            };
+            // Check if already in memory (avoid duplicates)
+            if (!this.operations.has(operation.id)) {
+              fromRedis.push(operation);
+            }
+          }
+        }
+      }
+      return [...fromMemory, ...fromRedis].sort(
+        (a, b) => b.createdAt.getTime() - a.createdAt.getTime(),
+      );
+    } catch (error) {
+      this.logger.warn(`Failed to load operations from Redis: ${error.message}`);
+      return fromMemory;
+    }
   }
 
   /**

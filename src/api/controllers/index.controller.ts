@@ -199,8 +199,9 @@ export class IndexController {
   })
   async listIndices(@Query('status') status?: string): Promise<IndexListResponseDto> {
     const indices = await this.indexService.listIndices(status);
+    // Driver (OginiClient) expects { data: [...] } for listIndices (see performDetailedHealthChecks)
     return {
-      indices,
+      data: indices,
       total: indices.length,
     };
   }

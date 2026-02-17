@@ -49,6 +49,8 @@ export class SearchExecutorService {
 
   // Cache for field boost values per index (to avoid repeated lookups)
   private fieldBoostCache: Map<string, Record<string, number>> = new Map();
+  // In-flight promise per index to prevent cache stampede (concurrent getFieldBoosts for same index)
+  private fieldBoostLoadPromise: Map<string, Promise<Record<string, number>>> = new Map();
 
   /**
    * Clear cached field boosts for an index (or all). Call after index mappings are updated
@@ -57,9 +59,11 @@ export class SearchExecutorService {
   clearFieldBoostCache(indexName?: string): void {
     if (indexName) {
       this.fieldBoostCache.delete(indexName);
+      this.fieldBoostLoadPromise.delete(indexName);
       this.logger.debug(`Cleared field boost cache for index: ${indexName}`);
     } else {
       this.fieldBoostCache.clear();
+      this.fieldBoostLoadPromise.clear();
       this.logger.debug('Cleared all field boost cache');
     }
   }
@@ -81,8 +85,14 @@ export class SearchExecutorService {
   ): Promise<SearchResult> {
     this.logger.debug(`Executing query plan for index: ${indexName}`);
 
+    // Preload field boosts once so parallel term scoring doesn't trigger duplicate storage lookups
+    await this.getFieldBoosts(indexName);
+
     // Default values for search options
     const { from = 0, size = 10, sort, filter } = options;
+    if (filter != null && Object.keys(filter).length > 0) {
+      this.logger.debug(`Search options include filter: ${JSON.stringify(filter)}`);
+    }
 
     // Execute the query plan to get matching document IDs with scores
     const matches = (await this.executeQueryPlan(indexName, executionPlan)).map(match => ({
@@ -156,47 +166,61 @@ export class SearchExecutorService {
   }
 
   /**
-   * Get terms for a specific index from MongoDB storage
-   * REDIS-RESILIENT: Falls back to MongoDB if Redis/memory fails
+   * Get terms for a specific index from MongoDB storage.
+   * When valuePrefix is set (e.g. "car" for wildcard "car*"), only terms whose value part
+   * starts with that prefix are returned — avoids loading 200k+ terms for one wildcard.
+   * REDIS-RESILIENT: Falls back to MongoDB if Redis/memory fails.
    */
-  private async getTermsByIndex(indexName: string): Promise<string[]> {
+  private async getTermsByIndex(indexName: string, valuePrefix?: string): Promise<string[]> {
     try {
-      // First try to get terms from in-memory cache (fast path)
-      // This will fail gracefully if Redis is down
       let memoryTerms: string[] = [];
       try {
         memoryTerms = this.termDictionary.getTermsForIndex(indexName);
         this.logger.debug(`Found ${memoryTerms.length} terms in memory for index: ${indexName}`);
-        if (memoryTerms.length > 0) {
-          this.logger.debug(`Sample memory terms: ${memoryTerms.slice(0, 5).join(', ')}`);
+        if (memoryTerms.length > 0 && !valuePrefix) {
+          return memoryTerms;
+        }
+        if (memoryTerms.length > 0 && valuePrefix) {
+          const prefix = `${indexName}:`;
+          const re = new RegExp(
+            `^${prefix}[^:]+:${valuePrefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`,
+          );
+          const filtered = memoryTerms.filter(t => re.test(t));
+          this.logger.debug(
+            `Filtered in-memory terms by prefix "${valuePrefix}": ${filtered.length}/${memoryTerms.length}`,
+          );
+          // Only use in-memory result if we found matches; otherwise fall back to MongoDB.
+          // In-memory may have a subset of terms (e.g. "car*" from a prior query); a "job*"
+          // search would get 0 matches and must query MongoDB for job-prefixed terms.
+          if (filtered.length > 0) {
+            return filtered;
+          }
         }
       } catch (error) {
         this.logger.warn(`Memory term lookup failed for ${indexName}: ${error.message}`);
       }
 
-      if (memoryTerms.length > 0) {
-        return memoryTerms;
-      }
-
-      // Fallback to MongoDB if no terms in memory (ALWAYS works even if Redis is down)
-      this.logger.debug(`Falling back to MongoDB for terms in index: ${indexName}`);
-      const termPostings = await this.termPostingsRepository.findByIndex(indexName);
-      // Chunked model: multiple docs per term; dedupe by term
-      const mongoTerms = [...new Set(termPostings.map(tp => tp.term))];
+      this.logger.debug(
+        `Falling back to MongoDB for terms in index and value prefix: ${indexName}${
+          valuePrefix ? ` (valuePrefix=${valuePrefix})` : ''
+        }`,
+      );
+      const mongoTerms = valuePrefix
+        ? await this.termPostingsRepository.findTermKeysByIndexAndValuePrefix(
+            indexName,
+            valuePrefix,
+          )
+        : [
+            ...new Set(
+              (await this.termPostingsRepository.findByIndex(indexName)).map(tp => tp.term),
+            ),
+          ];
       this.logger.debug(
         `Found ${mongoTerms.length} index-aware terms in MongoDB for index: ${indexName}`,
       );
-
-      if (mongoTerms.length > 0) {
+      if (mongoTerms.length > 0 && mongoTerms.length <= 10) {
         this.logger.debug(`Sample MongoDB terms: ${mongoTerms.slice(0, 5).join(', ')}`);
-        // Also check for network terms specifically
-        const networkTerms = mongoTerms.filter(term => term.includes('network'));
-        this.logger.debug(`Network-related terms found: ${networkTerms.length}`);
-        if (networkTerms.length > 0) {
-          this.logger.debug(`Sample network terms: ${networkTerms.slice(0, 3).join(', ')}`);
-        }
       }
-
       return mongoTerms;
     } catch (error) {
       this.logger.error(`Failed to get terms for index ${indexName}: ${error.message}`);
@@ -405,57 +429,63 @@ export class SearchExecutorService {
     const { pattern, field, compiledPattern } = step;
 
     this.logger.debug(`Executing wildcard query: ${pattern} on field: ${field}`);
-    this.logger.debug(`Compiled pattern: ${compiledPattern}`);
-    this.logger.debug(`Pattern source: ${compiledPattern.source}, flags: ${compiledPattern.flags}`);
 
-    // Test the pattern against some sample values
-    const testValues = ['network', 'networking', 'net', 'networks', 'node'];
-    this.logger.debug(`Testing pattern against samples:`);
-    testValues.forEach(val => {
-      const matches = compiledPattern.test(val);
-      this.logger.debug(`  "${val}" matches: ${matches}`);
-    });
-
-    // Extract the base pattern without wildcards for prefix matching
+    // Extract the base pattern without wildcards (e.g. "smart*" -> "smart")
     const basePattern = pattern.replace(/[*?]/g, '');
 
-    // For simple prefix wildcards like "video*", use the fallback mechanism directly
+    // For simple trailing-* wildcards (e.g. "smart*"), try keyword search on the prefix first
+    // only when a specific field is targeted. For field _all, terms are stored per-field
+    // (e.g. listings:name:car, listings:description:car), so a single lookup for "car" only
+    // finds one kind of match; we must run full expansion to get all fields.
     if (pattern.endsWith('*') && !pattern.includes('?') && basePattern.length > 0) {
-      this.logger.debug(`Using direct fallback approach for simple prefix wildcard: ${pattern}`);
+      const isAllFields = !field || field === '_all';
+      if (!isAllFields) {
+        const fieldTerm = `${field}:${basePattern}`;
+        const prefixResults = await this.getIndexAwareTermPostings(indexName, fieldTerm, true);
+        if (prefixResults.length > 0) {
+          let hasAny = false;
+          const scores: Array<{ id: string; score: number; field?: string }> = [];
+          for (const { term, postingList } of prefixResults) {
+            if (postingList && postingList.size() > 0) {
+              hasAny = true;
+              scores.push(...(await this.calculateScores(indexName, postingList, term)));
+            }
+          }
+          if (hasAny && scores.length > 0) {
+            this.logger.debug(
+              `Wildcard ${pattern}: prefix keyword "${fieldTerm}" returned ${scores.length} hits; skipping full term scan`,
+            );
+            return await this.mergeWildcardScores(indexName, scores);
+          }
+        }
+        this.logger.debug(
+          `Wildcard ${pattern}: no results for prefix "${basePattern}" on field ${field}; scanning terms`,
+        );
+      } else {
+        this.logger.debug(
+          `Wildcard ${pattern}: field _all; scanning terms for pattern (no single-term shortcut)`,
+        );
+      }
 
-      // Get all terms from the index (index-aware)
-      const allTerms = await this.getTermsByIndex(indexName);
-      this.logger.debug(`Total terms available in index ${indexName}: ${allTerms.length}`);
+      // Use value prefix when possible so MongoDB returns only matching terms (~380 vs 228k)
+      const allTerms = await this.getTermsByIndex(indexName, basePattern);
+      this.logger.debug(`Terms for pattern ${pattern}: ${allTerms.length}`);
 
-      // Filter terms to match the field and pattern using index-aware format
+      // Filter without per-term logging (was causing thousands of debug lines and slowdown)
       const matchingTerms = allTerms.filter(term => {
-        // Parse index-aware term: index:field:termValue
         const parts = term.split(':');
-        if (parts.length < 3) return false; // Should be index:field:term format
-
+        if (parts.length < 3) return false;
         const termIndexName = parts[0];
         const termField = parts[1];
-        const termValue = parts.slice(2).join(':'); // Handle terms with colons
-
-        // Check if it's for the correct index
+        const termValue = parts.slice(2).join(':');
         if (termIndexName !== indexName) return false;
-
-        // Check field match (if field is specified and not _all)
         const fieldMatches = !field || field === '_all' || termField === field;
         if (!fieldMatches) return false;
-
-        // Check pattern match
-        const patternMatches = termValue && compiledPattern.test(termValue);
-
-        this.logger.debug(
-          `Term: ${term}, Field: ${termField}, Value: ${termValue}, FieldMatch: ${fieldMatches}, PatternMatch: ${patternMatches}`,
-        );
-
-        return patternMatches;
+        return !!(termValue && compiledPattern.test(termValue));
       });
 
       this.logger.debug(
-        `Found ${matchingTerms.length} matching terms for pattern: ${pattern} on field: ${field} in index: ${indexName}`,
+        `Found ${matchingTerms.length} matching terms for pattern: ${pattern} on field: ${field}`,
       );
 
       if (matchingTerms.length === 0) {
@@ -465,38 +495,23 @@ export class SearchExecutorService {
         return [];
       }
 
-      // Get posting lists for all matching terms using index-aware lookup
+      // Get posting lists for matching terms (no per-term logging to avoid slowdown)
       const results = await Promise.all(
         matchingTerms.map(async fullTerm => {
-          // Extract field:term from index-aware term (index:field:term -> field:term)
           const parts = fullTerm.split(':');
-          const fieldTerm = parts.slice(1).join(':'); // Remove index prefix
-
-          // Try index-aware lookup first
+          const fieldTerm = parts.slice(1).join(':');
           let postingList = await this.termDictionary.getPostingListForIndex(
             indexName,
             fieldTerm,
-            false, // isIndexAware = false (we'll let it create the index-aware term)
+            false,
           );
-
-          // If not found in memory or empty, try MongoDB directly using full index-aware term
           if (!postingList || postingList.size() === 0) {
             postingList = await this.getPostingListByIndexAwareTerm(fullTerm);
           }
-
-          if (!postingList) {
-            this.logger.debug(`No posting list found for term: ${fullTerm}`);
-            return [];
-          }
-
-          this.logger.debug(
-            `Found posting list for term: ${fullTerm} with ${postingList.size()} documents`,
-          );
+          if (!postingList) return [];
           return this.calculateScores(indexName, postingList, fullTerm);
         }),
       );
-
-      // Merge and deduplicate results (results is already Promise.all, so await it)
       const allScores = (await Promise.all(results)).flat();
       return await this.mergeWildcardScores(indexName, allScores);
     }
@@ -567,56 +582,58 @@ export class SearchExecutorService {
   }
 
   /**
-   * Get field boost values from index mappings (cached)
+   * Get field boost values from index mappings (cached).
+   * Uses single-flight: concurrent calls for the same index share one load to avoid N duplicate
+   * storage round-trips (was causing ~23s search when 7 terms each triggered getIndex).
    */
   private async getFieldBoosts(indexName: string): Promise<Record<string, number>> {
-    // Check cache first
-    if (this.fieldBoostCache.has(indexName)) {
-      const cached = this.fieldBoostCache.get(indexName);
-      if (cached) {
-        return cached;
-      }
+    // 1. Return sync cache if present
+    const cached = this.fieldBoostCache.get(indexName);
+    if (cached) {
+      return cached;
     }
 
+    // 2. Join in-flight load for this index (avoids cache stampede)
+    let loadPromise = this.fieldBoostLoadPromise.get(indexName);
+    if (!loadPromise) {
+      loadPromise = this.loadFieldBoostsIntoCache(indexName);
+      this.fieldBoostLoadPromise.set(indexName, loadPromise);
+      loadPromise.finally(() => this.fieldBoostLoadPromise.delete(indexName));
+    }
+    return loadPromise;
+  }
+
+  /**
+   * Load field boosts from storage and cache. Called once per index per search (single-flight).
+   */
+  private async loadFieldBoostsIntoCache(indexName: string): Promise<Record<string, number>> {
     try {
-      // Get index mappings
       const index = await this.indexStorage.getIndex(indexName);
       const fieldBoosts: Record<string, number> = {};
 
       if (index?.mappings?.properties) {
-        // Extract boost values from field mappings
         const extractBoost = (mapping: FieldMapping, fieldPath: string): void => {
-          // Store boost for this field (default 1.0 if not specified)
           fieldBoosts[fieldPath] = mapping.boost !== undefined ? mapping.boost : 1.0;
-
-          // Handle nested/multi-fields
           if (mapping.fields) {
             for (const [nestedFieldName, nestedMapping] of Object.entries(mapping.fields)) {
-              const nestedFieldPath = `${fieldPath}.${nestedFieldName}`;
-              extractBoost(nestedMapping, nestedFieldPath);
+              extractBoost(nestedMapping, `${fieldPath}.${nestedFieldName}`);
             }
           }
         };
-
-        // Process all top-level fields
         for (const [fieldName, fieldMapping] of Object.entries(index.mappings.properties)) {
           extractBoost(fieldMapping, fieldName);
         }
       }
 
-      // Cache the result
       this.fieldBoostCache.set(indexName, fieldBoosts);
-
       if (Object.keys(fieldBoosts).length > 0) {
         this.logger.debug(
           `Loaded field boosts for index ${indexName}: ${JSON.stringify(fieldBoosts)}`,
         );
       }
-
       return fieldBoosts;
     } catch (error) {
       this.logger.warn(`Failed to load field boosts for index ${indexName}: ${error.message}`);
-      // Return empty object (all fields will use default boost of 1.0)
       return {};
     }
   }
@@ -879,14 +896,39 @@ export class SearchExecutorService {
     return [...matches].sort((a, b) => b.score - a.score);
   }
 
+  /**
+   * Check if a document field value matches a term filter value.
+   * Supports: exact match, boolean coercion (0/1 <-> false/true), array includes,
+   * and (for strings) case-insensitive substring match.
+   */
+  private termFilterMatches(fieldValue: any, filterValue: any): boolean {
+    if (Array.isArray(fieldValue)) {
+      return fieldValue.includes(filterValue);
+    }
+    if (fieldValue === filterValue) {
+      return true;
+    }
+    // Boolean coercion: Laravel/MySQL often store booleans as 0/1
+    if (typeof filterValue === 'boolean') {
+      const normalized = fieldValue === 1 || fieldValue === '1' || fieldValue === true;
+      return normalized === filterValue;
+    }
+    // String contains: allow filter "Oyo" to match "Oyo State", "Ibadan, Oyo", etc.
+    if (typeof fieldValue === 'string' && typeof filterValue === 'string') {
+      return fieldValue.toLowerCase().includes(filterValue.toLowerCase());
+    }
+    return false;
+  }
+
   private async applyFilters(
     matches: SearchMatch[],
     filter: Record<string, any>,
     indexName: string,
   ): Promise<SearchMatch[]> {
-    if (!filter || !matches.length) {
+    if (!filter || typeof filter !== 'object' || Object.keys(filter).length === 0) {
       return matches;
     }
+    this.logger.debug(`Applying filter to ${matches.length} matches: ${JSON.stringify(filter)}`);
 
     // Get documents for filtering
     const documents = await this.fetchDocuments(
@@ -894,26 +936,62 @@ export class SearchExecutorService {
       matches.map(m => m.id),
     );
 
-    // Apply term filter
-    if (filter.term) {
-      const { field, value } = filter.term;
-      return matches.filter(match => {
-        const doc = documents[match.id];
-        if (!doc) return false;
-
-        const fieldValue = doc[field];
-
-        // Handle array fields (like categories)
-        if (Array.isArray(fieldValue)) {
-          return fieldValue.includes(value);
-        }
-
-        // Handle scalar fields
-        return fieldValue === value;
-      });
+    // Supported: filter.bool.must (array of { term: { field, value } }) — AND all clauses
+    if (filter.bool?.must && Array.isArray(filter.bool.must)) {
+      const clauses = filter.bool.must.filter(
+        (c: any) => c && c.term && c.term.field != null,
+      ) as Array<{ term: { field: string; value: any } }>;
+      if (clauses.length > 0) {
+        let debugLogged = false;
+        const filtered = matches.filter(match => {
+          const doc = documents[match.id];
+          if (!doc) return false;
+          for (const { term } of clauses) {
+            const { field, value } = term;
+            const fieldValue = doc[field];
+            const ok = this.termFilterMatches(fieldValue, value);
+            if (!ok) {
+              // Log first failure to help debug (e.g. 26->0 matches)
+              if (!debugLogged) {
+                this.logger.debug(
+                  `Filter debug: doc ${match.id} failed on ${field}=${JSON.stringify(value)} ` +
+                    `(got: ${JSON.stringify(fieldValue)}, type: ${typeof fieldValue})`,
+                );
+                debugLogged = true;
+              }
+              return false;
+            }
+          }
+          return true;
+        });
+        this.logger.debug(
+          `Filter.bool.must(${clauses.length} terms): ${matches.length} -> ${filtered.length} matches`,
+        );
+        return filtered;
+      }
     }
 
-    // Add support for other filter types here (range, exists, etc.)
+    // Single term filter: { term: { field: string, value: any } }
+    if (filter.term && filter.term.field != null) {
+      const { field, value } = filter.term;
+      const filtered = matches.filter(match => {
+        const doc = documents[match.id];
+        if (!doc) return false;
+        const fieldValue = doc[field];
+        return this.termFilterMatches(fieldValue, value);
+      });
+      this.logger.debug(
+        `Filter.term(${field}=${value}): ${matches.length} -> ${filtered.length} matches`,
+      );
+      return filtered;
+    }
+
+    if (Object.keys(filter).length > 0) {
+      const keys = Object.keys(filter).join(', ');
+      this.logger.debug(
+        `Filter present but no supported shape (filter.term or filter.bool.must). Keys: ${keys}`,
+      );
+    }
     return matches;
   }
 

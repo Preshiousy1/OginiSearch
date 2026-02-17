@@ -13,6 +13,7 @@ import { PersistenceQueueProcessor } from './queue/persistence-queue.processor';
 import { DocumentModule } from '../document/document.module';
 import { IndexModule } from '../index/index.module';
 import { StorageModule } from 'src/storage/storage.module';
+import { MongoDBModule } from 'src/storage/mongodb/mongodb.module';
 
 @Module({
   imports: [
@@ -35,10 +36,11 @@ import { StorageModule } from 'src/storage/storage.module';
               delay: 2000,
             },
           },
-          // Note: @Process decorator concurrency takes precedence, but set here for consistency
+          // Note: @Process decorator concurrency takes precedence, but set here for consistency.
+          // Longer stalledInterval (2 min) reduces "Missing lock for job X finished" on long batch jobs.
           settings: {
             maxStalledCount: 1,
-            stalledInterval: 30000,
+            stalledInterval: 120000,
           },
         };
       },
@@ -55,7 +57,7 @@ import { StorageModule } from 'src/storage/storage.module';
             port: configService.get('REDIS_PORT', 6379),
           },
           defaultJobOptions: {
-            removeOnComplete: 50,
+            removeOnComplete: false, // Keep all completed jobs for tracking (was 50, causing stats to show only last 50)
             removeOnFail: false, // Keep failed jobs for debugging
             attempts: 5, // More retries for persistence
             backoff: {
@@ -76,6 +78,7 @@ import { StorageModule } from 'src/storage/storage.module';
     forwardRef(() => DocumentModule),
     IndexModule,
     StorageModule,
+    MongoDBModule, // PersistencePayloadRepository for out-of-band payload store (avoids Redis eviction)
   ],
   providers: [
     IndexingService,
@@ -93,6 +96,7 @@ import { StorageModule } from 'src/storage/storage.module';
     IndexingWorkerService,
     DocumentProcessorPool,
     BulkOperationTrackerService,
+    PersistenceQueueProcessor, // for drain-stale-pending API
   ],
 })
 export class IndexingModule {}

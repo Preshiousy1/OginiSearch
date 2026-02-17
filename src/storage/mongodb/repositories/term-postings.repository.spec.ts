@@ -105,14 +105,16 @@ describe('TermPostingsRepository (chunked)', () => {
         lean: jest.fn().mockReturnThis(),
         exec: jest.fn().mockResolvedValue([]),
       });
+      // update(): first find() is toDelete (.select().lean().exec()); second find() is inside findByIndexAwareTerm (.sort().lean().exec())
       (mockModel.find as jest.Mock)
         .mockReturnValueOnce({
           sort: jest.fn().mockReturnThis(),
+          select: jest.fn().mockReturnThis(),
           lean: jest.fn().mockReturnThis(),
           exec: jest.fn().mockResolvedValue([]),
         })
         .mockReturnValueOnce({
-          select: jest.fn().mockReturnThis(),
+          sort: jest.fn().mockReturnThis(),
           lean: jest.fn().mockReturnThis(),
           exec: jest.fn().mockResolvedValue([]),
         });

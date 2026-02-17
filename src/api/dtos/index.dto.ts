@@ -185,7 +185,7 @@ export class IndexResponseDto {
 
 export class IndexListResponseDto {
   @ApiProperty({
-    name: 'indices',
+    name: 'data',
     example: [
       {
         name: 'my-index',
@@ -196,9 +196,9 @@ export class IndexListResponseDto {
         status: 'open',
       },
     ],
-    description: 'List of indices',
+    description: 'List of indices (driver expects this key)',
   })
-  indices: IndexResponseDto[];
+  data: IndexResponseDto[];
 
   @ApiProperty({
     name: 'total',

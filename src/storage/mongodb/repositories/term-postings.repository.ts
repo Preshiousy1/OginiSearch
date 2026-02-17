@@ -66,6 +66,24 @@ export class TermPostingsRepository {
   }
 
   /**
+   * Return distinct term keys for an index whose value part (after index:field:) starts with valuePrefix.
+   * Term format is "indexName:field:value". Use this for wildcard prefix to avoid loading all terms.
+   */
+  async findTermKeysByIndexAndValuePrefix(
+    indexName: string,
+    valuePrefix: string,
+  ): Promise<string[]> {
+    if (!valuePrefix) {
+      return this.termPostingsModel.distinct('term', { indexName }).exec();
+    }
+    const escaped = valuePrefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const regex = new RegExp(
+      `^${indexName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}:[^:]+:${escaped}`,
+    );
+    return this.termPostingsModel.distinct('term', { indexName, term: { $regex: regex } }).exec();
+  }
+
+  /**
    * Create: single doc if postings <= MAX_POSTINGS_PER_CHUNK, else chunked via update.
    */
   async create(
@@ -233,6 +251,137 @@ export class TermPostingsRepository {
     }));
     if (bulkOps.length > 0) {
       await this.termPostingsModel.bulkWrite(bulkOps);
+    }
+  }
+
+  /**
+   * Atomically merge new postings into the term's chunks using $set dot notation.
+   * This NEVER reads existing data first, so a MongoDB read failure cannot cause
+   * the existing posting list to be overwritten (the root cause of data loss).
+   *
+   * Strategy:
+   *  1. Find the last chunk and its current size.
+   *  2. If it has room, $set entries there; else create the next chunk.
+   *  3. After writing, check if the target chunk exceeds MAX and rebalance.
+   */
+  async atomicMerge(
+    indexAwareTerm: string,
+    newPostings: Record<string, PostingEntry>,
+  ): Promise<void> {
+    const indexName = this.extractIndexFromTerm(indexAwareTerm);
+    const newEntries = Object.entries(newPostings);
+    if (newEntries.length === 0) return;
+
+    // 1. Find the last chunk to decide where to write
+    let targetChunkIndex = 0;
+    try {
+      const lastChunk = await this.termPostingsModel
+        .findOne({ indexName, term: indexAwareTerm })
+        .sort({ chunkIndex: -1 })
+        .select({ chunkIndex: 1, documentCount: 1 })
+        .lean()
+        .exec();
+
+      if (lastChunk) {
+        const currentCount = lastChunk.documentCount || 0;
+        // If adding these entries would overflow the chunk, start a new one
+        if (currentCount + newEntries.length > MAX_POSTINGS_PER_CHUNK) {
+          targetChunkIndex = lastChunk.chunkIndex + 1;
+        } else {
+          targetChunkIndex = lastChunk.chunkIndex;
+        }
+      }
+    } catch {
+      // If we can't determine the target chunk, default to 0.
+      // $set with upsert will create chunk 0 if it doesn't exist,
+      // or ADD entries to existing chunk 0 (never overwrites existing entries).
+      targetChunkIndex = 0;
+    }
+
+    // 2. Build $set operations using dot notation (postings.<docId> = entry)
+    //    This atomically adds/updates individual entries without replacing the whole postings object.
+    const setOps: Record<string, any> = { lastUpdated: new Date() };
+    for (const [docId, entry] of newEntries) {
+      setOps[`postings.${docId}`] = entry;
+    }
+
+    const result = await this.termPostingsModel
+      .findOneAndUpdate(
+        { indexName, term: indexAwareTerm, chunkIndex: targetChunkIndex },
+        { $set: setOps },
+        { upsert: true, new: true },
+      )
+      .exec();
+
+    // 3. Update documentCount to reflect actual size
+    const actualCount = result ? Object.keys(result.postings || {}).length : 0;
+    if (actualCount !== result?.documentCount) {
+      await this.termPostingsModel
+        .updateOne({ _id: result._id }, { $set: { documentCount: actualCount } })
+        .exec();
+    }
+
+    // 4. If the chunk grew beyond MAX, rebalance (split into properly sized chunks)
+    if (actualCount > MAX_POSTINGS_PER_CHUNK) {
+      await this.rebalanceChunks(indexAwareTerm, indexName);
+    }
+  }
+
+  /**
+   * Rebalance chunks for a term: read all entries, re-split into MAX_POSTINGS_PER_CHUNK sized chunks.
+   * If this fails, the worst case is a temporarily oversized chunk — no data loss.
+   */
+  private async rebalanceChunks(indexAwareTerm: string, indexName: string): Promise<void> {
+    try {
+      // Read all chunks and merge entries
+      const allChunks = await this.termPostingsModel
+        .find({ indexName, term: indexAwareTerm })
+        .sort({ chunkIndex: 1 })
+        .lean()
+        .exec();
+
+      const allPostings: Record<string, PostingEntry> = {};
+      for (const chunk of allChunks) {
+        for (const [docId, entry] of Object.entries(chunk.postings || {})) {
+          allPostings[docId] = entry as PostingEntry;
+        }
+      }
+
+      // Split into properly sized chunks
+      const entries = Object.entries(allPostings);
+      const newChunks: Record<string, PostingEntry>[] = [];
+      for (let i = 0; i < entries.length; i += MAX_POSTINGS_PER_CHUNK) {
+        newChunks.push(Object.fromEntries(entries.slice(i, i + MAX_POSTINGS_PER_CHUNK)));
+      }
+
+      // Write new chunks
+      const now = new Date();
+      for (let c = 0; c < newChunks.length; c++) {
+        const postingsChunk = newChunks[c];
+        await this.termPostingsModel
+          .findOneAndUpdate(
+            { indexName, term: indexAwareTerm, chunkIndex: c },
+            {
+              postings: postingsChunk,
+              documentCount: Object.keys(postingsChunk).length,
+              lastUpdated: now,
+            },
+            { upsert: true },
+          )
+          .exec();
+      }
+
+      // Delete excess old chunks
+      await this.termPostingsModel
+        .deleteMany({
+          indexName,
+          term: indexAwareTerm,
+          chunkIndex: { $gte: newChunks.length },
+        })
+        .exec();
+    } catch {
+      // Rebalance failure is non-fatal: chunk is just oversized temporarily.
+      // Next atomicMerge will try again when it detects overflow.
     }
   }
 
